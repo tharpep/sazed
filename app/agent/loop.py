@@ -120,3 +120,18 @@ async def run_turn(session_id: str | None, user_message: str) -> tuple[str, str]
 
     _sessions[session_id] = messages
     return session_id, _extract_text(final_content)
+
+
+# ---------------------------------------------------------------------------
+# Session accessors — replaced with asyncpg queries in Phase 3.3
+# ---------------------------------------------------------------------------
+
+def get_session(session_id: str) -> list[dict[str, Any]] | None:
+    return _sessions.get(session_id)
+
+
+def list_sessions() -> list[dict[str, Any]]:
+    return [
+        {"session_id": sid, "message_count": len(msgs)}
+        for sid, msgs in _sessions.items()
+    ]
