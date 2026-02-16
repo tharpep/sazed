@@ -3,6 +3,8 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from app.agent.loop import run_turn
+
 router = APIRouter()
 
 
@@ -18,4 +20,8 @@ class ChatResponse(BaseModel):
 
 @router.post("", response_model=ChatResponse)
 async def chat(body: ChatRequest):
-    raise HTTPException(501, "Not implemented yet")
+    if not body.message.strip():
+        raise HTTPException(400, "Message cannot be empty")
+
+    session_id, response_text = await run_turn(body.session_id, body.message)
+    return ChatResponse(session_id=session_id, response=response_text)
