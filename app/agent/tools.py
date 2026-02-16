@@ -466,11 +466,14 @@ async def execute_tool(name: str, args: dict[str, Any]) -> str:
 async def _execute_internal(name: str, args: dict[str, Any]) -> str:
     """Handle internal tools that don't call the gateway."""
     if name == "memory_update":
-        # Placeholder until agent_memory DB table is wired in (Phase 3.4).
-        # The agent loop will swap this for a real DB upsert.
-        fact_type = args.get("fact_type")
-        key = args.get("key")
-        value = args.get("value")
-        return f"Noted: [{fact_type}] {key} = {value}"
+        from app.agent.memory import upsert_fact
+        fact = upsert_fact(
+            fact_type=args["fact_type"],
+            key=args["key"],
+            value=args["value"],
+            confidence=1.0,
+            source="user_explicit",
+        )
+        return f"Remembered: [{fact['fact_type']}] {fact['key']} = {fact['value']}"
 
     return f"Unknown internal tool: {name}"

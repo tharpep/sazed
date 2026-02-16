@@ -6,6 +6,7 @@ from typing import Any
 
 import anthropic
 
+from app.agent.memory import format_for_prompt, load_memory
 from app.agent.tools import execute_tool, get_tool_schemas
 from app.config import settings
 
@@ -26,6 +27,7 @@ def _get_client() -> anthropic.AsyncAnthropic:
 
 def _build_system_prompt() -> str:
     today = date.today().strftime("%A, %B %d, %Y")
+    memory_section = format_for_prompt(load_memory())
     return f"""You are Sazed, a personal AI assistant.
 Today is {today}.
 
@@ -36,7 +38,7 @@ Today is {today}.
 - If a tool call fails, say so clearly and suggest what to try instead.
 
 ## Known facts about the user
-(None yet — will be populated from agent_memory in Phase 3.4)
+{memory_section}
 """
 
 
