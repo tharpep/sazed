@@ -1,9 +1,19 @@
-"""Minimal CLI for chatting with Sazed locally."""
+"""Minimal CLI for chatting with Sazed locally.
 
+Expects the Sazed backend running on BASE (default http://localhost:8000).
+Start it with: poetry run uvicorn app.main:app --reload
+"""
+
+import os
 import httpx
 
-BASE = "http://localhost:8000"
+BASE = os.environ.get("SAZED_URL", "http://localhost:8000")
+API_KEY = os.environ.get("API_KEY", "")
 session_id = None
+
+headers = {}
+if API_KEY:
+    headers["X-API-Key"] = API_KEY
 
 print("Sazed — ctrl+c to exit")
 print(f"Connecting to {BASE}\n")
@@ -22,6 +32,7 @@ while True:
         resp = httpx.post(
             f"{BASE}/chat",
             json={"session_id": session_id, "message": msg},
+            headers=headers,
             timeout=60.0,
         )
         resp.raise_for_status()

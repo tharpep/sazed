@@ -1,15 +1,12 @@
 """Tool registry — Anthropic tool schemas and executor for all gateway endpoints."""
 
 import json
-import logging
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 
 from app.config import settings
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -436,7 +433,6 @@ async def execute_tool(name: str, args: dict[str, Any]) -> str:
 
     url = f"{settings.gateway_url}{endpoint}"
     headers = {"X-API-Key": settings.gateway_api_key}
-    logger.debug(f"tool {name}: {tool.method} {endpoint} args={remaining}")
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -450,18 +446,14 @@ async def execute_tool(name: str, args: dict[str, Any]) -> str:
             elif tool.method == "DELETE":
                 resp = await client.delete(url, headers=headers)
                 if resp.status_code == 204:
-                    logger.debug(f"tool {name}: 204 No Content")
                     return "Deleted successfully."
             else:
                 return f"Unsupported method: {tool.method}"
     except httpx.TimeoutException:
-        logger.debug(f"tool {name}: timed out")
         return "Request timed out."
     except httpx.RequestError as e:
-        logger.debug(f"tool {name}: request error — {e}")
         return f"Request error: {e}"
 
-    logger.debug(f"tool {name}: status={resp.status_code}, {len(resp.text)} chars")
     if not resp.is_success:
         return f"Error {resp.status_code}: {resp.text}"
 
