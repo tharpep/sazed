@@ -1,5 +1,6 @@
 """Sazed — personal AI agent entry point."""
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
@@ -10,9 +11,20 @@ from app.db import close_pool, init_pool
 from app.dependencies import verify_api_key
 from app.routers import chat, conversations, health, memory
 
+logger = logging.getLogger(__name__)
+
+
+def _configure_logging() -> None:
+    level = logging.DEBUG if settings.debug else logging.INFO
+    logging.basicConfig(level=level, force=True)
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    if settings.debug:
+        logger.debug("DEBUG logging enabled — full agent flow output active")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _configure_logging()
     await init_pool()
     yield
     await close_pool()

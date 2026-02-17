@@ -2,12 +2,15 @@
 
 import asyncio
 import json
+import logging
 from typing import Any
 
 import anthropic
 
 from app.agent.memory import load_memory, upsert_fact
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 _client: anthropic.AsyncAnthropic | None = None
 
@@ -133,12 +136,17 @@ async def process_session(
     if not messages:
         return {"session_id": session_id, "facts_extracted": 0, "summary": ""}
 
+    logger.debug(f"process_session {session_id}: {len(messages)} messages to process")
     existing_facts = await load_memory()
 
     # Run both Haiku calls in parallel
     raw_facts, summary = await asyncio.gather(
         _extract_facts(messages, existing_facts),
         _summarize(messages),
+    )
+    logger.debug(
+        f"process_session {session_id}: extracted {len(raw_facts)} raw fact(s), "
+        f"summary={len(summary)} chars"
     )
 
     # Upsert extracted facts — only overwrites if confidence >= existing

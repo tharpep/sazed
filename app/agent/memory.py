@@ -1,9 +1,12 @@
 """Structured memory — agent_memory store and helpers."""
 
+import logging
 from collections import defaultdict
 from typing import Any
 
 from app.db import get_pool
+
+logger = logging.getLogger(__name__)
 
 
 async def load_memory() -> list[dict[str, Any]]:
@@ -13,6 +16,7 @@ async def load_memory() -> list[dict[str, Any]]:
         "SELECT id, fact_type, key, value, confidence, source, created_at, updated_at "
         "FROM agent_memory ORDER BY updated_at DESC"
     )
+    logger.debug(f"load_memory: {len(rows)} fact(s)")
     return [dict(row) for row in rows]
 
 
@@ -28,6 +32,7 @@ async def upsert_fact(
     Only overwrites an existing fact's value if new confidence >= existing confidence.
     """
     pool = get_pool()
+    logger.debug(f"upsert_fact: [{fact_type}] {key}={value!r} confidence={confidence} source={source}")
     row = await pool.fetchrow(
         """
         INSERT INTO agent_memory (fact_type, key, value, confidence, source)

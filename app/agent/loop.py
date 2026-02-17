@@ -1,6 +1,8 @@
 """Agent loop — core reasoning cycle."""
 
 import json
+import logging
+import time
 import uuid
 from datetime import date
 from typing import Any
@@ -11,6 +13,8 @@ from app.agent.memory import format_for_prompt, load_memory
 from app.agent.tools import execute_tool, get_tool_schemas
 from app.config import settings
 from app.db import get_pool
+
+logger = logging.getLogger(__name__)
 
 MAX_TURNS = 5
 
@@ -102,23 +106,32 @@ async def run_turn(session_id: str | None, user_message: str) -> tuple[str, str]
     messages: list[dict[str, Any]] = [
         {"role": r["role"], "content": json.loads(r["content"])} for r in rows
     ]
+    logger.debug(f"session {session_id}: loaded {len(messages)} prior messages")
 
     # Append and persist the new user message
     messages.append({"role": "user", "content": user_message})
     await _save_message(pool, sid, "user", user_message)
+    logger.debug(f"session {session_id}: user message='{user_message[:120]}'")
 
     client = _get_client()
     system = await _build_system_prompt()
     model = _select_model(user_message, turn=0)
+    logger.debug(f"session {session_id}: selected model={model}")
     final_content: list[dict[str, Any]] = []
 
     for turn in range(MAX_TURNS):
+        t0 = time.perf_counter()
+        logger.debug(f"  turn {turn}: calling {model} with {len(messages)} messages in context")
         response = await client.messages.create(
             model=model,
             system=system,
             messages=messages,
             tools=get_tool_schemas(),
             max_tokens=4096,
+        )
+        logger.debug(
+            f"  turn {turn}: stop_reason={response.stop_reason} "
+            f"in {time.perf_counter() - t0:.3f}s"
         )
 
         content_dicts = _content_to_dicts(response.content)
@@ -130,10 +143,17 @@ async def run_turn(session_id: str | None, user_message: str) -> tuple[str, str]
             break
 
         if response.stop_reason == "tool_use":
+            tool_names = [b.name for b in response.content if b.type == "tool_use"]
+            logger.debug(f"  turn {turn}: tool calls → {tool_names}")
             tool_results = []
             for block in response.content:
                 if block.type == "tool_use":
+                    t1 = time.perf_counter()
                     result = await execute_tool(block.name, block.input)
+                    logger.debug(
+                        f"  turn {turn}: {block.name} completed in {time.perf_counter() - t1:.3f}s, "
+                        f"{len(result)} chars"
+                    )
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
@@ -143,6 +163,7 @@ async def run_turn(session_id: str | None, user_message: str) -> tuple[str, str]
             await _save_message(pool, sid, "user", tool_results)
         else:
             # Unexpected stop reason — bail out
+            logger.debug(f"  turn {turn}: unexpected stop_reason, bailing out")
             break
 
     # Update session stats
@@ -156,7 +177,9 @@ async def run_turn(session_id: str | None, user_message: str) -> tuple[str, str]
         sid,
     )
 
-    return session_id, _extract_text(final_content)
+    response_text = _extract_text(final_content)
+    logger.debug(f"session {session_id}: final response='{response_text[:120]}'")
+    return session_id, response_text
 
 
 async def get_session(session_id: str) -> list[dict[str, Any]] | None:
