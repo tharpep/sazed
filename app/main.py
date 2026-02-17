@@ -1,16 +1,28 @@
 """Sazed — personal AI agent entry point."""
 
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.db import close_pool, init_pool
 from app.dependencies import verify_api_key
 from app.routers import chat, conversations, health, memory
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_pool()
+    yield
+    await close_pool()
+
 
 app = FastAPI(
     title="Sazed",
     description="Personal AI agent",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
