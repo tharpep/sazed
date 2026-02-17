@@ -467,7 +467,7 @@ async def _execute_internal(name: str, args: dict[str, Any]) -> str:
     """Handle internal tools that don't call the gateway."""
     if name == "memory_update":
         from app.agent.memory import upsert_fact
-        fact = upsert_fact(
+        fact = await upsert_fact(
             fact_type=args["fact_type"],
             key=args["key"],
             value=args["value"],
