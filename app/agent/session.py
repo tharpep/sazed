@@ -133,7 +133,7 @@ async def process_session(
     if not messages:
         return {"session_id": session_id, "facts_extracted": 0, "summary": ""}
 
-    existing_facts = load_memory()
+    existing_facts = await load_memory()
 
     # Run both Haiku calls in parallel
     raw_facts, summary = await asyncio.gather(
@@ -145,7 +145,7 @@ async def process_session(
     upserted = []
     for fact in raw_facts:
         try:
-            result = upsert_fact(
+            result = await upsert_fact(
                 fact_type=fact["fact_type"],
                 key=fact["key"],
                 value=fact["value"],

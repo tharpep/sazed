@@ -10,12 +10,12 @@ router = APIRouter()
 
 @router.get("")
 async def list_conversations():
-    return {"conversations": list_sessions()}
+    return {"conversations": await list_sessions()}
 
 
 @router.get("/{session_id}")
 async def get_conversation(session_id: str):
-    messages = get_session(session_id)
+    messages = await get_session(session_id)
     if messages is None:
         raise HTTPException(404, "Session not found")
     return {"session_id": session_id, "messages": messages, "message_count": len(messages)}
@@ -23,7 +23,7 @@ async def get_conversation(session_id: str):
 
 @router.post("/{session_id}/process")
 async def trigger_process_session(session_id: str):
-    messages = get_session(session_id)
+    messages = await get_session(session_id)
     if messages is None:
         raise HTTPException(404, "Session not found")
     if not messages:

@@ -1,21 +1,22 @@
 """Structured memory — agent_memory store and helpers."""
 
-import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
 from typing import Any
 
-# In-memory store keyed by (fact_type, key) — mirrors the UNIQUE(fact_type, key)
-# constraint from the DB schema. Replaced with asyncpg reads/writes in Phase 3.3.
-_store: dict[tuple[str, str], dict[str, Any]] = {}
+from app.db import get_pool
 
 
-def load_memory() -> list[dict[str, Any]]:
+async def load_memory() -> list[dict[str, Any]]:
     """Return all facts sorted by most recently updated."""
-    return sorted(_store.values(), key=lambda f: f["updated_at"], reverse=True)
+    pool = get_pool()
+    rows = await pool.fetch(
+        "SELECT id, fact_type, key, value, confidence, source, created_at, updated_at "
+        "FROM agent_memory ORDER BY updated_at DESC"
+    )
+    return [dict(row) for row in rows]
 
 
-def upsert_fact(
+async def upsert_fact(
     fact_type: str,
     key: str,
     value: str,
@@ -24,41 +25,37 @@ def upsert_fact(
 ) -> dict[str, Any]:
     """
     Insert or update a fact by (fact_type, key).
-    Only overwrites an existing fact if new confidence >= existing confidence.
+    Only overwrites an existing fact's value if new confidence >= existing confidence.
     """
-    existing = _store.get((fact_type, key))
-    now = datetime.now(timezone.utc).isoformat()
-
-    if existing is None:
-        fact: dict[str, Any] = {
-            "id": str(uuid.uuid4()),
-            "fact_type": fact_type,
-            "key": key,
-            "value": value,
-            "confidence": confidence,
-            "source": source,
-            "created_at": now,
-            "updated_at": now,
-        }
-        _store[(fact_type, key)] = fact
-        return fact
-
-    if confidence >= existing["confidence"]:
-        existing["value"] = value
-        existing["confidence"] = confidence
-        existing["source"] = source
-        existing["updated_at"] = now
-
-    return existing
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO agent_memory (fact_type, key, value, confidence, source)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (fact_type, key) DO UPDATE
+            SET value      = CASE WHEN EXCLUDED.confidence >= agent_memory.confidence
+                                  THEN EXCLUDED.value      ELSE agent_memory.value      END,
+                confidence = CASE WHEN EXCLUDED.confidence >= agent_memory.confidence
+                                  THEN EXCLUDED.confidence ELSE agent_memory.confidence END,
+                source     = CASE WHEN EXCLUDED.confidence >= agent_memory.confidence
+                                  THEN EXCLUDED.source     ELSE agent_memory.source     END,
+                updated_at = CASE WHEN EXCLUDED.confidence >= agent_memory.confidence
+                                  THEN NOW()               ELSE agent_memory.updated_at END
+        RETURNING id, fact_type, key, value, confidence, source, created_at, updated_at
+        """,
+        fact_type, key, value, confidence, source,
+    )
+    return dict(row)
 
 
-def delete_fact(memory_id: str) -> bool:
+async def delete_fact(memory_id: str) -> bool:
     """Delete a fact by UUID. Returns False if not found."""
-    key = next((k for k, v in _store.items() if v["id"] == memory_id), None)
-    if key is None:
-        return False
-    del _store[key]
-    return True
+    import uuid
+    pool = get_pool()
+    result = await pool.execute(
+        "DELETE FROM agent_memory WHERE id = $1", uuid.UUID(memory_id)
+    )
+    return result == "DELETE 1"
 
 
 def format_for_prompt(facts: list[dict[str, Any]]) -> str:

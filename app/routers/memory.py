@@ -17,13 +17,13 @@ class UpsertMemoryRequest(BaseModel):
 
 @router.get("")
 async def list_memory():
-    facts = load_memory()
+    facts = await load_memory()
     return {"facts": facts, "count": len(facts)}
 
 
 @router.put("")
 async def upsert_memory(body: UpsertMemoryRequest):
-    return upsert_fact(
+    return await upsert_fact(
         fact_type=body.fact_type,
         key=body.key,
         value=body.value,
@@ -34,6 +34,6 @@ async def upsert_memory(body: UpsertMemoryRequest):
 
 @router.delete("/{memory_id}")
 async def delete_memory(memory_id: str):
-    if not delete_fact(memory_id):
+    if not await delete_fact(memory_id):
         raise HTTPException(404, "Fact not found")
     return {"deleted": memory_id}
