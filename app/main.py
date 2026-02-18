@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.db import close_pool, init_pool
 from app.dependencies import verify_api_key
-from app.routers import chat, conversations, health, memory
+from app.routers import chat, conversations, health, kb, memory
 
 logger = logging.getLogger(__name__)
 
@@ -58,4 +58,7 @@ app.include_router(
 )
 app.include_router(
     memory.router, prefix="/memory", tags=["memory"], dependencies=[Depends(verify_api_key)]
+)
+app.include_router(
+    kb.router, prefix="/kb", tags=["kb"], dependencies=[Depends(verify_api_key)]
 )
