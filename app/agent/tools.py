@@ -24,13 +24,6 @@ TOOLS: list[ToolDef] = [
     # Calendar
     # -------------------------------------------------------------------------
     ToolDef(
-        name="get_today",
-        description="Get today's calendar events.",
-        input_schema={"type": "object", "properties": {}},
-        method="GET",
-        endpoint="/calendar/today",
-    ),
-    ToolDef(
         name="get_events",
         description="Get calendar events for the next N days.",
         input_schema={
@@ -134,26 +127,32 @@ TOOLS: list[ToolDef] = [
     # Tasks
     # -------------------------------------------------------------------------
     ToolDef(
-        name="get_upcoming_tasks",
-        description="Get upcoming tasks from all task lists (General, Purdue, Mesh).",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "days": {
-                    "type": "integer",
-                    "description": "Days to look ahead (1–30). Defaults to 7.",
-                },
-            },
-        },
-        method="GET",
-        endpoint="/tasks/upcoming",
-    ),
-    ToolDef(
         name="get_task_lists",
-        description="Get all task lists with their IDs. Call this before create_task or update_task to find the list_id.",
+        description="Get all task lists with their IDs and names.",
         input_schema={"type": "object", "properties": {}},
         method="GET",
         endpoint="/tasks/lists",
+    ),
+    ToolDef(
+        name="get_tasks",
+        description="Get tasks from a specific task list. Returns all non-completed tasks by default.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "list_id": {
+                    "type": "string",
+                    "description": "The task list ID. Get available lists with get_task_lists.",
+                },
+                "include_completed": {
+                    "type": "boolean",
+                    "description": "Include completed tasks. Defaults to false.",
+                },
+            },
+            "required": ["list_id"],
+        },
+        method="GET",
+        endpoint="/tasks/lists/{list_id}/tasks",
+        path_params=["list_id"],
     ),
     ToolDef(
         name="create_task",
@@ -189,7 +188,7 @@ TOOLS: list[ToolDef] = [
                 "status": {
                     "type": "string",
                     "enum": ["needsAction", "completed"],
-                    "description": "Task completion status.",
+                    "description": "Task completion status. Use 'completed' to mark done, 'needsAction' to reopen.",
                 },
             },
             "required": ["list_id", "task_id"],
@@ -218,26 +217,19 @@ TOOLS: list[ToolDef] = [
     # Email
     # -------------------------------------------------------------------------
     ToolDef(
-        name="get_recent_emails",
-        description="Get recent emails from the primary inbox.",
+        name="list_emails",
+        description="List emails from the primary inbox. Filter by unread status and/or recency.",
         input_schema={
             "type": "object",
             "properties": {
+                "unread_only": {
+                    "type": "boolean",
+                    "description": "If true, return only unread emails. Defaults to false.",
+                },
                 "hours": {
                     "type": "integer",
-                    "description": "How many hours back to look (1–168). Defaults to 24.",
+                    "description": "Limit to emails received within the last N hours (1–168). Omit for no time filter.",
                 },
-            },
-        },
-        method="GET",
-        endpoint="/email/recent",
-    ),
-    ToolDef(
-        name="get_unread_emails",
-        description="Get unread emails from the primary inbox.",
-        input_schema={
-            "type": "object",
-            "properties": {
                 "max_results": {
                     "type": "integer",
                     "description": "Max emails to return (1–50). Defaults to 20.",
@@ -245,7 +237,7 @@ TOOLS: list[ToolDef] = [
             },
         },
         method="GET",
-        endpoint="/email/unread",
+        endpoint="/email",
     ),
     ToolDef(
         name="search_emails",
@@ -280,7 +272,7 @@ TOOLS: list[ToolDef] = [
     ),
     ToolDef(
         name="draft_email",
-        description="Save an email as a draft in Gmail.",
+        description="Save an email as a draft in Gmail. Does not send — user must send from Gmail.",
         input_schema={
             "type": "object",
             "properties": {
