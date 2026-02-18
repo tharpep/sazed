@@ -338,16 +338,14 @@ TOOLS: list[ToolDef] = [
                     "items": {
                         "type": "string",
                         "enum": [
-                            "school",
-                            "work",
-                            "personal",
-                            "medical",
+                            "general",
                             "projects",
+                            "purdue",
+                            "career",
                             "reference",
-                            "conversations",
                         ],
                     },
-                    "description": "Limit search to specific categories. Omit to search all.",
+                    "description": "Limit search to specific KB subfolder categories. Omit to search all.",
                 },
                 "top_k": {
                     "type": "integer",

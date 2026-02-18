@@ -10,9 +10,9 @@ Part of a larger personal AI ecosystem — see `api-gateway` and `MY-AI` repos.
 
 - **FastAPI** (Python 3.11+) — REST API
 - **Anthropic SDK** — agent loop with tool_use (Haiku + Sonnet)
-- **asyncpg** — Postgres session/memory storage *(wired in Phase 3.3 — in-memory for now)*
+- **asyncpg** — Postgres session/memory storage (PostgreSQL via Cloud SQL)
 - **Poetry** — dependency management
-- **Docker** → GCP Cloud Run *(not deployed yet)*
+- **Docker** → GCP Cloud Run
 
 ---
 
@@ -32,7 +32,7 @@ GATEWAY_API_KEY=your-gateway-api-key
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Leave `API_KEY` and `DATABASE_URL` empty for local dev. Auth is disabled when `API_KEY` is unset.
+Leave `API_KEY` empty for local dev (auth is disabled when unset). `DATABASE_URL` is required for the agent to run.
 
 ---
 
@@ -129,6 +129,6 @@ ruff format app/        # format
 | Agent loop | ✅ Done |
 | Structured memory | ✅ Done |
 | Session processing | ✅ Done |
-| DB wiring (asyncpg) | ⬜ Pending Cloud SQL setup |
-| KB integration | ⬜ Pending MY-AI deploy |
-| Deploy to Cloud Run | ⬜ Pending DB |
+| DB wiring (asyncpg) | ✅ Done |
+| KB integration | ✅ Done |
+| Deploy to Cloud Run | ⬜ Pending |
