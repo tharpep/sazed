@@ -53,7 +53,8 @@ API docs available at `http://localhost:8000/docs`.
 ## Architecture
 
 ```
-POST /chat
+POST /chat          — blocking, returns full JSON response
+POST /chat/stream   — SSE stream, tokens arrive in real time
     │
     ▼
 Agent loop (loop.py)
@@ -98,14 +99,16 @@ chat.py                  # Local CLI for testing
 
 All tools call the api-gateway. One base URL, one API key.
 
+**Runtime registry** (with descriptions and parameters) is available at `GET /tools` once the server is running. It also appears in the Swagger UI at `/docs`.
+
 | Category | Tools |
 |----------|-------|
-| Calendar | get_today, get_events, check_availability, create_event, update_event, delete_event |
-| Tasks | get_upcoming_tasks, get_task_lists, create_task, update_task, delete_task |
-| Email | get_recent_emails, get_unread_emails, search_emails, get_email, draft_email |
-| Notify | send_notification |
-| KB | search_knowledge_base |
-| Internal | memory_update *(writes directly to agent_memory)* |
+| calendar | get_today, get_events, check_availability, create_event, update_event, delete_event |
+| tasks | get_upcoming_tasks, get_task_lists, create_task, update_task, delete_task |
+| email | get_recent_emails, get_unread_emails, search_emails, get_email, draft_email |
+| notify | send_notification |
+| kb | search_knowledge_base |
+| memory | memory_update *(writes directly to agent_memory — no gateway call)* |
 
 ---
 
