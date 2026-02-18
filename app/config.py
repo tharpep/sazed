@@ -24,8 +24,5 @@ class Settings(BaseSettings):
     # Postgres (Cloud SQL or local)
     database_url: str = ""
 
-    # Logging
-    debug: bool = False
-
 
 settings = Settings()

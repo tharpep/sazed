@@ -104,7 +104,7 @@ All tools call the api-gateway. One base URL, one API key.
 | Tasks | get_upcoming_tasks, get_task_lists, create_task, update_task, delete_task |
 | Email | get_recent_emails, get_unread_emails, search_emails, get_email, draft_email |
 | Notify | send_notification |
-| KB | search_knowledge_base *(stubbed until MY-AI deploys)* |
+| KB | search_knowledge_base |
 | Internal | memory_update *(writes directly to agent_memory)* |
 
 ---

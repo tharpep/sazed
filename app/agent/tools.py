@@ -321,7 +321,7 @@ TOOLS: list[ToolDef] = [
     ),
 
     # -------------------------------------------------------------------------
-    # Knowledge Base (stubbed until MY-AI is deployed)
+    # Knowledge Base (proxied via api-gateway → knowledge-base service)
     # -------------------------------------------------------------------------
     ToolDef(
         name="search_knowledge_base",
