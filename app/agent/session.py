@@ -78,8 +78,21 @@ async def _extract_facts(
     conversation = _format_messages(messages)
     existing = _format_existing_facts(existing_facts)
 
-    prompt = f"""Extract personal facts about the user from this conversation.
-Only extract facts that are explicitly stated or clearly implied.
+    prompt = f"""You are building a persistent memory for a personal AI assistant.
+These facts will be injected into every future conversation so the assistant can be more helpful and personalized over time. Extract only facts that are durable and personally meaningful — things that will still be relevant weeks or months from now.
+
+Extract facts in these categories:
+- Personal info: name, location, occupation, school, timezone
+- Stable preferences: tools, languages, formats, communication style
+- Ongoing projects and long-term goals
+- Standing relationships and regular collaborators
+- Explicit instructions the user wants the assistant to always follow
+
+Do NOT extract:
+- Transient details: current mood, today's plans, one-time requests, deadlines that will pass
+- Facts that only make sense within this specific conversation
+- Anything not explicitly stated or clearly implied by the user
+
 Do not duplicate facts already in the existing list unless the value has changed.
 
 Return a JSON array of objects with these fields:
