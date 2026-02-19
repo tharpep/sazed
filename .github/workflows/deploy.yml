@@ -25,7 +25,6 @@ env:
 
 jobs:
   deploy:
-    if: false  # disabled — enable when ready to deploy agent
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,4 +53,4 @@ jobs:
             --region=${{ env.REGION }} \
             --platform=managed \
             --allow-unauthenticated \
-            --set-secrets=DATABASE_URL=database-url:latest,GATEWAY_URL=api-gateway-url:latest,GATEWAY_API_KEY=api-key:latest
+            --set-secrets=DATABASE_URL=database-url:latest,GATEWAY_URL=api-gateway-url:latest,GATEWAY_API_KEY=api-key:latest,API_KEY=api-key:latest,ANTHROPIC_API_KEY=anthropic-api-key:latest
