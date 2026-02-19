@@ -97,7 +97,7 @@ Conversation:
 
     response = await _get_client().messages.create(
         model=settings.haiku_model,
-        max_tokens=512,
+        max_tokens=768,
         messages=[{"role": "user", "content": prompt}],
     )
     return response.content[0].text.strip()

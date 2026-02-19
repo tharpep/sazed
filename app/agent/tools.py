@@ -585,7 +585,7 @@ _tool_index: dict[str, ToolDef] = {t.name: t for t in TOOLS}
 
 def get_tool_schemas() -> list[dict]:
     """Return tool schemas in the format expected by the Anthropic messages API."""
-    return [
+    schemas = [
         {
             "name": t.name,
             "description": t.description,
@@ -593,6 +593,8 @@ def get_tool_schemas() -> list[dict]:
         }
         for t in TOOLS
     ]
+    schemas[-1]["cache_control"] = {"type": "ephemeral"}
+    return schemas
 
 
 async def execute_tool(name: str, args: dict[str, Any]) -> str:
