@@ -4,7 +4,7 @@ import json
 import logging
 import time
 import uuid
-from datetime import date
+from datetime import datetime
 from typing import Any, AsyncIterator
 
 import anthropic
@@ -30,10 +30,12 @@ def _get_client() -> anthropic.AsyncAnthropic:
 
 
 async def _build_system_prompt() -> str:
-    today = date.today().strftime("%A, %B %d, %Y")
+    now = datetime.now()
+    today = now.strftime("%A, %B %d, %Y")
+    time_of_day = now.strftime("%I:%M %p")
     memory_section = format_for_prompt(await load_memory())
     return f"""You are Sazed, a personal AI assistant.
-Today is {today}.
+Today is {today}, {time_of_day}.
 
 ## Behavior
 - Be direct and concise. No preamble, no filler.
