@@ -351,6 +351,116 @@ TOOLS: list[ToolDef] = [
     ),
 
     # -------------------------------------------------------------------------
+    # Storage (Google Drive)
+    # -------------------------------------------------------------------------
+    ToolDef(
+        name="list_files",
+        description="List files in Google Drive. Filter by folder or search query. Use to find a file ID before reading or modifying it.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "folder_id": {
+                    "type": "string",
+                    "description": "Limit results to a specific Drive folder ID.",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Drive search query, e.g. 'name contains \"resume\"'.",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Max files to return (1–50). Defaults to 20.",
+                },
+            },
+        },
+        method="GET",
+        endpoint="/storage/files",
+    ),
+    ToolDef(
+        name="get_file",
+        description="Fetch the full text content of a Google Drive file by ID. Works with text files, Markdown, CSV, JSON, and Google Docs. Returns an error for binary files.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "file_id": {
+                    "type": "string",
+                    "description": "The Drive file ID.",
+                },
+            },
+            "required": ["file_id"],
+        },
+        method="GET",
+        endpoint="/storage/files/{file_id}/content",
+        path_params=["file_id"],
+    ),
+    ToolDef(
+        name="create_file",
+        description="Create a new text file in Google Drive with the given content.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "File name including extension, e.g. 'meeting-notes.md'.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "File content as plain text.",
+                },
+                "folder_id": {
+                    "type": "string",
+                    "description": "Parent folder ID. Defaults to Drive root if omitted.",
+                },
+                "mime_type": {
+                    "type": "string",
+                    "description": "MIME type, e.g. 'text/plain', 'text/markdown', 'text/csv'. Defaults to text/plain.",
+                },
+            },
+            "required": ["name", "content"],
+        },
+        method="POST",
+        endpoint="/storage/files",
+    ),
+    ToolDef(
+        name="update_file",
+        description="Overwrite the content of an existing Google Drive text file. Replaces the entire file content.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "file_id": {
+                    "type": "string",
+                    "description": "The Drive file ID.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "New file content. Replaces existing content entirely.",
+                },
+            },
+            "required": ["file_id", "content"],
+        },
+        method="PUT",
+        endpoint="/storage/files/{file_id}",
+        path_params=["file_id"],
+    ),
+    ToolDef(
+        name="delete_file",
+        description="Move a Google Drive file to trash.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "file_id": {
+                    "type": "string",
+                    "description": "The Drive file ID.",
+                },
+            },
+            "required": ["file_id"],
+        },
+        method="DELETE",
+        endpoint="/storage/files/{file_id}",
+        path_params=["file_id"],
+    ),
+
+    # -------------------------------------------------------------------------
     # Memory (internal — does not call the gateway)
     # -------------------------------------------------------------------------
     ToolDef(
@@ -433,6 +543,8 @@ async def execute_tool(name: str, args: dict[str, Any]) -> str:
                 resp = await client.post(url, json=remaining, headers=headers)
             elif tool.method == "PATCH":
                 resp = await client.patch(url, json=remaining, headers=headers)
+            elif tool.method == "PUT":
+                resp = await client.put(url, json=remaining, headers=headers)
             elif tool.method == "DELETE":
                 resp = await client.delete(url, headers=headers)
                 if resp.status_code == 204:
