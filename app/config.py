@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     # Anthropic
     anthropic_api_key: str = ""
     haiku_model: str = "claude-haiku-4-5-20251001"
-    sonnet_model: str = "claude-sonnet-4-5-20250929"
+    sonnet_model: str = "claude-sonnet-4-6"
 
     # Postgres (Cloud SQL or local)
     database_url: str = ""
