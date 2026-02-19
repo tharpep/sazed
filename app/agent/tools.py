@@ -388,6 +388,51 @@ TOOLS: list[ToolDef] = [
     ),
 
     # -------------------------------------------------------------------------
+    # Web Search (Tavily)
+    # -------------------------------------------------------------------------
+    ToolDef(
+        name="web_search",
+        description="Search the web for current information. Use when the knowledge base doesn't have the answer or the topic requires up-to-date data.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query.",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Number of results to return (1–10). Defaults to 5.",
+                },
+                "search_depth": {
+                    "type": "string",
+                    "enum": ["basic", "advanced"],
+                    "description": "'basic' is faster, 'advanced' does deeper extraction. Defaults to 'basic'.",
+                },
+            },
+            "required": ["query"],
+        },
+        method="POST",
+        endpoint="/search/web",
+    ),
+    ToolDef(
+        name="fetch_url",
+        description="Fetch and extract the readable text content from a specific URL. Use when you have a URL and need its full content.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "The URL to fetch.",
+                },
+            },
+            "required": ["url"],
+        },
+        method="POST",
+        endpoint="/search/web/fetch",
+    ),
+
+    # -------------------------------------------------------------------------
     # Storage (Google Drive)
     # -------------------------------------------------------------------------
     ToolDef(
