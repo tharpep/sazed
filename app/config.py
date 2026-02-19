@@ -24,5 +24,8 @@ class Settings(BaseSettings):
     # Postgres (Cloud SQL or local)
     database_url: str = ""
 
+    # Feature flags
+    session_summarization: bool = False  # Enable once KB ingest is wired up
+
 
 settings = Settings()

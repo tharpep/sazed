@@ -152,14 +152,17 @@ async def process_session(
     logger.debug(f"process_session {session_id}: {len(messages)} messages to process")
     existing_facts = await load_memory()
 
-    # Run both Haiku calls in parallel
-    raw_facts, summary = await asyncio.gather(
-        _extract_facts(messages, existing_facts),
-        _summarize(messages),
-    )
+    if settings.session_summarization:
+        raw_facts, summary = await asyncio.gather(
+            _extract_facts(messages, existing_facts),
+            _summarize(messages),
+        )
+    else:
+        raw_facts = await _extract_facts(messages, existing_facts)
+        summary = ""
     logger.debug(
         f"process_session {session_id}: extracted {len(raw_facts)} raw fact(s), "
-        f"summary={len(summary)} chars"
+        f"summarization={'on' if settings.session_summarization else 'off'}"
     )
 
     # Upsert extracted facts — only overwrites if confidence >= existing
