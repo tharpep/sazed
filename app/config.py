@@ -8,7 +8,7 @@ class Settings(BaseSettings):
 
     # App
     debug: bool = False
-    allowed_origins: list[str] = ["http://localhost:3000", "http://localhost:3001"]
+    allowed_origins: list[str] = ["https://sazed-frontend.vercel.app", "http://localhost:3000", "http://localhost:3001"]
     # API key (optional): if set, required on all routes except /health
     api_key: str = ""
 
