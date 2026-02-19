@@ -1,0 +1,24 @@
+# Env and secrets (must not be in image)
+.env
+.env.*
+.env.example
+
+# Git and CI
+.git
+.github
+
+# Local dev and caches
+__pycache__
+*.pyc
+.venv
+venv
+*.db
+*.sqlite
+
+# Unneeded for build
+README.md
+development_plan.md
+docs
+chat.py
+.gitignore
+.dockerignore
