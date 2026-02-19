@@ -155,6 +155,43 @@ TOOLS: list[ToolDef] = [
         path_params=["list_id"],
     ),
     ToolDef(
+        name="create_task_list",
+        description="Create a new Google Tasks task list.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Task list name.",
+                },
+            },
+            "required": ["title"],
+        },
+        method="POST",
+        endpoint="/tasks/lists",
+    ),
+    ToolDef(
+        name="rename_task_list",
+        description="Rename an existing task list.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "list_id": {
+                    "type": "string",
+                    "description": "The task list ID.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "New task list name.",
+                },
+            },
+            "required": ["list_id", "title"],
+        },
+        method="PATCH",
+        endpoint="/tasks/lists/{list_id}",
+        path_params=["list_id"],
+    ),
+    ToolDef(
         name="create_task",
         description="Create a new task in a specific list.",
         input_schema={
