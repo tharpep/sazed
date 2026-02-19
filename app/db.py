@@ -13,13 +13,19 @@ _pool: Optional[asyncpg.Pool] = None
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS sessions (
-    id            UUID PRIMARY KEY,
-    created_at    TIMESTAMPTZ DEFAULT NOW(),
-    last_activity TIMESTAMPTZ DEFAULT NOW(),
-    message_count INT DEFAULT 0,
-    processed_at  TIMESTAMPTZ,
-    summary_kb_id UUID
+    id                 UUID PRIMARY KEY,
+    created_at         TIMESTAMPTZ DEFAULT NOW(),
+    last_activity      TIMESTAMPTZ DEFAULT NOW(),
+    message_count      INT DEFAULT 0,
+    processed_at       TIMESTAMPTZ,
+    summary_kb_id      UUID,
+    context_summary    TEXT,
+    summarized_through INT DEFAULT 0
 );
+
+-- Add columns for existing deployments that predate context windowing
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS context_summary TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summarized_through INT DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS messages (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -27,5 +27,8 @@ class Settings(BaseSettings):
     # Feature flags
     session_summarization: bool = False  # Enable once KB ingest is wired up
 
+    # Context window
+    session_window_size: int = 30  # Recent messages to keep verbatim; older messages are compressed
+
 
 settings = Settings()

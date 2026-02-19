@@ -70,6 +70,39 @@ def _parse_json_list(text: str) -> list[dict[str, Any]]:
         return []
 
 
+async def compress_context(
+    overflow_messages: list[dict[str, Any]],
+    existing_summary: str | None,
+) -> str:
+    """Compress overflow messages into a rolling context summary for the session."""
+    conversation = _format_messages(overflow_messages)
+
+    if existing_summary:
+        prompt = f"""Update the following conversation summary to incorporate new messages.
+
+Existing summary:
+{existing_summary}
+
+New messages to incorporate:
+{conversation}
+
+Produce a single updated summary covering everything. Be concise — this will be prepended to future messages as background context."""
+    else:
+        prompt = f"""Summarize the following conversation as background context for a personal AI assistant.
+Focus on key decisions, important information exchanged, and action items.
+Be concise — this summary will be prepended to future messages to maintain context.
+
+Conversation:
+{conversation}"""
+
+    response = await _get_client().messages.create(
+        model=settings.haiku_model,
+        max_tokens=512,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.content[0].text.strip()
+
+
 async def _extract_facts(
     messages: list[dict[str, Any]],
     existing_facts: list[dict[str, Any]],

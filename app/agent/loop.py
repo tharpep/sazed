@@ -10,6 +10,7 @@ from typing import Any, AsyncIterator
 import anthropic
 
 from app.agent.memory import format_for_prompt, load_memory
+from app.agent.session import compress_context
 from app.agent.tools import execute_tool, get_tool_schemas
 from app.config import settings
 from app.db import get_pool
@@ -82,6 +83,49 @@ def _extract_text(content: list[dict[str, Any]]) -> str:
     return "I wasn't able to complete that."
 
 
+async def _apply_context_window(
+    pool, session_id: uuid.UUID, messages: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """
+    If messages exceed the window, compress overflow into a rolling summary and
+    return [summary_pair] + recent messages. Otherwise returns messages unchanged.
+    """
+    window = settings.session_window_size
+    if len(messages) <= window:
+        return messages
+
+    overflow = messages[:-window]
+    recent = messages[-window:]
+
+    row = await pool.fetchrow(
+        "SELECT context_summary, summarized_through FROM sessions WHERE id = $1", session_id
+    )
+    existing_summary = row["context_summary"] if row else None
+    summarized_through = row["summarized_through"] if row else 0
+
+    if len(overflow) > summarized_through:
+        logger.debug(
+            f"  context window: compressing {len(overflow)} overflow messages "
+            f"(previously {summarized_through})"
+        )
+        summary = await compress_context(overflow, existing_summary)
+        await pool.execute(
+            "UPDATE sessions SET context_summary = $1, summarized_through = $2 WHERE id = $3",
+            summary, len(overflow), session_id,
+        )
+    else:
+        summary = existing_summary or ""
+
+    if not summary:
+        return messages
+
+    summary_pair = [
+        {"role": "user", "content": f"[Context from earlier in our conversation]\n{summary}"},
+        {"role": "assistant", "content": "Understood."},
+    ]
+    return summary_pair + recent
+
+
 async def _save_message(pool, session_id: uuid.UUID, role: str, content: Any) -> None:
     """Persist one message row. Content is JSON-encoded to handle both strings and block lists."""
     await pool.execute(
@@ -115,6 +159,9 @@ async def run_turn(session_id: str | None, user_message: str) -> tuple[str, str]
         {"role": r["role"], "content": json.loads(r["content"])} for r in rows
     ]
     logger.debug(f"session {session_id}: loaded {len(messages)} prior messages")
+
+    # Apply context window — compresses overflow into a rolling summary if needed
+    messages = await _apply_context_window(pool, sid, messages)
 
     # Append and persist the new user message
     messages.append({"role": "user", "content": user_message})
@@ -219,6 +266,9 @@ async def run_turn_stream(
     messages: list[dict[str, Any]] = [
         {"role": r["role"], "content": json.loads(r["content"])} for r in rows
     ]
+
+    # Apply context window — compresses overflow into a rolling summary if needed
+    messages = await _apply_context_window(pool, sid, messages)
 
     messages.append({"role": "user", "content": user_message})
     await _save_message(pool, sid, "user", user_message)
