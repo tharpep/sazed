@@ -1,8 +1,10 @@
 """Tool registry — Anthropic tool schemas and executor for all gateway endpoints."""
 
+import ipaddress
 import json
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -597,6 +599,34 @@ def get_tool_schemas() -> list[dict]:
     return schemas
 
 
+_SSRF_BLOCKED_HOSTS = {"localhost", "metadata.google.internal"}
+
+
+def _check_ssrf(url: str) -> str | None:
+    """Return an error string if the URL targets an internal/private resource, else None."""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return "Invalid URL."
+
+    if parsed.scheme not in ("http", "https"):
+        return "Only http and https URLs are allowed."
+
+    host = (parsed.hostname or "").lower()
+
+    if host in _SSRF_BLOCKED_HOSTS:
+        return f"Blocked: '{host}' is not an allowed host."
+
+    try:
+        addr = ipaddress.ip_address(host)
+        if any([addr.is_private, addr.is_loopback, addr.is_link_local, addr.is_reserved]):
+            return "Blocked: private and internal IP addresses are not allowed."
+    except ValueError:
+        pass  # Hostname, not a literal IP — allowed
+
+    return None
+
+
 async def execute_tool(name: str, args: dict[str, Any]) -> str:
     """Dispatch a tool call and return the result as a string for the LLM."""
     tool = _tool_index.get(name)
@@ -605,6 +635,12 @@ async def execute_tool(name: str, args: dict[str, Any]) -> str:
 
     if tool.method == "INTERNAL":
         return await _execute_internal(name, args)
+
+    # SSRF guard — validate any URL argument before forwarding to the gateway
+    if "url" in args:
+        ssrf_err = _check_ssrf(str(args["url"]))
+        if ssrf_err:
+            return f"Blocked: {ssrf_err}"
 
     # Interpolate path params, keeping remaining args for query/body
     endpoint = tool.endpoint
