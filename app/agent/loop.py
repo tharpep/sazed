@@ -52,8 +52,9 @@ Today is {today}.
 """
 
 
-def _select_model(message: str, turn: int) -> str:
-    if turn > 2 or len(message) > 500:
+def _select_model(turn: int) -> str:
+    """Haiku for early turns; escalate to Sonnet if the task is still running by turn 3."""
+    if turn >= 3:
         return settings.sonnet_model
     return settings.haiku_model
 
@@ -122,11 +123,10 @@ async def run_turn(session_id: str | None, user_message: str) -> tuple[str, str]
 
     client = _get_client()
     system = await _build_system_prompt()
-    model = _select_model(user_message, turn=0)
-    logger.debug(f"session {session_id}: selected model={model}")
     final_content: list[dict[str, Any]] = []
 
     for turn in range(MAX_TURNS):
+        model = _select_model(turn)
         t0 = time.perf_counter()
         logger.debug(f"  turn {turn}: calling {model} with {len(messages)} messages in context")
         response = await client.messages.create(
@@ -228,10 +228,9 @@ async def run_turn_stream(
 
     client = _get_client()
     system = await _build_system_prompt()
-    model = _select_model(user_message, turn=0)
-    logger.debug(f"stream session {session_id}: selected model={model}")
 
     for turn in range(MAX_TURNS):
+        model = _select_model(turn)
         t0 = time.perf_counter()
         logger.debug(f"  stream turn {turn}: calling {model} with {len(messages)} messages")
 
