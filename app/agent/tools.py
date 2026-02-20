@@ -512,6 +512,49 @@ TOOLS: list[ToolDef] = [
         endpoint="/storage/files",
     ),
     ToolDef(
+        name="list_folders",
+        description="List Drive folders. Use parent_id to browse into a specific folder, or query to search by name. Use this to find a folder ID before creating files or subfolders inside it.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "parent_id": {
+                    "type": "string",
+                    "description": "Scope results to a specific parent folder ID.",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Drive name filter, e.g. 'name contains \"Projects\"'.",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Max folders to return (1–50). Defaults to 20.",
+                },
+            },
+        },
+        method="GET",
+        endpoint="/storage/folders",
+    ),
+    ToolDef(
+        name="create_folder",
+        description="Create a new folder in Google Drive, optionally nested inside a parent folder.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Folder name.",
+                },
+                "parent_id": {
+                    "type": "string",
+                    "description": "Parent folder ID. Defaults to Drive root if omitted.",
+                },
+            },
+            "required": ["name"],
+        },
+        method="POST",
+        endpoint="/storage/folders",
+    ),
+    ToolDef(
         name="get_file",
         description="Fetch the full text content of a Google Drive file by ID. Works with text files, Markdown, CSV, JSON, Google Docs, and PDFs.",
         input_schema={
