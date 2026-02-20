@@ -2,7 +2,7 @@
 
 Personal AI agent. Orchestrates tools via the api-gateway to answer questions, manage calendar/tasks/email, and maintain persistent memory across conversations.
 
-Part of a larger personal AI ecosystem — see `api-gateway` and `MY-AI` repos.
+Part of a larger personal AI ecosystem — see `api-gateway` and `knowledge-base` repos.
 
 ---
 
