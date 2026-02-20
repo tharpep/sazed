@@ -84,6 +84,16 @@ TOOLS: list[ToolDef] = [
                     "type": "string",
                     "description": "Timezone string, e.g. 'America/New_York'. Defaults to America/New_York.",
                 },
+                "recurrence": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "RRULE strings for recurring events, e.g. ['FREQ=WEEKLY;BYDAY=MO'] for every Monday. Omit for one-time events.",
+                },
+                "reminder_minutes": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Popup reminder times in minutes before the event, e.g. [10, 60] for 10 min and 1 hour before.",
+                },
             },
             "required": ["title", "start", "end"],
         },
@@ -103,6 +113,16 @@ TOOLS: list[ToolDef] = [
                 "location": {"type": "string"},
                 "description": {"type": "string"},
                 "timezone": {"type": "string"},
+                "recurrence": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "RRULE strings to set or update recurrence, e.g. ['FREQ=DAILY']. Pass an empty array to remove recurrence.",
+                },
+                "reminder_minutes": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Popup reminder times in minutes before the event. Replaces existing reminders.",
+                },
             },
             "required": ["event_id"],
         },
@@ -123,6 +143,27 @@ TOOLS: list[ToolDef] = [
         method="DELETE",
         endpoint="/calendar/events/{event_id}",
         path_params=["event_id"],
+    ),
+
+    ToolDef(
+        name="search_events",
+        description="Search calendar events by keyword across all time. Use when you need to find a specific event without knowing its date.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "q": {
+                    "type": "string",
+                    "description": "Keyword to search in event titles, descriptions, and locations.",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Max events to return (1–50). Defaults to 10.",
+                },
+            },
+            "required": ["q"],
+        },
+        method="GET",
+        endpoint="/calendar/events/search",
     ),
 
     # -------------------------------------------------------------------------
@@ -227,7 +268,7 @@ TOOLS: list[ToolDef] = [
                 "status": {
                     "type": "string",
                     "enum": ["needsAction", "completed"],
-                    "description": "Task completion status. Use 'completed' to mark done, 'needsAction' to reopen.",
+                    "description": "Task completion status. Set to 'completed' to mark a task as done, 'needsAction' to reopen it.",
                 },
             },
             "required": ["list_id", "task_id"],
