@@ -705,6 +705,269 @@ TOOLS: list[ToolDef] = [
     ),
 
     # -------------------------------------------------------------------------
+    # GitHub
+    # -------------------------------------------------------------------------
+    ToolDef(
+        name="list_repos",
+        description="List your GitHub repositories. Returns name, language, stars, open issue count, and default branch.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "sort": {
+                    "type": "string",
+                    "enum": ["updated", "created", "pushed", "full_name"],
+                    "description": "Sort order. Defaults to 'updated'.",
+                },
+                "per_page": {
+                    "type": "integer",
+                    "description": "Max repos to return (1–100). Defaults to 30.",
+                },
+            },
+        },
+        method="GET",
+        endpoint="/github/repos",
+    ),
+    ToolDef(
+        name="get_repo",
+        description="Get details for a specific GitHub repository.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner. Defaults to tharpep for personal repos."},
+                "repo": {"type": "string", "description": "Repository name."},
+            },
+            "required": ["owner", "repo"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}",
+        path_params=["owner", "repo"],
+    ),
+    ToolDef(
+        name="list_issues",
+        description="List issues in a GitHub repository. Pull requests are excluded.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner. Use 'tharpep' for personal repos."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "state": {
+                    "type": "string",
+                    "enum": ["open", "closed", "all"],
+                    "description": "Filter by state. Defaults to 'open'.",
+                },
+                "labels": {"type": "string", "description": "Comma-separated label names to filter by."},
+                "per_page": {"type": "integer", "description": "Max issues to return (1–100). Defaults to 20."},
+            },
+            "required": ["owner", "repo"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/issues",
+        path_params=["owner", "repo"],
+    ),
+    ToolDef(
+        name="get_issue",
+        description="Get a specific GitHub issue including its full body and all comments.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "number": {"type": "integer", "description": "Issue number."},
+            },
+            "required": ["owner", "repo", "number"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/issues/{number}",
+        path_params=["owner", "repo", "number"],
+    ),
+    ToolDef(
+        name="create_issue",
+        description="Open a new issue in a GitHub repository.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "title": {"type": "string", "description": "Issue title."},
+                "body": {"type": "string", "description": "Issue body (Markdown supported)."},
+                "labels": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Labels to apply.",
+                },
+            },
+            "required": ["owner", "repo", "title"],
+        },
+        method="POST",
+        endpoint="/github/repos/{owner}/{repo}/issues",
+        path_params=["owner", "repo"],
+    ),
+    ToolDef(
+        name="update_issue",
+        description="Update an existing issue — edit title, body, open/close it, or change labels. Only provide fields to change.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "number": {"type": "integer", "description": "Issue number."},
+                "title": {"type": "string"},
+                "body": {"type": "string"},
+                "state": {
+                    "type": "string",
+                    "enum": ["open", "closed"],
+                    "description": "Set to 'closed' to close the issue, 'open' to reopen it.",
+                },
+                "labels": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Replaces all current labels.",
+                },
+            },
+            "required": ["owner", "repo", "number"],
+        },
+        method="PATCH",
+        endpoint="/github/repos/{owner}/{repo}/issues/{number}",
+        path_params=["owner", "repo", "number"],
+    ),
+    ToolDef(
+        name="add_issue_comment",
+        description="Add a comment to a GitHub issue.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "number": {"type": "integer", "description": "Issue number."},
+                "body": {"type": "string", "description": "Comment text (Markdown supported)."},
+            },
+            "required": ["owner", "repo", "number", "body"],
+        },
+        method="POST",
+        endpoint="/github/repos/{owner}/{repo}/issues/{number}/comments",
+        path_params=["owner", "repo", "number"],
+    ),
+    ToolDef(
+        name="list_prs",
+        description="List pull requests in a GitHub repository.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "state": {
+                    "type": "string",
+                    "enum": ["open", "closed", "all"],
+                    "description": "Filter by state. Defaults to 'open'.",
+                },
+                "per_page": {"type": "integer", "description": "Max PRs to return (1–100). Defaults to 20."},
+            },
+            "required": ["owner", "repo"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/pulls",
+        path_params=["owner", "repo"],
+    ),
+    ToolDef(
+        name="get_pr",
+        description="Get details for a specific pull request including its description and branch info.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "number": {"type": "integer", "description": "PR number."},
+            },
+            "required": ["owner", "repo", "number"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/pulls/{number}",
+        path_params=["owner", "repo", "number"],
+    ),
+    ToolDef(
+        name="add_pr_comment",
+        description="Add a general comment to a pull request.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "number": {"type": "integer", "description": "PR number."},
+                "body": {"type": "string", "description": "Comment text (Markdown supported)."},
+            },
+            "required": ["owner", "repo", "number", "body"],
+        },
+        method="POST",
+        endpoint="/github/repos/{owner}/{repo}/pulls/{number}/comments",
+        path_params=["owner", "repo", "number"],
+    ),
+    ToolDef(
+        name="create_pr",
+        description="Open a new pull request. The head branch must already exist and have commits ahead of the base branch.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "title": {"type": "string", "description": "PR title."},
+                "head": {"type": "string", "description": "Source branch name."},
+                "base": {"type": "string", "description": "Target branch name, e.g. 'main'."},
+                "body": {"type": "string", "description": "PR description (Markdown supported)."},
+                "draft": {"type": "boolean", "description": "Open as a draft PR. Defaults to false."},
+            },
+            "required": ["owner", "repo", "title", "head", "base"],
+        },
+        method="POST",
+        endpoint="/github/repos/{owner}/{repo}/pulls",
+        path_params=["owner", "repo"],
+    ),
+    ToolDef(
+        name="search_issues",
+        description="Search issues and PRs across GitHub. Append 'repo:owner/name' to the query to scope to a specific repo.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "q": {"type": "string", "description": "Search query, e.g. 'bug repo:tharpep/myrepo'."},
+                "per_page": {"type": "integer", "description": "Max results (1–30). Defaults to 10."},
+            },
+            "required": ["q"],
+        },
+        method="GET",
+        endpoint="/github/search/issues",
+    ),
+    ToolDef(
+        name="get_github_file",
+        description="Read a file or list a directory from a GitHub repository. Returns decoded text content for files.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "path": {"type": "string", "description": "File or directory path, e.g. 'src/main.py' or 'src/'."},
+                "ref": {"type": "string", "description": "Branch, tag, or commit SHA. Defaults to the default branch."},
+            },
+            "required": ["owner", "repo", "path"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/contents/{path}",
+        path_params=["owner", "repo", "path"],
+    ),
+    ToolDef(
+        name="search_code",
+        description="Search code across GitHub repositories. Use 'repo:owner/name' to scope to a specific repo. Rate-limited to 30 requests/minute.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "q": {"type": "string", "description": "Search query, e.g. 'addClass repo:tharpep/myrepo'."},
+                "per_page": {"type": "integer", "description": "Max results (1–30). Defaults to 10."},
+            },
+            "required": ["q"],
+        },
+        method="GET",
+        endpoint="/github/search/code",
+    ),
+
+    # -------------------------------------------------------------------------
     # Memory (internal — does not call the gateway)
     # -------------------------------------------------------------------------
     ToolDef(
