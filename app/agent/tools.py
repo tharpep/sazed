@@ -530,7 +530,7 @@ TOOLS: list[ToolDef] = [
     ),
     ToolDef(
         name="create_file",
-        description="Create a new text file in Google Drive with the given content.",
+        description="Create a new file in Google Drive with the given content. Pass mime_type='application/vnd.google-apps.document' to create a native Google Doc.",
         input_schema={
             "type": "object",
             "properties": {
@@ -548,7 +548,7 @@ TOOLS: list[ToolDef] = [
                 },
                 "mime_type": {
                     "type": "string",
-                    "description": "MIME type, e.g. 'text/plain', 'text/markdown', 'text/csv'. Defaults to text/plain.",
+                    "description": "MIME type, e.g. 'text/plain', 'text/markdown', 'text/csv', 'application/vnd.google-apps.document'. Defaults to text/plain.",
                 },
             },
             "required": ["name", "content"],
@@ -575,6 +575,31 @@ TOOLS: list[ToolDef] = [
         },
         method="PUT",
         endpoint="/storage/files/{file_id}",
+        path_params=["file_id"],
+    ),
+    ToolDef(
+        name="append_to_file",
+        description="Append text to an existing Google Drive file or Google Doc without overwriting its current content.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "file_id": {
+                    "type": "string",
+                    "description": "The Drive file ID.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Text to append.",
+                },
+                "separator": {
+                    "type": "string",
+                    "description": "String inserted between existing content and new content. Defaults to two newlines.",
+                },
+            },
+            "required": ["file_id", "content"],
+        },
+        method="POST",
+        endpoint="/storage/files/{file_id}/append",
         path_params=["file_id"],
     ),
     ToolDef(
