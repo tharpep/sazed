@@ -388,6 +388,57 @@ TOOLS: list[ToolDef] = [
         method="POST",
         endpoint="/kb/search",
     ),
+    # KB write workflow: use create_file to place a file in the correct Drive
+    # KB subfolder, then call sync_kb to index it. The KB is Drive-backed so
+    # sync is the only write path — direct ingest would be wiped on next sync.
+    #
+    # Drive KB subfolder IDs per category are not yet configured. Use list_files
+    # with a folder search to locate the right subfolder before creating a file.
+    # TODO: expose KB_FOLDER_IDS as an env var / config so the agent can look
+    #       them up without a list_files round-trip each time.
+    ToolDef(
+        name="list_kb_sources",
+        description=(
+            "List all documents currently indexed in the knowledge base. "
+            "Returns each source's file_id, filename, category, chunk count, and sync status. "
+            "Use file_id with delete_kb_source to remove a specific entry."
+        ),
+        input_schema={"type": "object", "properties": {}},
+        method="GET",
+        endpoint="/kb/sources",
+    ),
+    ToolDef(
+        name="delete_kb_source",
+        description=(
+            "Remove a document from the knowledge base by its source ID. "
+            "This deletes the indexed chunks only — the Drive file is not touched. "
+            "Use list_kb_sources first to find the file_id."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "source_id": {
+                    "type": "string",
+                    "description": "The file_id from list_kb_sources.",
+                },
+            },
+            "required": ["source_id"],
+        },
+        method="DELETE",
+        endpoint="/kb/files/{source_id}",
+        path_params=["source_id"],
+    ),
+    ToolDef(
+        name="sync_kb",
+        description=(
+            "Sync the knowledge base with Google Drive. "
+            "Picks up new and modified files added since the last sync. "
+            "Call this after using create_file to place a new document in a Drive KB subfolder."
+        ),
+        input_schema={"type": "object", "properties": {}},
+        method="POST",
+        endpoint="/kb/sync",
+    ),
 
     # -------------------------------------------------------------------------
     # Web Search (Tavily)
