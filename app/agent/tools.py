@@ -513,7 +513,7 @@ TOOLS: list[ToolDef] = [
     ),
     ToolDef(
         name="get_file",
-        description="Fetch the full text content of a Google Drive file by ID. Works with text files, Markdown, CSV, JSON, and Google Docs. Returns an error for binary files.",
+        description="Fetch the full text content of a Google Drive file by ID. Works with text files, Markdown, CSV, JSON, Google Docs, and PDFs.",
         input_schema={
             "type": "object",
             "properties": {
