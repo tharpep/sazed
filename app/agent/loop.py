@@ -5,6 +5,7 @@ import logging
 import time
 import uuid
 from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Any, AsyncIterator
 
 import anthropic
@@ -29,8 +30,12 @@ def _get_client() -> anthropic.AsyncAnthropic:
     return _client
 
 
-async def _build_system_prompt(mode: str = "chat") -> list[dict[str, Any]]:
-    now = datetime.now()
+async def _build_system_prompt(mode: str = "chat", timezone: str | None = None) -> list[dict[str, Any]]:
+    try:
+        tz = ZoneInfo(timezone) if timezone else ZoneInfo("UTC")
+    except ZoneInfoNotFoundError:
+        tz = ZoneInfo("UTC")
+    now = datetime.now(tz)
     today = now.strftime("%A, %B %d, %Y")
     time_of_day = now.strftime("%I:%M %p")
     memory_section = format_for_prompt(await load_memory())
@@ -60,7 +65,7 @@ async def _build_system_prompt(mode: str = "chat") -> list[dict[str, Any]]:
         },
         {
             "type": "text",
-            "text": f"Today is {today}, {time_of_day}.",
+            "text": f"Today is {today}, {time_of_day} ({tz.key}).",
         },
     ]
     if mode == "voice":
@@ -161,7 +166,7 @@ async def _save_message(pool, session_id: uuid.UUID, role: str, content: Any) ->
     )
 
 
-async def run_turn(session_id: str | None, user_message: str, mode: str = "chat") -> tuple[str, str]:
+async def run_turn(session_id: str | None, user_message: str, mode: str = "chat", timezone: str | None = None) -> tuple[str, str]:
     """
     Run one user turn through the agent loop.
     Returns (session_id, response_text).
@@ -196,7 +201,7 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
     logger.debug(f"session {session_id}: user message='{user_message[:120]}'")
 
     client = _get_client()
-    system = await _build_system_prompt(mode)
+    system = await _build_system_prompt(mode, timezone)
     final_content: list[dict[str, Any]] = []
 
     for turn in range(MAX_TURNS):
@@ -264,7 +269,7 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
 
 
 async def run_turn_stream(
-    session_id: str | None, user_message: str, mode: str = "chat"
+    session_id: str | None, user_message: str, mode: str = "chat", timezone: str | None = None
 ) -> AsyncIterator[str]:
     """
     Run one user turn through the agent loop, yielding SSE-formatted strings.
@@ -304,7 +309,7 @@ async def run_turn_stream(
     yield f"event: session\ndata: {json.dumps({'session_id': session_id})}\n\n"
 
     client = _get_client()
-    system = await _build_system_prompt(mode)
+    system = await _build_system_prompt(mode, timezone)
 
     for turn in range(MAX_TURNS):
         model = _select_model(turn)
