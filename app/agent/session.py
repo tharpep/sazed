@@ -254,18 +254,17 @@ async def process_session(
     existing_facts = await load_memory()
 
     # Build coroutine map so all active tasks run in parallel
-    coros: dict[str, Any] = {
-        "facts": _extract_facts(messages, existing_facts),
-        "kb_summary": _generate_kb_summary(messages, session_dt),
-    }
+    coros: dict[str, Any] = {"facts": _extract_facts(messages, existing_facts)}
     if settings.session_summarization:
         coros["summary"] = _summarize(messages)
+    if settings.conversations_folder_id:
+        coros["kb_summary"] = _generate_kb_summary(messages, session_dt)
 
     results = dict(zip(coros.keys(), await asyncio.gather(*coros.values())))
 
     raw_facts = results["facts"]
     summary = results.get("summary", "")
-    kb_summary = results["kb_summary"]
+    kb_summary = results.get("kb_summary", "")
 
     logger.debug(
         f"process_session {session_id}: extracted {len(raw_facts)} raw fact(s), "

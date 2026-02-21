@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     conversations_folder_id: str = ""   # Drive folder ID for Knowledge Base/Conversations/
 
     # Feature flags
-    session_summarization: bool = False  # Enable agent_memory summarization after each session
+    session_summarization: bool = True  # Generate agent_memory summary after each session
 
     # Context window
     session_window_size: int = 15  # Recent messages to keep verbatim; older messages are compressed
