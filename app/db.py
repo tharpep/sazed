@@ -38,6 +38,29 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS messages_session_id_timestamp_idx
     ON messages (session_id, timestamp);
 
+CREATE TABLE IF NOT EXISTS archived_sessions (
+    id                 UUID PRIMARY KEY,
+    created_at         TIMESTAMPTZ,
+    last_activity      TIMESTAMPTZ,
+    message_count      INT,
+    processed_at       TIMESTAMPTZ,
+    summary_kb_id      UUID,
+    context_summary    TEXT,
+    summarized_through INT,
+    archived_at        TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS archived_messages (
+    id         UUID PRIMARY KEY,
+    session_id UUID NOT NULL,
+    role       TEXT NOT NULL,
+    content    TEXT NOT NULL,
+    timestamp  TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS archived_messages_session_id_idx
+    ON archived_messages (session_id);
+
 CREATE TABLE IF NOT EXISTS agent_memory (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     fact_type   TEXT NOT NULL,
