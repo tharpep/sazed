@@ -29,12 +29,12 @@ def _get_client() -> anthropic.AsyncAnthropic:
     return _client
 
 
-async def _build_system_prompt() -> list[dict[str, Any]]:
+async def _build_system_prompt(mode: str = "chat") -> list[dict[str, Any]]:
     now = datetime.now()
     today = now.strftime("%A, %B %d, %Y")
     time_of_day = now.strftime("%I:%M %p")
     memory_section = format_for_prompt(await load_memory())
-    return [
+    blocks: list[dict[str, Any]] = [
         {
             "type": "text",
             "text": (
@@ -63,6 +63,21 @@ async def _build_system_prompt() -> list[dict[str, Any]]:
             "text": f"Today is {today}, {time_of_day}.",
         },
     ]
+    if mode == "voice":
+        blocks.append({
+            "type": "text",
+            "text": (
+                "## Voice mode\n"
+                "You are responding to a voice interface. Follow these rules strictly:\n"
+                "- Reply in 2-3 natural spoken sentences only. Never more.\n"
+                "- No bullet points, numbered lists, headers, or markdown of any kind.\n"
+                "- Speak conversationally, as if talking to someone in person.\n"
+                "- Give the core answer directly. If a topic needs more depth, cover the key point "
+                "and offer to elaborate if they want.\n"
+                "- Never open with filler words like 'certainly', 'absolutely', or 'of course'."
+            ),
+        })
+    return blocks
 
 
 def _select_model(turn: int) -> str:
@@ -146,7 +161,7 @@ async def _save_message(pool, session_id: uuid.UUID, role: str, content: Any) ->
     )
 
 
-async def run_turn(session_id: str | None, user_message: str) -> tuple[str, str]:
+async def run_turn(session_id: str | None, user_message: str, mode: str = "chat") -> tuple[str, str]:
     """
     Run one user turn through the agent loop.
     Returns (session_id, response_text).
@@ -181,7 +196,7 @@ async def run_turn(session_id: str | None, user_message: str) -> tuple[str, str]
     logger.debug(f"session {session_id}: user message='{user_message[:120]}'")
 
     client = _get_client()
-    system = await _build_system_prompt()
+    system = await _build_system_prompt(mode)
     final_content: list[dict[str, Any]] = []
 
     for turn in range(MAX_TURNS):
@@ -249,7 +264,7 @@ async def run_turn(session_id: str | None, user_message: str) -> tuple[str, str]
 
 
 async def run_turn_stream(
-    session_id: str | None, user_message: str
+    session_id: str | None, user_message: str, mode: str = "chat"
 ) -> AsyncIterator[str]:
     """
     Run one user turn through the agent loop, yielding SSE-formatted strings.
@@ -289,7 +304,7 @@ async def run_turn_stream(
     yield f"event: session\ndata: {json.dumps({'session_id': session_id})}\n\n"
 
     client = _get_client()
-    system = await _build_system_prompt()
+    system = await _build_system_prompt(mode)
 
     for turn in range(MAX_TURNS):
         model = _select_model(turn)
