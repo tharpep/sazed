@@ -597,8 +597,25 @@ TOOLS: list[ToolDef] = [
         endpoint="/storage/folders",
     ),
     ToolDef(
-        name="get_file",
-        description="Fetch the full text content of a Google Drive file by ID. Works with text files, Markdown, CSV, JSON, Google Docs, and PDFs.",
+        name="get_file_info",
+        description="Get metadata for a Drive file — name, MIME type, size, and modified time. Use this to identify a file type before reading or manipulating it.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "file_id": {
+                    "type": "string",
+                    "description": "The Drive file ID.",
+                },
+            },
+            "required": ["file_id"],
+        },
+        method="GET",
+        endpoint="/storage/files/{file_id}",
+        path_params=["file_id"],
+    ),
+    ToolDef(
+        name="read_file",
+        description="Fetch the full text content of a Google Drive file by ID. Works with text files, Markdown, CSV, JSON, Google Docs, PDFs, and Google Sheets (exported as CSV of the first sheet).",
         input_schema={
             "type": "object",
             "properties": {
@@ -703,6 +720,96 @@ TOOLS: list[ToolDef] = [
         method="DELETE",
         endpoint="/storage/files/{file_id}",
         path_params=["file_id"],
+    ),
+    ToolDef(
+        name="move_file",
+        description="Rename and/or move a Drive file to a different folder. Provide at least one of name or folder_id.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "file_id": {
+                    "type": "string",
+                    "description": "The Drive file ID.",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "New file name. Omit to keep the current name.",
+                },
+                "folder_id": {
+                    "type": "string",
+                    "description": "Destination folder ID. Omit to keep the current location.",
+                },
+            },
+            "required": ["file_id"],
+        },
+        method="PATCH",
+        endpoint="/storage/files/{file_id}",
+        path_params=["file_id"],
+    ),
+    ToolDef(
+        name="copy_file",
+        description="Copy a Drive file within Drive. Optionally rename the copy or place it in a different folder.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "file_id": {
+                    "type": "string",
+                    "description": "The Drive file ID to copy.",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Name for the copy. Defaults to 'Copy of {original name}'.",
+                },
+                "folder_id": {
+                    "type": "string",
+                    "description": "Destination folder ID. Defaults to the same folder as the original.",
+                },
+            },
+            "required": ["file_id"],
+        },
+        method="POST",
+        endpoint="/storage/files/{file_id}/copy",
+        path_params=["file_id"],
+    ),
+    ToolDef(
+        name="copy_file_from_github",
+        description="Fetch a file from a GitHub repository and save it directly to Google Drive.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {
+                    "type": "string",
+                    "description": "GitHub repo owner.",
+                },
+                "repo": {
+                    "type": "string",
+                    "description": "GitHub repository name.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file within the repo, e.g. 'src/main.py'.",
+                },
+                "ref": {
+                    "type": "string",
+                    "description": "Branch, tag, or commit SHA. Defaults to the default branch.",
+                },
+                "folder_id": {
+                    "type": "string",
+                    "description": "Drive folder ID to save the file into. Defaults to Drive root.",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Filename to use in Drive. Defaults to the filename from the path.",
+                },
+                "mime_type": {
+                    "type": "string",
+                    "description": "MIME type for the Drive file. Defaults to text/plain.",
+                },
+            },
+            "required": ["owner", "repo", "path"],
+        },
+        method="POST",
+        endpoint="/storage/files/copy-from-github",
     ),
 
     # -------------------------------------------------------------------------
@@ -966,6 +1073,162 @@ TOOLS: list[ToolDef] = [
         },
         method="GET",
         endpoint="/github/search/code",
+    ),
+
+    # -------------------------------------------------------------------------
+    # Google Sheets
+    # -------------------------------------------------------------------------
+    ToolDef(
+        name="create_spreadsheet",
+        description="Create a new Google Spreadsheet. Optionally place it in a specific Drive folder.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Spreadsheet title.",
+                },
+                "folder_id": {
+                    "type": "string",
+                    "description": "Drive folder ID to place the spreadsheet in. Defaults to Drive root.",
+                },
+            },
+            "required": ["title"],
+        },
+        method="POST",
+        endpoint="/sheets",
+    ),
+    ToolDef(
+        name="get_spreadsheet_info",
+        description="Get spreadsheet metadata: title and all sheet tab names, IDs, and dimensions. Call this before reading or writing to confirm tab names and structure.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {
+                    "type": "string",
+                    "description": "The spreadsheet ID (from the Drive file ID or URL).",
+                },
+            },
+            "required": ["spreadsheet_id"],
+        },
+        method="GET",
+        endpoint="/sheets/{spreadsheet_id}",
+        path_params=["spreadsheet_id"],
+    ),
+    ToolDef(
+        name="read_sheet",
+        description=(
+            "Read cell values from a spreadsheet range. "
+            "Range uses A1 notation, e.g. 'Sheet1!A1:D20' or just 'Sheet1' for the whole sheet. "
+            "Returns a 2D array of values."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {
+                    "type": "string",
+                    "description": "The spreadsheet ID.",
+                },
+                "range": {
+                    "type": "string",
+                    "description": "A1 notation range, e.g. 'Sheet1!A1:D20' or 'Sheet1'.",
+                },
+            },
+            "required": ["spreadsheet_id", "range"],
+        },
+        method="GET",
+        endpoint="/sheets/{spreadsheet_id}/values/{range}",
+        path_params=["spreadsheet_id", "range"],
+    ),
+    ToolDef(
+        name="write_sheet",
+        description=(
+            "Overwrite values in a spreadsheet range. Existing values in the range are replaced. "
+            "values is a 2D array where each inner array is a row, e.g. [['Name', 'Amount'], ['Coffee', '4.50']]."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {
+                    "type": "string",
+                    "description": "The spreadsheet ID.",
+                },
+                "range": {
+                    "type": "string",
+                    "description": "A1 notation range, e.g. 'Sheet1!A1:C3'.",
+                },
+                "values": {
+                    "type": "array",
+                    "items": {"type": "array"},
+                    "description": "2D array of values to write. Each inner array is one row.",
+                },
+                "value_input_option": {
+                    "type": "string",
+                    "enum": ["USER_ENTERED", "RAW"],
+                    "description": "USER_ENTERED parses values as if typed by a user (formulas, dates). RAW stores as-is. Defaults to USER_ENTERED.",
+                },
+            },
+            "required": ["spreadsheet_id", "range", "values"],
+        },
+        method="PUT",
+        endpoint="/sheets/{spreadsheet_id}/values/{range}",
+        path_params=["spreadsheet_id", "range"],
+    ),
+    ToolDef(
+        name="append_sheet_rows",
+        description=(
+            "Append rows to a spreadsheet after the last row of existing data. "
+            "Use the column range of the table, e.g. 'Sheet1!A:D', not a specific row. "
+            "values is a 2D array where each inner array is a row to append."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {
+                    "type": "string",
+                    "description": "The spreadsheet ID.",
+                },
+                "range": {
+                    "type": "string",
+                    "description": "A1 notation column range indicating the table, e.g. 'Sheet1!A:D'.",
+                },
+                "values": {
+                    "type": "array",
+                    "items": {"type": "array"},
+                    "description": "2D array of rows to append. Each inner array is one row.",
+                },
+                "value_input_option": {
+                    "type": "string",
+                    "enum": ["USER_ENTERED", "RAW"],
+                    "description": "USER_ENTERED parses values as if typed by a user. Defaults to USER_ENTERED.",
+                },
+            },
+            "required": ["spreadsheet_id", "range", "values"],
+        },
+        method="POST",
+        endpoint="/sheets/{spreadsheet_id}/values/{range}/append",
+        path_params=["spreadsheet_id", "range"],
+    ),
+    ToolDef(
+        name="clear_sheet_range",
+        description="Clear all values in a spreadsheet range. Formatting is preserved; only values are removed.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "spreadsheet_id": {
+                    "type": "string",
+                    "description": "The spreadsheet ID.",
+                },
+                "range": {
+                    "type": "string",
+                    "description": "A1 notation range to clear, e.g. 'Sheet1!A2:D50'.",
+                },
+            },
+            "required": ["spreadsheet_id", "range"],
+        },
+        method="DELETE",
+        endpoint="/sheets/{spreadsheet_id}/values/{range}",
+        path_params=["spreadsheet_id", "range"],
     ),
 
     # -------------------------------------------------------------------------
