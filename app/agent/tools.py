@@ -4,7 +4,7 @@ import ipaddress
 import json
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -1336,7 +1336,7 @@ async def execute_tool(name: str, args: dict[str, Any]) -> str:
         val = remaining.pop(param, None)
         if val is None:
             return f"Missing required path parameter: {param}"
-        endpoint = endpoint.replace(f"{{{param}}}", str(val))
+        endpoint = endpoint.replace(f"{{{param}}}", quote(str(val), safe=""))
 
     url = f"{settings.gateway_url}{endpoint}"
     headers = {"X-API-Key": settings.gateway_api_key}
