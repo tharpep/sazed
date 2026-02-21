@@ -3,9 +3,11 @@
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 import anthropic
+import httpx
 
 from app.agent.memory import load_memory, upsert_fact
 from app.config import settings
@@ -170,29 +172,101 @@ Conversation:
     return response.content[0].text.strip()
 
 
+async def _generate_kb_summary(messages: list[dict[str, Any]], session_dt: datetime) -> str:
+    """Generate a rich, structured KB summary for Drive ingestion."""
+    conversation = _format_messages(messages)
+
+    prompt = f"""Generate a structured knowledge base entry for this conversation session.
+Include only sections that have meaningful content:
+
+**Topics:** comma-separated list of main topics discussed
+**Summary:** 2-4 sentences covering what was discussed
+**Decisions:** bullet list of concrete decisions or conclusions reached
+**Follow-ups:** bullet list of action items or things to revisit
+**Entities:** comma-separated list of files, projects, people, or tools specifically referenced
+
+Be specific and factual. Include enough detail that this entry is useful without the full conversation.
+
+Conversation:
+{conversation}"""
+
+    response = await _get_client().messages.create(
+        model=settings.haiku_model,
+        max_tokens=512,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    body = response.content[0].text.strip()
+    date_str = session_dt.strftime("%B %d, %Y at %I:%M %p UTC")
+    return f"# Session — {date_str}\n\n{body}"
+
+
+async def _ingest_session_to_kb(summary: str, session_dt: datetime) -> None:
+    """Write session summary to Drive and trigger KB sync."""
+    if not settings.conversations_folder_id:
+        logger.warning("conversations_folder_id not configured — skipping KB ingestion")
+        return
+
+    filename = f"session-{session_dt.strftime('%Y-%m-%d-%H%M%S')}.md"
+    base = settings.gateway_url.rstrip("/")
+    headers = {"X-API-Key": settings.gateway_api_key} if settings.gateway_api_key else {}
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        write_resp = await client.post(
+            f"{base}/storage/files",
+            json={
+                "name": filename,
+                "content": summary,
+                "folder_id": settings.conversations_folder_id,
+                "mime_type": "text/plain",
+            },
+            headers=headers,
+        )
+        if not write_resp.is_success:
+            logger.error(
+                f"Failed to write session summary to Drive: "
+                f"{write_resp.status_code} {write_resp.text}"
+            )
+            return
+
+        logger.debug(f"Session summary written to Drive: {filename}")
+
+        sync_resp = await client.post(f"{base}/kb/sync", headers=headers)
+        if not sync_resp.is_success:
+            logger.warning(f"KB sync trigger failed after session ingestion: {sync_resp.status_code}")
+        else:
+            logger.debug("KB sync triggered after session ingestion")
+
+
 async def process_session(
     session_id: str,
     messages: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """
-    Run fact extraction and summarization in parallel.
+    Run fact extraction, summarization, and KB ingestion in parallel where enabled.
     Upserts extracted facts to agent_memory.
-    Summary is stored locally for now — POST to /kb/ingest once MY-AI is deployed.
+    When kb_ingest_enabled, writes a structured session summary to Drive and triggers KB sync.
     """
     if not messages:
         return {"session_id": session_id, "facts_extracted": 0, "summary": ""}
 
+    session_dt = datetime.now(timezone.utc)
     logger.debug(f"process_session {session_id}: {len(messages)} messages to process")
     existing_facts = await load_memory()
 
+    # Build coroutine map so all active tasks run in parallel
+    coros: dict[str, Any] = {
+        "facts": _extract_facts(messages, existing_facts),
+        "kb_summary": _generate_kb_summary(messages, session_dt),
+    }
     if settings.session_summarization:
-        raw_facts, summary = await asyncio.gather(
-            _extract_facts(messages, existing_facts),
-            _summarize(messages),
-        )
-    else:
-        raw_facts = await _extract_facts(messages, existing_facts)
-        summary = ""
+        coros["summary"] = _summarize(messages)
+
+    results = dict(zip(coros.keys(), await asyncio.gather(*coros.values())))
+
+    raw_facts = results["facts"]
+    summary = results.get("summary", "")
+    kb_summary = results["kb_summary"]
+
     logger.debug(
         f"process_session {session_id}: extracted {len(raw_facts)} raw fact(s), "
         f"summarization={'on' if settings.session_summarization else 'off'}"
@@ -213,8 +287,11 @@ async def process_session(
         except (KeyError, ValueError):
             continue
 
-    # TODO (Phase 3.5 + MY-AI): POST summary to gateway /kb/ingest
-    # with source_category="conversations" and metadata={session_id, date}
+    if kb_summary:
+        try:
+            await _ingest_session_to_kb(kb_summary, session_dt)
+        except Exception as e:
+            logger.error(f"KB ingestion failed for session {session_id}: {e}")
 
     return {
         "session_id": session_id,

@@ -415,6 +415,7 @@ TOOLS: list[ToolDef] = [
                             "purdue",
                             "career",
                             "reference",
+                            "conversations",
                         ],
                     },
                     "description": "Limit search to specific KB subfolder categories. Omit to search all.",
