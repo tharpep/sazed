@@ -65,7 +65,7 @@ async def _build_system_prompt(mode: str = "chat", timezone: str | None = None) 
         },
         {
             "type": "text",
-            "text": f"Today is {today}, {time_of_day} ({tz.key}).",
+            "text": f"Today is {today}, {time_of_day} ({tz.key}). Always display dates and times in this timezone; convert tool result timestamps before presenting them.",
         },
     ]
     if mode == "voice":
@@ -201,11 +201,11 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
     logger.debug(f"session {session_id}: user message='{user_message[:120]}'")
 
     client = _get_client()
-    system = await _build_system_prompt(mode, timezone)
     final_content: list[dict[str, Any]] = []
 
     for turn in range(MAX_TURNS):
         model = _select_model(turn)
+        system = await _build_system_prompt(mode, timezone)
         t0 = time.perf_counter()
         logger.debug(f"  turn {turn}: calling {model} with {len(messages)} messages in context")
         response = await client.messages.create(
@@ -309,10 +309,10 @@ async def run_turn_stream(
     yield f"event: session\ndata: {json.dumps({'session_id': session_id})}\n\n"
 
     client = _get_client()
-    system = await _build_system_prompt(mode, timezone)
 
     for turn in range(MAX_TURNS):
         model = _select_model(turn)
+        system = await _build_system_prompt(mode, timezone)
         t0 = time.perf_counter()
         logger.debug(f"  stream turn {turn}: calling {model} with {len(messages)} messages")
 
