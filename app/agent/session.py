@@ -132,7 +132,7 @@ Do not duplicate facts already in the existing list unless the value has changed
 
 Return a JSON array of objects with these fields:
   fact_type: one of "personal", "preference", "project", "instruction", "relationship"
-  key: short identifier, e.g. "primary_language"
+  key: short snake_case identifier — use the same key as an existing fact if it refers to the same concept, e.g. "primary_language" not "main_language" or "preferred_language"
   value: the fact value, e.g. "Python"
   confidence: 1.0 if explicitly stated, 0.7 if clearly implied
 

@@ -79,7 +79,8 @@ async def _build_system_prompt(mode: str = "chat", timezone: str | None = None) 
                 "- Speak conversationally, as if talking to someone in person.\n"
                 "- Give the core answer directly. If a topic needs more depth, cover the key point "
                 "and offer to elaborate if they want.\n"
-                "- Never open with filler words like 'certainly', 'absolutely', or 'of course'."
+                "- Never open with filler words like 'certainly', 'absolutely', or 'of course'.\n"
+                "- After using a tool, summarize the result in plain speech — do not repeat raw data, dates in ISO format, or structured output."
             ),
         })
     return blocks
