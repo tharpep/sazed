@@ -240,16 +240,18 @@ async def _ingest_session_to_kb(summary: str, session_dt: datetime) -> None:
 async def process_session(
     session_id: str,
     messages: list[dict[str, Any]],
+    session_dt: datetime | None = None,
 ) -> dict[str, Any]:
     """
     Run fact extraction, summarization, and KB ingestion in parallel where enabled.
     Upserts extracted facts to agent_memory.
     When kb_ingest_enabled, writes a structured session summary to Drive and triggers KB sync.
+    session_dt: timestamp used for the Drive filename; defaults to now if not provided.
     """
     if not messages:
         return {"session_id": session_id, "facts_extracted": 0, "summary": ""}
 
-    session_dt = datetime.now(timezone.utc)
+    session_dt = session_dt or datetime.now(timezone.utc)
     logger.debug(f"process_session {session_id}: {len(messages)} messages to process")
     existing_facts = await load_memory()
 

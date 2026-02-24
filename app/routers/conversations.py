@@ -1,10 +1,15 @@
 """Conversation history endpoints."""
 
+import logging
+from datetime import timezone
+
 from fastapi import APIRouter, HTTPException, Query
 
 from app.agent.loop import get_session, list_sessions
 from app.agent.session import process_session
 from app.db import get_pool
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -49,7 +54,7 @@ async def archive_sessions(
             # Identify sessions to archive
             session_rows = await conn.fetch(
                 """
-                SELECT id FROM sessions
+                SELECT id, last_activity FROM sessions
                 WHERE last_activity < NOW() - ($1 || ' days')::INTERVAL
                 """,
                 str(older_than_days),
@@ -59,6 +64,7 @@ async def archive_sessions(
                 return {"sessions_archived": 0, "messages_archived": 0}
 
             session_ids = [r["id"] for r in session_rows]
+            session_timestamps = {r["id"]: r["last_activity"] for r in session_rows}
 
             # Copy sessions to archive
             await conn.execute(
@@ -97,6 +103,22 @@ async def archive_sessions(
                 "DELETE FROM sessions WHERE id = ANY($1)",
                 session_ids,
             )
+
+    # Process each archived session sequentially — write summary to Drive and sync KB.
+    # Runs outside the transaction so a Drive failure never rolls back the DB archive.
+    for sid in session_ids:
+        async with pool.acquire() as conn:
+            msg_rows = await conn.fetch(
+                "SELECT role, content FROM archived_messages WHERE session_id = $1 ORDER BY timestamp ASC",
+                sid,
+            )
+        messages = [{"role": r["role"], "content": r["content"]} for r in msg_rows]
+        last_activity = session_timestamps[sid]
+        session_dt = last_activity.astimezone(timezone.utc) if last_activity.tzinfo else last_activity.replace(tzinfo=timezone.utc)
+        try:
+            await process_session(sid, messages, session_dt=session_dt)
+        except Exception as e:
+            logger.error(f"process_session failed for archived session {sid}: {e}")
 
     return {
         "sessions_archived": len(session_ids),
