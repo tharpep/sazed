@@ -1067,6 +1067,171 @@ TOOLS: list[ToolDef] = [
         method="GET",
         endpoint="/github/search/code",
     ),
+    ToolDef(
+        name="list_commits",
+        description="List commits on a GitHub repository. Filter by branch/tag (sha), author, file path, or date range.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner (GitHub username or org)."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "sha": {"type": "string", "description": "Branch, tag, or commit SHA to start listing from."},
+                "author": {"type": "string", "description": "Filter by GitHub username or email address."},
+                "path": {"type": "string", "description": "Only return commits that touched this file path."},
+                "since": {"type": "string", "description": "ISO 8601 timestamp — only commits after this date."},
+                "until": {"type": "string", "description": "ISO 8601 timestamp — only commits before this date."},
+                "per_page": {"type": "integer", "description": "Max commits to return (1–100). Defaults to 20."},
+            },
+            "required": ["owner", "repo"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/commits",
+        path_params=["owner", "repo"],
+    ),
+    ToolDef(
+        name="get_commit",
+        description="Get full details for a single commit: message, author, stats (additions/deletions), and per-file diffs.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "sha": {"type": "string", "description": "Full or short commit SHA."},
+            },
+            "required": ["owner", "repo", "sha"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/commits/{sha}",
+        path_params=["owner", "repo", "sha"],
+    ),
+    ToolDef(
+        name="list_branches",
+        description="List branches in a GitHub repository, including their HEAD SHA and whether they are protected.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "per_page": {"type": "integer", "description": "Max branches to return (1–100). Defaults to 30."},
+            },
+            "required": ["owner", "repo"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/branches",
+        path_params=["owner", "repo"],
+    ),
+    ToolDef(
+        name="list_tags",
+        description="List tags in a GitHub repository.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "per_page": {"type": "integer", "description": "Max tags to return (1–100). Defaults to 30."},
+            },
+            "required": ["owner", "repo"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/tags",
+        path_params=["owner", "repo"],
+    ),
+    ToolDef(
+        name="list_releases",
+        description="List releases in a GitHub repository, including tag, name, draft/prerelease flags, and release notes.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "per_page": {"type": "integer", "description": "Max releases to return (1–100). Defaults to 10."},
+            },
+            "required": ["owner", "repo"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/releases",
+        path_params=["owner", "repo"],
+    ),
+    ToolDef(
+        name="get_latest_release",
+        description="Get the latest published (non-draft, non-prerelease) release for a GitHub repository.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+            },
+            "required": ["owner", "repo"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/releases/latest",
+        path_params=["owner", "repo"],
+    ),
+    ToolDef(
+        name="get_pr_reviews",
+        description="Get all reviews on a pull request — shows reviewer, state (APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED), and review body.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "number": {"type": "integer", "description": "Pull request number."},
+            },
+            "required": ["owner", "repo", "number"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/pulls/{number}/reviews",
+        path_params=["owner", "repo", "number"],
+    ),
+    ToolDef(
+        name="get_pr_files",
+        description="List files changed in a pull request with additions, deletions, and patch diffs.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "number": {"type": "integer", "description": "Pull request number."},
+            },
+            "required": ["owner", "repo", "number"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/pulls/{number}/files",
+        path_params=["owner", "repo", "number"],
+    ),
+    ToolDef(
+        name="list_contributors",
+        description="List contributors to a GitHub repository sorted by commit count.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "per_page": {"type": "integer", "description": "Max contributors to return (1–100). Defaults to 20."},
+            },
+            "required": ["owner", "repo"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/contributors",
+        path_params=["owner", "repo"],
+    ),
+    ToolDef(
+        name="compare_refs",
+        description="Compare two refs (branches, tags, or SHAs) in a repository. Returns status (ahead/behind/diverged/identical), commit list, and changed files.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "base": {"type": "string", "description": "Base ref (branch, tag, or SHA) to compare from."},
+                "head": {"type": "string", "description": "Head ref to compare against base."},
+            },
+            "required": ["owner", "repo", "base", "head"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/compare",
+        path_params=["owner", "repo"],
+    ),
 
     # -------------------------------------------------------------------------
     # Google Sheets
