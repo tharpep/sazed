@@ -1,6 +1,7 @@
 """Structured memory — agent_memory store and helpers."""
 
 import logging
+import uuid
 from collections import defaultdict
 from typing import Any
 
@@ -55,7 +56,6 @@ async def upsert_fact(
 
 async def delete_fact(memory_id: str) -> bool:
     """Delete a fact by UUID. Returns False if not found."""
-    import uuid
     pool = get_pool()
     result = await pool.execute(
         "DELETE FROM agent_memory WHERE id = $1", uuid.UUID(memory_id)

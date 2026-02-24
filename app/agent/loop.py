@@ -178,12 +178,10 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
     pool = get_pool()
     sid = uuid.UUID(session_id)
 
-    # Ensure the session row exists
     await pool.execute(
         "INSERT INTO sessions (id) VALUES ($1) ON CONFLICT DO NOTHING", sid
     )
 
-    # Load existing history
     rows = await pool.fetch(
         "SELECT role, content FROM messages WHERE session_id = $1 ORDER BY timestamp",
         sid,
@@ -193,10 +191,8 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
     ]
     logger.debug(f"session {session_id}: loaded {len(messages)} prior messages")
 
-    # Apply context window — compresses overflow into a rolling summary if needed
     messages = await _apply_context_window(pool, sid, messages)
 
-    # Append and persist the new user message
     messages.append({"role": "user", "content": user_message})
     await _save_message(pool, sid, "user", user_message)
     logger.debug(f"session {session_id}: user message='{user_message[:120]}'")
@@ -249,11 +245,9 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
             messages.append({"role": "user", "content": tool_results})
             await _save_message(pool, sid, "user", tool_results)
         else:
-            # Unexpected stop reason — bail out
             logger.debug(f"  turn {turn}: unexpected stop_reason, bailing out")
             break
 
-    # Update session stats
     await pool.execute(
         """
         UPDATE sessions
@@ -300,7 +294,6 @@ async def run_turn_stream(
         {"role": r["role"], "content": json.loads(r["content"])} for r in rows
     ]
 
-    # Apply context window — compresses overflow into a rolling summary if needed
     messages = await _apply_context_window(pool, sid, messages)
 
     messages.append({"role": "user", "content": user_message})

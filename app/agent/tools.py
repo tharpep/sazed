@@ -8,6 +8,7 @@ from urllib.parse import quote, urlparse
 
 import httpx
 
+from app.agent.memory import upsert_fact
 from app.config import settings
 
 
@@ -430,14 +431,6 @@ TOOLS: list[ToolDef] = [
         method="POST",
         endpoint="/kb/search",
     ),
-    # KB write workflow: use create_file to place a file in the correct Drive
-    # KB subfolder, then call sync_kb to index it. The KB is Drive-backed so
-    # sync is the only write path — direct ingest would be wiped on next sync.
-    #
-    # Drive KB subfolder IDs per category are not yet configured. Use list_files
-    # with a folder search to locate the right subfolder before creating a file.
-    # TODO: expose KB_FOLDER_IDS as an env var / config so the agent can look
-    #       them up without a list_files round-trip each time.
     ToolDef(
         name="list_kb_sources",
         description=(
@@ -1265,10 +1258,6 @@ TOOLS: list[ToolDef] = [
     ),
 ]
 
-# ---------------------------------------------------------------------------
-# Index + public helpers
-# ---------------------------------------------------------------------------
-
 _tool_index: dict[str, ToolDef] = {t.name: t for t in TOOLS}
 
 
@@ -1375,7 +1364,6 @@ async def execute_tool(name: str, args: dict[str, Any]) -> str:
 async def _execute_internal(name: str, args: dict[str, Any]) -> str:
     """Handle internal tools that don't call the gateway."""
     if name == "memory_update":
-        from app.agent.memory import upsert_fact
         fact = await upsert_fact(
             fact_type=args["fact_type"],
             key=args["key"],
