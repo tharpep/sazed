@@ -30,14 +30,7 @@ def _get_client() -> anthropic.AsyncAnthropic:
     return _client
 
 
-async def _build_system_prompt(mode: str = "chat", timezone: str | None = None) -> list[dict[str, Any]]:
-    try:
-        tz = ZoneInfo(timezone) if timezone else ZoneInfo("UTC")
-    except ZoneInfoNotFoundError:
-        tz = ZoneInfo("UTC")
-    now = datetime.now(tz)
-    today = now.strftime("%A, %B %d, %Y")
-    time_of_day = now.strftime("%I:%M %p")
+async def _build_system_prompt(mode: str = "chat") -> list[dict[str, Any]]:
     memory_section = format_for_prompt(await load_memory())
     blocks: list[dict[str, Any]] = [
         {
@@ -63,10 +56,6 @@ async def _build_system_prompt(mode: str = "chat", timezone: str | None = None) 
             "text": f"## Known facts about the user\n{memory_section}",
             "cache_control": {"type": "ephemeral"},
         },
-        {
-            "type": "text",
-            "text": f"Today is {today}, {time_of_day} ({tz.key}). Always display dates and times in this timezone; convert tool result timestamps before presenting them.",
-        },
     ]
     if mode == "voice":
         blocks.append({
@@ -87,8 +76,8 @@ async def _build_system_prompt(mode: str = "chat", timezone: str | None = None) 
 
 
 def _select_model(turn: int) -> str:
-    """Haiku for early turns; escalate to Sonnet if the task is still running by turn 3."""
-    if turn >= 3:
+    """Haiku for early turns; escalate to Sonnet if the task is still running by turn 4."""
+    if turn >= 4:
         return settings.sonnet_model
     return settings.haiku_model
 
@@ -193,16 +182,22 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
 
     messages = await _apply_context_window(pool, sid, messages)
 
-    messages.append({"role": "user", "content": user_message})
+    try:
+        tz = ZoneInfo(timezone) if timezone else ZoneInfo("UTC")
+    except ZoneInfoNotFoundError:
+        tz = ZoneInfo("UTC")
+    now = datetime.now(tz)
+    tz_prefix = f"[{now.strftime('%A, %B %d, %Y')} {now.strftime('%I:%M %p')} {tz.key}]\n"
+    messages.append({"role": "user", "content": tz_prefix + user_message})
     await _save_message(pool, sid, "user", user_message)
     logger.debug(f"session {session_id}: user message='{user_message[:120]}'")
 
     client = _get_client()
     final_content: list[dict[str, Any]] = []
+    system = await _build_system_prompt(mode)
 
     for turn in range(MAX_TURNS):
         model = _select_model(turn)
-        system = await _build_system_prompt(mode, timezone)
         t0 = time.perf_counter()
         logger.debug(f"  turn {turn}: calling {model} with {len(messages)} messages in context")
         response = await client.messages.create(
@@ -296,17 +291,23 @@ async def run_turn_stream(
 
     messages = await _apply_context_window(pool, sid, messages)
 
-    messages.append({"role": "user", "content": user_message})
+    try:
+        tz = ZoneInfo(timezone) if timezone else ZoneInfo("UTC")
+    except ZoneInfoNotFoundError:
+        tz = ZoneInfo("UTC")
+    now = datetime.now(tz)
+    tz_prefix = f"[{now.strftime('%A, %B %d, %Y')} {now.strftime('%I:%M %p')} {tz.key}]\n"
+    messages.append({"role": "user", "content": tz_prefix + user_message})
     await _save_message(pool, sid, "user", user_message)
     logger.debug(f"stream session {session_id}: user message='{user_message[:120]}'")
 
     yield f"event: session\ndata: {json.dumps({'session_id': session_id})}\n\n"
 
     client = _get_client()
+    system = await _build_system_prompt(mode)
 
     for turn in range(MAX_TURNS):
         model = _select_model(turn)
-        system = await _build_system_prompt(mode, timezone)
         t0 = time.perf_counter()
         logger.debug(f"  stream turn {turn}: calling {model} with {len(messages)} messages")
 
