@@ -120,18 +120,3 @@ poetry run uvicorn app.main:app --reload   # dev server
 ruff check app/         # lint
 ruff format app/        # format
 ```
-
----
-
-## Status
-
-| Phase | Status |
-|-------|--------|
-| Bootstrap | ✅ Done |
-| Tool registry | ✅ Done |
-| Agent loop | ✅ Done |
-| Structured memory | ✅ Done |
-| Session processing | ✅ Done |
-| DB wiring (asyncpg) | ✅ Done |
-| KB integration | ✅ Done |
-| Deploy to Cloud Run | ⬜ Pending |
