@@ -1303,7 +1303,11 @@ TOOLS: list[ToolDef] = [
         name="write_sheet",
         description=(
             "Overwrite values in a spreadsheet range. Existing values in the range are replaced. "
-            "values is a 2D array where each inner array is a row, e.g. [['Name', 'Amount'], ['Coffee', '4.50']]."
+            "The range must exactly match the data: for N rows × M columns use e.g. 'Tab!A1:CM' — "
+            "extra cells in a larger range are cleared; rows beyond the range are silently dropped. "
+            "Tab names that contain spaces must be single-quoted: e.g. \"'My Sheet'!A1:C3\". "
+            "values is a 2D array; each inner array is one row, e.g. [['Name', 'Amount'], ['Coffee', '4.50']]. "
+            "Call get_spreadsheet_info first if you don't already know the exact tab name."
         ),
         input_schema={
             "type": "object",
@@ -1314,11 +1318,14 @@ TOOLS: list[ToolDef] = [
                 },
                 "range": {
                     "type": "string",
-                    "description": "A1 notation range, e.g. 'Sheet1!A1:C3'.",
+                    "description": "A1 notation range, e.g. 'Sheet1!A1:C3'. Single-quote tab names with spaces: \"'My Sheet'!A1:C3\".",
                 },
                 "values": {
                     "type": "array",
-                    "items": {"type": "array"},
+                    "items": {
+                        "type": "array",
+                        "items": {"type": ["string", "number", "boolean", "null"]},
+                    },
                     "description": "2D array of values to write. Each inner array is one row.",
                 },
                 "value_input_option": {
@@ -1337,8 +1344,9 @@ TOOLS: list[ToolDef] = [
         name="append_sheet_rows",
         description=(
             "Append rows to a spreadsheet after the last row of existing data. "
-            "Use the column range of the table, e.g. 'Sheet1!A:D', not a specific row. "
-            "values is a 2D array where each inner array is a row to append."
+            "Use the full column range of the table, e.g. 'Sheet1!A:D' — do not include a row number. "
+            "Tab names that contain spaces must be single-quoted: e.g. \"'My Sheet'!A:D\". "
+            "values is a 2D array; each inner array is one row, e.g. [['Alice', '100'], ['Bob', '200']]."
         ),
         input_schema={
             "type": "object",
@@ -1349,11 +1357,14 @@ TOOLS: list[ToolDef] = [
                 },
                 "range": {
                     "type": "string",
-                    "description": "A1 notation column range indicating the table, e.g. 'Sheet1!A:D'.",
+                    "description": "A1 notation column range indicating the table, e.g. 'Sheet1!A:D'. Single-quote tab names with spaces: \"'My Sheet'!A:D\".",
                 },
                 "values": {
                     "type": "array",
-                    "items": {"type": "array"},
+                    "items": {
+                        "type": "array",
+                        "items": {"type": ["string", "number", "boolean", "null"]},
+                    },
                     "description": "2D array of rows to append. Each inner array is one row.",
                 },
                 "value_input_option": {
