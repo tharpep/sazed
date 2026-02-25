@@ -237,6 +237,20 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
             logger.debug(f"  turn {turn}: unexpected stop_reason, bailing out")
             break
 
+    # If the loop exhausted turns mid-tool-use, final_content has no text.
+    # Do one synthesis call (no tools) so the user gets an actual response.
+    if not any(b.get("type") == "text" for b in final_content):
+        logger.debug("  synthesis: loop ended on tool_use, running final synthesis call")
+        synth = await client.messages.create(
+            model=settings.haiku_model,
+            system=system,
+            messages=messages,
+            max_tokens=1024,
+        )
+        content_dicts = _content_to_dicts(synth.content)
+        await _save_message(pool, sid, "assistant", content_dicts)
+        final_content = content_dicts
+
     await pool.execute(
         """
         UPDATE sessions
@@ -354,6 +368,24 @@ async def run_turn_stream(
         else:
             logger.debug(f"  stream turn {turn}: unexpected stop_reason, bailing")
             break
+
+    # If the loop exhausted turns mid-tool-use, no text was streamed.
+    # Do one synthesis call (no tools) and stream its output.
+    if messages and messages[-1]["role"] == "user" and isinstance(messages[-1]["content"], list) and any(
+        b.get("type") == "tool_result" for b in messages[-1]["content"]
+    ):
+        logger.debug("  stream synthesis: loop ended on tool_use, running final synthesis call")
+        async with client.messages.stream(
+            model=settings.haiku_model,
+            system=system,
+            messages=messages,
+            max_tokens=1024,
+        ) as stream:
+            async for text in stream.text_stream:
+                yield f"event: text_delta\ndata: {json.dumps({'text': text})}\n\n"
+            synth = await stream.get_final_message()
+        content_dicts = _content_to_dicts(synth.content)
+        await _save_message(pool, sid, "assistant", content_dicts)
 
     await pool.execute(
         """
