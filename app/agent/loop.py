@@ -18,7 +18,7 @@ from app.db import get_pool
 
 logger = logging.getLogger(__name__)
 
-MAX_TURNS = 5
+MAX_TURNS = 10
 
 _client: anthropic.AsyncAnthropic | None = None
 
@@ -74,12 +74,6 @@ async def _build_system_prompt(mode: str = "chat") -> list[dict[str, Any]]:
         })
     return blocks
 
-
-def _select_model(turn: int) -> str:
-    """Haiku for early turns; escalate to Sonnet if the task is still running by turn 4."""
-    if turn >= 4:
-        return settings.sonnet_model
-    return settings.haiku_model
 
 
 def _content_to_dicts(content: list) -> list[dict[str, Any]]:
@@ -197,7 +191,7 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
     system = await _build_system_prompt(mode)
 
     for turn in range(MAX_TURNS):
-        model = _select_model(turn)
+        model = settings.haiku_model
         t0 = time.perf_counter()
         logger.debug(f"  turn {turn}: calling {model} with {len(messages)} messages in context")
         response = await client.messages.create(
@@ -307,7 +301,7 @@ async def run_turn_stream(
     system = await _build_system_prompt(mode)
 
     for turn in range(MAX_TURNS):
-        model = _select_model(turn)
+        model = settings.haiku_model
         t0 = time.perf_counter()
         logger.debug(f"  stream turn {turn}: calling {model} with {len(messages)} messages")
 
