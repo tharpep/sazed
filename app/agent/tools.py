@@ -1469,9 +1469,11 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
 
 _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
     "calendar": re.compile(
-        r'\b(calendar|event|meeting|appointment|schedule|busy|free|availability|rsvp|invite)\b', re.I),
+        r'\b(calendar|event|meeting|appointment|schedule|busy|free|availability|rsvp|invite'
+        r'|standup|stand-up|reschedule|tomorrow|tonight|zoom)\b', re.I),
     "tasks":    re.compile(
-        r'\b(task|tasks|todo|to-do|to do|reminder|checklist)\b', re.I),
+        r'\b(task|tasks|todo|to-do|to do|to.do list|reminder|checklist|things to do|get done'
+        r'|mark.*done|finish)\b', re.I),
     "email":    re.compile(
         r'\b(email|gmail|inbox|mail|unread|draft|subject|reply|forward)\b', re.I),
     "notify":   re.compile(

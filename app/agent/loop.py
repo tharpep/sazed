@@ -47,7 +47,10 @@ async def _build_system_prompt(mode: str = "chat") -> list[dict[str, Any]]:
                 "- Tasks: call get_task_lists first to get valid list IDs before creating, reading, or updating tasks.\n"
                 "- Drive files: call list_files to find a file ID before reading, updating, or deleting.\n"
                 "- Knowledge vs web: search the knowledge base first for anything about the user's personal context, projects, or notes. Use web_search when the knowledge base has nothing useful or the topic requires current information.\n"
-                "- Email: use list_emails with filters before fetching full message content."
+                "- Email: use list_emails with filters before fetching full message content.\n"
+                "- Available tools: you only receive tools relevant to the current request. "
+                "If you need a capability not shown in your available tools, say so clearly "
+                "and suggest the user rephrase — more tools are available depending on the topic."
             ),
             "cache_control": {"type": "ephemeral"},
         },
