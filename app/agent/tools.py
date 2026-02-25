@@ -1472,37 +1472,53 @@ _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
         r'\b(calendar|event|meeting|appointment|schedule|busy|free|availability|rsvp|invite'
         r'|standup|stand-up|reschedule|tomorrow|tonight|zoom)\b', re.I),
     "tasks":    re.compile(
-        r'\b(task|tasks|todo|to-do|to do|to.do list|reminder|checklist|things to do|get done'
-        r'|mark.*done|finish)\b', re.I),
+        r'\b(tasks?|todo|to-do|to do|to.do list|reminder|checklist|things to do|get done'
+        r'|mark.*done)\b', re.I),
     "email":    re.compile(
-        r'\b(email|gmail|inbox|mail|unread|draft|subject|reply|forward)\b', re.I),
+        r'\b(email|gmail|inbox|mail|unread|draft|subject|reply|forward|messages?)\b', re.I),
     "notify":   re.compile(
-        r'\b(notify|notification|push notification|alert|pushover)\b', re.I),
+        r'\b(notify|notification|push.?notification|alert|pushover'
+        r'|ping me|heads.?up|let me know when|remind me)\b', re.I),
     "kb":       re.compile(
-        r'\b(knowledge base|my notes|my docs|look up in my notes|what do i know)\b', re.I),
+        r'\b(knowledge.?base|my notes?|my docs?|recall'
+        r'|what (do |have )?i (know|noted|written|saved|documented)'
+        r'|look up in my notes?|search my notes?|in my notes?'
+        r'|do i have (any )?info|from my notes?|check my notes?)\b', re.I),
     "web":      re.compile(
-        r'\b(search|look up|google|find out|who is|what is|current|latest|news)\b', re.I),
+        r'\b(look up|google|browse|find out|who is|news'
+        r'|current (price|weather|news|status|version|rate|score)'
+        r'|latest (news|version|release|update|price|score)'
+        r'|search (the )?web|search online|search for)\b', re.I),
     "drive":    re.compile(
         r'\b(file|drive|document|folder|google drive|gdrive|upload|download)\b', re.I),
     "github":   re.compile(
-        r'\b(github|repo|repository|issue|pull request|\bpr\b|commit|branch|merge|fork|git)\b', re.I),
+        r'\b(github|repo|repository|issue|pull request|\bpr\b|commit|branch|merge|fork|git)\b',
+        re.I),
     "sheets":   re.compile(
         r'\b(sheet|spreadsheet|excel|google sheets|csv|row|column|cell|table)\b', re.I),
 }
 
 _ALWAYS_INCLUDED: frozenset[str] = frozenset({"memory_update"})
 _DEFAULT_CATEGORIES: frozenset[str] = frozenset({"calendar", "tasks", "kb", "web"})
+_CO_SELECT: dict[str, frozenset[str]] = {
+    "sheets": frozenset({"drive"}),
+}
 
 
 def select_tools(user_message: str) -> list[dict]:
     """Return tool schemas for categories matching the user message.
 
     Falls back to _DEFAULT_CATEGORIES if no patterns match.
+    Co-selection rules in _CO_SELECT are applied after initial matching.
     memory_update is always included regardless.
     Preserves original TOOLS ordering. cache_control applied to last schema.
     """
     matched = {cat for cat, pat in _CATEGORY_PATTERNS.items() if pat.search(user_message)}
     categories = matched if matched else _DEFAULT_CATEGORIES
+
+    # Apply co-selection: some categories implicitly require others
+    for cat in list(categories):
+        categories = categories | _CO_SELECT.get(cat, frozenset())
 
     selected_names: set[str] = set(_ALWAYS_INCLUDED)
     for cat in categories:
