@@ -2,6 +2,7 @@
 
 import ipaddress
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -1437,6 +1438,81 @@ def get_tool_schemas() -> list[dict]:
         for t in TOOLS
     ]
     schemas[-1]["cache_control"] = {"type": "ephemeral"}
+    return schemas
+
+
+# ---------------------------------------------------------------------------
+# Selective tool injection
+# ---------------------------------------------------------------------------
+
+TOOL_CATEGORIES: dict[str, list[str]] = {
+    "calendar": ["get_events", "check_availability", "create_event", "update_event",
+                 "delete_event", "search_events"],
+    "tasks":    ["get_task_lists", "get_tasks", "create_task_list", "rename_task_list",
+                 "create_task", "update_task", "delete_task"],
+    "email":    ["list_emails", "search_emails", "get_email", "draft_email"],
+    "notify":   ["send_notification"],
+    "kb":       ["search_knowledge_base", "list_kb_sources", "delete_kb_source", "sync_kb"],
+    "web":      ["web_search", "fetch_url"],
+    "drive":    ["list_files", "list_folders", "create_folder", "get_file_info", "read_file",
+                 "create_file", "update_file", "append_to_file", "delete_file", "move_file",
+                 "copy_file", "copy_file_from_github"],
+    "github":   ["list_repos", "get_repo", "list_issues", "get_issue", "create_issue",
+                 "update_issue", "add_issue_comment", "list_prs", "get_pr", "add_pr_comment",
+                 "create_pr", "search_issues", "get_github_file", "search_code",
+                 "list_commits", "get_commit", "list_branches", "list_tags",
+                 "list_releases", "get_latest_release", "get_pr_reviews", "get_pr_files",
+                 "list_contributors", "compare_refs"],
+    "sheets":   ["create_spreadsheet", "get_spreadsheet_info", "read_sheet", "write_sheet",
+                 "append_sheet_rows", "clear_sheet_range"],
+}
+
+_CATEGORY_PATTERNS: dict[str, re.Pattern] = {
+    "calendar": re.compile(
+        r'\b(calendar|event|meeting|appointment|schedule|busy|free|availability|rsvp|invite)\b', re.I),
+    "tasks":    re.compile(
+        r'\b(task|tasks|todo|to-do|to do|reminder|checklist)\b', re.I),
+    "email":    re.compile(
+        r'\b(email|gmail|inbox|mail|unread|draft|subject|reply|forward)\b', re.I),
+    "notify":   re.compile(
+        r'\b(notify|notification|push notification|alert|pushover)\b', re.I),
+    "kb":       re.compile(
+        r'\b(knowledge base|my notes|my docs|look up in my notes|what do i know)\b', re.I),
+    "web":      re.compile(
+        r'\b(search|look up|google|find out|who is|what is|current|latest|news)\b', re.I),
+    "drive":    re.compile(
+        r'\b(file|drive|document|folder|google drive|gdrive|upload|download)\b', re.I),
+    "github":   re.compile(
+        r'\b(github|repo|repository|issue|pull request|\bpr\b|commit|branch|merge|fork|git)\b', re.I),
+    "sheets":   re.compile(
+        r'\b(sheet|spreadsheet|excel|google sheets|csv|row|column|cell|table)\b', re.I),
+}
+
+_ALWAYS_INCLUDED: frozenset[str] = frozenset({"memory_update"})
+_DEFAULT_CATEGORIES: frozenset[str] = frozenset({"calendar", "tasks", "kb", "web"})
+
+
+def select_tools(user_message: str) -> list[dict]:
+    """Return tool schemas for categories matching the user message.
+
+    Falls back to _DEFAULT_CATEGORIES if no patterns match.
+    memory_update is always included regardless.
+    Preserves original TOOLS ordering. cache_control applied to last schema.
+    """
+    matched = {cat for cat, pat in _CATEGORY_PATTERNS.items() if pat.search(user_message)}
+    categories = matched if matched else _DEFAULT_CATEGORIES
+
+    selected_names: set[str] = set(_ALWAYS_INCLUDED)
+    for cat in categories:
+        selected_names.update(TOOL_CATEGORIES.get(cat, []))
+
+    schemas = [
+        {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+        for t in TOOLS
+        if t.name in selected_names
+    ]
+    if schemas:
+        schemas[-1]["cache_control"] = {"type": "ephemeral"}
     return schemas
 
 

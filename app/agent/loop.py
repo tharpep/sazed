@@ -12,7 +12,7 @@ import anthropic
 
 from app.agent.memory import format_for_prompt, load_memory
 from app.agent.session import compress_context
-from app.agent.tools import execute_tool, get_tool_schemas
+from app.agent.tools import execute_tool, get_tool_schemas, select_tools
 from app.config import settings
 from app.db import get_pool
 
@@ -189,6 +189,8 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
     client = _get_client()
     final_content: list[dict[str, Any]] = []
     system = await _build_system_prompt(mode)
+    tools = select_tools(user_message)
+    logger.debug(f"  selected {len(tools)} tools for: '{user_message[:80]}'")
 
     for turn in range(MAX_TURNS):
         model = settings.haiku_model
@@ -198,7 +200,7 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
             model=model,
             system=system,
             messages=messages,
-            tools=get_tool_schemas(),
+            tools=tools,
             max_tokens=4096,
         )
         logger.debug(
@@ -313,6 +315,8 @@ async def run_turn_stream(
 
     client = _get_client()
     system = await _build_system_prompt(mode)
+    tools = select_tools(user_message)
+    logger.debug(f"  selected {len(tools)} tools for: '{user_message[:80]}'")
 
     for turn in range(MAX_TURNS):
         model = settings.haiku_model
@@ -323,7 +327,7 @@ async def run_turn_stream(
             model=model,
             system=system,
             messages=messages,
-            tools=get_tool_schemas(),
+            tools=tools,
             max_tokens=4096,
         ) as stream:
             async for text in stream.text_stream:
