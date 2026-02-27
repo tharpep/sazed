@@ -1411,6 +1411,127 @@ TOOLS: list[ToolDef] = [
     ),
 
     # -------------------------------------------------------------------------
+    # Finance
+    # -------------------------------------------------------------------------
+    ToolDef(
+        name="get_subscriptions",
+        description="List active subscriptions. Pass all=true to include inactive ones.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "all": {
+                    "type": "boolean",
+                    "description": "Include inactive subscriptions. Defaults to false.",
+                },
+            },
+        },
+        method="GET",
+        endpoint="/finance/subscriptions",
+    ),
+    ToolDef(
+        name="add_subscription",
+        description="Add a new recurring subscription.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Service or subscription name."},
+                "amount": {"type": "number", "description": "Billing amount."},
+                "frequency": {
+                    "type": "string",
+                    "enum": ["monthly", "annual", "weekly", "biweekly"],
+                    "description": "Billing frequency. Defaults to monthly.",
+                },
+                "category": {"type": "string", "description": "Category, e.g. 'streaming', 'software'."},
+                "notes": {"type": "string", "description": "Optional notes."},
+            },
+            "required": ["name", "amount", "category"],
+        },
+        method="POST",
+        endpoint="/finance/subscriptions",
+    ),
+    ToolDef(
+        name="update_subscription",
+        description="Update fields on an existing subscription (name, amount, frequency, category, active, notes).",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "subscription_id": {"type": "string", "description": "Subscription UUID."},
+                "name": {"type": "string"},
+                "amount": {"type": "number"},
+                "frequency": {
+                    "type": "string",
+                    "enum": ["monthly", "annual", "weekly", "biweekly"],
+                },
+                "category": {"type": "string"},
+                "active": {"type": "boolean", "description": "Set false to deactivate."},
+                "notes": {"type": "string"},
+            },
+            "required": ["subscription_id"],
+        },
+        method="PATCH",
+        endpoint="/finance/subscriptions/{subscription_id}",
+        path_params=["subscription_id"],
+    ),
+    ToolDef(
+        name="get_budget",
+        description="List all budget category limits.",
+        input_schema={"type": "object", "properties": {}},
+        method="GET",
+        endpoint="/finance/budget",
+    ),
+    ToolDef(
+        name="set_budget_limit",
+        description="Set or update the monthly spending limit for a budget category.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "description": "Budget category name."},
+                "monthly_limit": {"type": "number", "description": "Monthly limit in dollars."},
+            },
+            "required": ["category", "monthly_limit"],
+        },
+        method="PUT",
+        endpoint="/finance/budget/{category}",
+        path_params=["category"],
+    ),
+    ToolDef(
+        name="get_income",
+        description="List active income sources.",
+        input_schema={"type": "object", "properties": {}},
+        method="GET",
+        endpoint="/finance/income",
+    ),
+    ToolDef(
+        name="add_income_source",
+        description="Add a new income source.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "description": "Income source name, e.g. 'Job', 'Freelance'."},
+                "amount": {"type": "number", "description": "Income amount."},
+                "frequency": {
+                    "type": "string",
+                    "enum": ["monthly", "annual", "weekly", "biweekly"],
+                    "description": "Pay frequency. Defaults to monthly.",
+                },
+            },
+            "required": ["source", "amount"],
+        },
+        method="POST",
+        endpoint="/finance/income",
+    ),
+    ToolDef(
+        name="get_monthly_summary",
+        description=(
+            "Get a computed monthly financial summary: income, subscription costs, net estimated, "
+            "plus full lists of income sources, subscriptions, and budget limits."
+        ),
+        input_schema={"type": "object", "properties": {}},
+        method="GET",
+        endpoint="/finance/summary",
+    ),
+
+    # -------------------------------------------------------------------------
     # Memory (internal — does not call the gateway)
     # -------------------------------------------------------------------------
     ToolDef(
@@ -1485,6 +1606,9 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
                  "list_contributors", "compare_refs"],
     "sheets":   ["create_spreadsheet", "get_spreadsheet_info", "read_sheet", "write_sheet",
                  "append_sheet_rows", "clear_sheet_range"],
+    "finance":  ["get_subscriptions", "add_subscription", "update_subscription",
+                 "get_budget", "set_budget_limit",
+                 "get_income", "add_income_source", "get_monthly_summary"],
 }
 
 _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
@@ -1516,6 +1640,10 @@ _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
         re.I),
     "sheets":   re.compile(
         r'\b(sheet|spreadsheet|excel|google sheets|csv|row|column|cell|table)\b', re.I),
+    "finance":  re.compile(
+        r'\b(subscri(ption|be)|budget|income|spend(ing)?|expense|bill(ing)?|payment|monthly cost'
+        r'|how much (do i |am i )?pay|afford|net (income|pay)|salary|paycheck'
+        r'|financial|finance|money|cash flow|subscription|netflix|spotify|hulu)\b', re.I),
 }
 
 _ALWAYS_INCLUDED: frozenset[str] = frozenset({"memory_update"})
