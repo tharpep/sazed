@@ -229,17 +229,26 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
             tool_results = []
             for block in response.content:
                 if block.type == "tool_use":
-                    t1 = time.perf_counter()
-                    result = await execute_tool(block.name, block.input)
+                    tool_result = await execute_tool(block.name, block.input)
                     logger.debug(
-                        f"  turn {turn}: {block.name} completed in {time.perf_counter() - t1:.3f}s, "
-                        f"{len(result)} chars"
+                        f"  turn {turn}: {block.name} {tool_result.status} in "
+                        f"{tool_result.duration_ms}ms, {len(tool_result.content)} chars"
                     )
-                    tool_results.append({
+                    await pool.execute(
+                        """INSERT INTO action_logs
+                               (session_id, tool_name, input, output, status, error_message, duration_ms)
+                           VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7)""",
+                        sid, block.name, json.dumps(block.input), tool_result.content,
+                        tool_result.status, tool_result.error, tool_result.duration_ms,
+                    )
+                    tr: dict[str, Any] = {
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": result,
-                    })
+                        "content": tool_result.content,
+                    }
+                    if tool_result.status == "error":
+                        tr["is_error"] = True
+                    tool_results.append(tr)
             messages.append({"role": "user", "content": tool_results})
             await _save_message(pool, sid, "user", tool_results)
         else:
@@ -282,11 +291,11 @@ async def run_turn_stream(
     Run one user turn through the agent loop, yielding SSE-formatted strings.
 
     Events yielded:
-        event: session    data: {"session_id": "..."}   — before first LLM call
-        event: tool_start data: {"name": "..."}          — before each tool execution
-        event: tool_done  data: {"name": "..."}          — after each tool execution
-        event: text_delta data: {"text": "..."}          — streaming text tokens
-        event: done       data: {}                       — after session persisted
+        event: session    data: {"session_id": "..."}                              — before first LLM call
+        event: tool_start data: {"name": "..."}                                    — before each tool execution
+        event: tool_done  data: {"name": "...", "status": "success"|"error", "error": "..."|null}
+        event: text_delta data: {"text": "..."}                                    — streaming text tokens
+        event: done       data: {}                                                 — after session persisted
     """
     if not session_id:
         session_id = str(uuid.uuid4())
@@ -361,18 +370,27 @@ async def run_turn_stream(
             for block in response.content:
                 if block.type == "tool_use":
                     yield f"event: tool_start\ndata: {json.dumps({'name': block.name})}\n\n"
-                    t1 = time.perf_counter()
-                    result = await execute_tool(block.name, block.input)
+                    tool_result = await execute_tool(block.name, block.input)
                     logger.debug(
-                        f"  stream turn {turn}: {block.name} completed in "
-                        f"{time.perf_counter() - t1:.3f}s, {len(result)} chars"
+                        f"  stream turn {turn}: {block.name} {tool_result.status} in "
+                        f"{tool_result.duration_ms}ms, {len(tool_result.content)} chars"
                     )
-                    yield f"event: tool_done\ndata: {json.dumps({'name': block.name})}\n\n"
-                    tool_results.append({
+                    await pool.execute(
+                        """INSERT INTO action_logs
+                               (session_id, tool_name, input, output, status, error_message, duration_ms)
+                           VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7)""",
+                        sid, block.name, json.dumps(block.input), tool_result.content,
+                        tool_result.status, tool_result.error, tool_result.duration_ms,
+                    )
+                    yield f"event: tool_done\ndata: {json.dumps({'name': block.name, 'status': tool_result.status, 'error': tool_result.error})}\n\n"
+                    tr: dict[str, Any] = {
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": result,
-                    })
+                        "content": tool_result.content,
+                    }
+                    if tool_result.status == "error":
+                        tr["is_error"] = True
+                    tool_results.append(tr)
 
             messages.append({"role": "user", "content": tool_results})
             await _save_message(pool, sid, "user", tool_results)

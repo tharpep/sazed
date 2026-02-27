@@ -3,6 +3,7 @@
 import ipaddress
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -11,6 +12,14 @@ import httpx
 
 from app.agent.memory import upsert_fact
 from app.config import settings
+
+
+@dataclass
+class ToolResult:
+    content: str       # string sent to the LLM as tool result
+    status: str        # "success" | "error"
+    error: str | None  # human-readable error cause, None on success
+    duration_ms: int
 
 
 @dataclass
@@ -1573,20 +1582,31 @@ def _check_ssrf(url: str) -> str | None:
     return None
 
 
-async def execute_tool(name: str, args: dict[str, Any]) -> str:
-    """Dispatch a tool call and return the result as a string for the LLM."""
+async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
+    """Dispatch a tool call and return a ToolResult for the LLM and audit log."""
+    t0 = time.perf_counter()
+
+    def _ms() -> int:
+        return int((time.perf_counter() - t0) * 1000)
+
+    def _err(msg: str) -> ToolResult:
+        return ToolResult(content=msg, status="error", error=msg, duration_ms=_ms())
+
+    def _ok(content: str) -> ToolResult:
+        return ToolResult(content=content, status="success", error=None, duration_ms=_ms())
+
     tool = _tool_index.get(name)
     if tool is None:
-        return f"Unknown tool: {name}"
+        return _err(f"Unknown tool: {name}")
 
     if tool.method == "INTERNAL":
-        return await _execute_internal(name, args)
+        return await _execute_internal(name, args, t0)
 
     # SSRF guard — validate any URL argument before forwarding to the gateway
     if "url" in args:
         ssrf_err = _check_ssrf(str(args["url"]))
         if ssrf_err:
-            return f"Blocked: {ssrf_err}"
+            return _err(ssrf_err)
 
     # Interpolate path params, keeping remaining args for query/body
     endpoint = tool.endpoint
@@ -1594,7 +1614,7 @@ async def execute_tool(name: str, args: dict[str, Any]) -> str:
     for param in tool.path_params:
         val = remaining.pop(param, None)
         if val is None:
-            return f"Missing required path parameter: {param}"
+            return _err(f"Missing required path parameter: {param}")
         endpoint = endpoint.replace(f"{{{param}}}", quote(str(val), safe=""))
 
     url = f"{settings.gateway_url}{endpoint}"
@@ -1614,33 +1634,42 @@ async def execute_tool(name: str, args: dict[str, Any]) -> str:
             elif tool.method == "DELETE":
                 resp = await client.delete(url, headers=headers)
                 if resp.status_code == 204:
-                    return "Deleted successfully."
+                    return _ok("Deleted successfully.")
             else:
-                return f"Unsupported method: {tool.method}"
+                return _err(f"Unsupported method: {tool.method}")
     except httpx.TimeoutException:
-        return "Request timed out."
+        return _err("Request timed out.")
     except httpx.RequestError as e:
-        return f"Request error: {e}"
+        return _err(f"Request error: {e}")
 
     if not resp.is_success:
-        return f"Error {resp.status_code}: {resp.text}"
+        return _err(f"Error {resp.status_code}: {resp.text}")
 
     try:
-        return json.dumps(resp.json(), indent=2)
+        return _ok(json.dumps(resp.json(), indent=2))
     except Exception:
-        return resp.text
+        return _ok(resp.text)
 
 
-async def _execute_internal(name: str, args: dict[str, Any]) -> str:
+async def _execute_internal(name: str, args: dict[str, Any], t0: float) -> ToolResult:
     """Handle internal tools that don't call the gateway."""
-    if name == "memory_update":
-        fact = await upsert_fact(
-            fact_type=args["fact_type"],
-            key=args["key"],
-            value=args["value"],
-            confidence=1.0,
-            source="user_explicit",
-        )
-        return f"Remembered: [{fact['fact_type']}] {fact['key']} = {fact['value']}"
+    def _ms() -> int:
+        return int((time.perf_counter() - t0) * 1000)
 
-    return f"Unknown internal tool: {name}"
+    if name == "memory_update":
+        try:
+            fact = await upsert_fact(
+                fact_type=args["fact_type"],
+                key=args["key"],
+                value=args["value"],
+                confidence=1.0,
+                source="user_explicit",
+            )
+            content = f"Remembered: [{fact['fact_type']}] {fact['key']} = {fact['value']}"
+            return ToolResult(content=content, status="success", error=None, duration_ms=_ms())
+        except Exception as e:
+            msg = f"Memory update failed: {e}"
+            return ToolResult(content=msg, status="error", error=msg, duration_ms=_ms())
+
+    msg = f"Unknown internal tool: {name}"
+    return ToolResult(content=msg, status="error", error=msg, duration_ms=_ms())
