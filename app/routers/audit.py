@@ -9,7 +9,7 @@ from app.db import get_pool
 router = APIRouter()
 
 
-@router.get("")
+@router.get("/actions")
 async def list_action_logs(
     session_id: str | None = Query(None),
     status: str | None = Query(None),
