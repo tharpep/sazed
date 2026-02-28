@@ -5,6 +5,7 @@ import json
 import logging
 import time
 import uuid
+from collections import Counter
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Any, AsyncIterator
@@ -27,6 +28,11 @@ def _get_client() -> anthropic.AsyncAnthropic:
     if _client is None:
         _client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
     return _client
+
+
+def _tool_sig(name: str, args: dict) -> tuple:
+    """Stable hashable signature for a tool call — used for stuck loop detection."""
+    return (name, tuple(sorted((k, str(v)) for k, v in args.items())))
 
 
 async def _build_system_prompt(mode: str = "chat") -> list[dict[str, Any]]:
@@ -198,6 +204,9 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
     tools = select_tools(user_message)
     logger.debug(f"  selected {len(tools)} tools for: '{user_message[:80]}'")
 
+    tool_call_counts: Counter = Counter()
+    stuck = False
+
     for turn in range(settings.agent_max_turns):
         model = settings.haiku_model
         t0 = time.perf_counter()
@@ -232,6 +241,20 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
             tool_results = []
             log_coros = []
             for block, tool_result in zip(tool_blocks, raw_results):
+                sig = _tool_sig(block.name, block.input)
+                tool_call_counts[sig] += 1
+                if tool_call_counts[sig] >= 3:
+                    logger.warning(f"  stuck loop detected: {block.name} called 3x with same args")
+                    stuck_msg = (
+                        f"I seem to be stuck — I've called `{block.name}` three times with the "
+                        f"same arguments without making progress. Please try rephrasing your "
+                        f"request or providing more specific details."
+                    )
+                    final_content = [{"type": "text", "text": stuck_msg}]
+                    await _save_message(pool, sid, "assistant", final_content)
+                    stuck = True
+                    break
+
                 logger.debug(
                     f"  turn {turn}: {block.name} {tool_result.status} in "
                     f"{tool_result.duration_ms}ms, {len(tool_result.content)} chars"
@@ -251,6 +274,9 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
                 if tool_result.status == "error":
                     tr["is_error"] = True
                 tool_results.append(tr)
+
+            if stuck:
+                break
 
             await asyncio.gather(*log_coros)
             messages.append({"role": "user", "content": tool_results})
@@ -338,6 +364,9 @@ async def run_turn_stream(
     tools = select_tools(user_message)
     logger.debug(f"  selected {len(tools)} tools for: '{user_message[:80]}'")
 
+    tool_call_counts: Counter = Counter()
+    stuck = False
+
     for turn in range(settings.agent_max_turns):
         model = settings.haiku_model
         t0 = time.perf_counter()
@@ -380,6 +409,20 @@ async def run_turn_stream(
             tool_results = []
             log_coros = []
             for block, tool_result in zip(tool_blocks, raw_results):
+                sig = _tool_sig(block.name, block.input)
+                tool_call_counts[sig] += 1
+                if tool_call_counts[sig] >= 3:
+                    logger.warning(f"  stream stuck loop detected: {block.name} called 3x with same args")
+                    stuck_msg = (
+                        f"I seem to be stuck — I've called `{block.name}` three times with the "
+                        f"same arguments without making progress. Please try rephrasing your "
+                        f"request or providing more specific details."
+                    )
+                    await _save_message(pool, sid, "assistant", [{"type": "text", "text": stuck_msg}])
+                    yield f"event: text_delta\ndata: {json.dumps({'text': stuck_msg})}\n\n"
+                    stuck = True
+                    break
+
                 logger.debug(
                     f"  stream turn {turn}: {block.name} {tool_result.status} in "
                     f"{tool_result.duration_ms}ms, {len(tool_result.content)} chars"
@@ -400,6 +443,9 @@ async def run_turn_stream(
                 if tool_result.status == "error":
                     tr["is_error"] = True
                 tool_results.append(tr)
+
+            if stuck:
+                break
 
             await asyncio.gather(*log_coros)
             messages.append({"role": "user", "content": tool_results})

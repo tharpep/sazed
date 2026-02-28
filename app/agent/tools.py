@@ -22,6 +22,29 @@ class ToolResult:
     duration_ms: int
 
 
+# ---------------------------------------------------------------------------
+# Tool result cache — read-only tools, 60s TTL, process-scoped in-memory
+# ---------------------------------------------------------------------------
+
+_TOOL_CACHE: dict[tuple, tuple["ToolResult", float]] = {}
+_CACHE_TTL: float = 60.0
+
+_CACHEABLE_TOOLS: frozenset[str] = frozenset({
+    "get_events", "check_availability", "search_events",
+    "get_task_lists", "get_tasks",
+    "list_emails", "search_emails", "get_email",
+    "search_knowledge_base", "get_kb_index", "list_kb_sources",
+    "list_files", "list_folders", "get_file_info", "read_file",
+    "web_search", "fetch_url",
+    "list_repos", "get_repo", "list_issues", "get_issue",
+    "list_prs", "get_pr", "get_github_file", "list_commits",
+    "list_branches", "list_releases", "get_latest_release",
+    "get_subscriptions", "get_budget", "get_income",
+    "get_upcoming_bills", "get_monthly_summary",
+    "get_spreadsheet_info", "read_sheet",
+})
+
+
 @dataclass
 class ToolDef:
     name: str
@@ -1716,9 +1739,17 @@ _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
         r'|ping me|heads.?up|let me know when|remind me)\b', re.I),
     "kb":       re.compile(
         r'\b(knowledge.?base|my notes?|my docs?|recall'
-        r'|what (do |have )?i (know|noted|written|saved|documented)'
+        r'|what (do |have )?i (know|noted|written|saved|documented|decided|said|mentioned)'
         r'|look up in my notes?|search my notes?|in my notes?'
-        r'|do i have (any )?info|from my notes?|check my notes?)\b', re.I),
+        r'|do i have (any |a )?(info|notes?|docs?|document|file|something) (on|about|for|regarding)'
+        r'|from my notes?|check my notes?'
+        r'|what did (i|we) (discuss|decide|talk about|say|mention|write)'
+        r'|do you (know|have|remember) (anything|something) about'
+        r'|find (my |the )?(notes?|docs?|info|document) (on|about|for)'
+        r'|what.s in my (notes?|docs?|kb|knowledge)'
+        r'|is there (anything|something) (on|about|regarding)'
+        r'|remind me (what|about|of)'
+        r'|what (is|are) (my|the) (notes?|docs?|info) (on|about))\b', re.I),
     "web":      re.compile(
         r'\b(look up|google|browse|find out|who is|news'
         r'|current (price|weather|news|status|version|rate|score)'
@@ -1740,6 +1771,7 @@ _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
 
 _ALWAYS_INCLUDED: frozenset[str] = frozenset({"memory_update"})
 _DEFAULT_CATEGORIES: frozenset[str] = frozenset({"calendar", "tasks", "kb", "web"})
+_STICKY_CATEGORIES: frozenset[str] = frozenset({"kb"})  # always injected regardless of pattern match
 _CO_SELECT: dict[str, frozenset[str]] = {
     "sheets": frozenset({"drive"}),
 }
@@ -1755,6 +1787,7 @@ def select_tools(user_message: str) -> list[dict]:
     """
     matched = {cat for cat, pat in _CATEGORY_PATTERNS.items() if pat.search(user_message)}
     categories = matched if matched else _DEFAULT_CATEGORIES
+    categories = categories | _STICKY_CATEGORIES
 
     # Apply co-selection: some categories implicitly require others
     for cat in list(categories):
@@ -1822,6 +1855,20 @@ async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
     if tool.method == "INTERNAL":
         return await _execute_internal(name, args, t0)
 
+    # Cache lookup — read-only tools only, 60s TTL
+    cache_key = None
+    if name in _CACHEABLE_TOOLS:
+        cache_key = (name, tuple(sorted((k, str(v)) for k, v in args.items())))
+        cached = _TOOL_CACHE.get(cache_key)
+        if cached:
+            result, expiry = cached
+            if time.time() < expiry:
+                return ToolResult(
+                    content=result.content, status=result.status,
+                    error=result.error, duration_ms=0,
+                )
+            del _TOOL_CACHE[cache_key]
+
     # SSRF guard — validate any URL argument before forwarding to the gateway
     if "url" in args:
         ssrf_err = _check_ssrf(str(args["url"]))
@@ -1866,9 +1913,13 @@ async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
         return _err(f"Error {resp.status_code}: {resp.text}")
 
     try:
-        return _ok(json.dumps(resp.json(), indent=2))
+        result = _ok(json.dumps(resp.json(), indent=2))
     except Exception:
-        return _ok(resp.text)
+        result = _ok(resp.text)
+
+    if cache_key:
+        _TOOL_CACHE[cache_key] = (result, time.time() + _CACHE_TTL)
+    return result
 
 
 async def _execute_internal(name: str, args: dict[str, Any], t0: float) -> ToolResult:
