@@ -442,6 +442,18 @@ TOOLS: list[ToolDef] = [
         endpoint="/kb/search",
     ),
     ToolDef(
+        name="get_kb_index",
+        description=(
+            "Get a directory of all documents in the knowledge base with one-line summaries. "
+            "Use this before searching when you need to discover what topics or files exist, "
+            "or when the user asks what you know about a broad subject. "
+            "More efficient than searching blindly — call this first to triage, then search specific files."
+        ),
+        input_schema={"type": "object", "properties": {}},
+        method="GET",
+        endpoint="/kb/index",
+    ),
+    ToolDef(
         name="list_kb_sources",
         description=(
             "List all documents currently indexed in the knowledge base. "
@@ -1671,7 +1683,7 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
                  "create_task", "update_task", "delete_task"],
     "email":    ["list_emails", "search_emails", "get_email", "draft_email"],
     "notify":   ["send_notification"],
-    "kb":       ["search_knowledge_base", "list_kb_sources", "delete_kb_source", "sync_kb"],
+    "kb":       ["search_knowledge_base", "get_kb_index", "list_kb_sources", "delete_kb_source", "sync_kb"],
     "web":      ["web_search", "fetch_url"],
     "drive":    ["list_files", "list_folders", "create_folder", "get_file_info", "read_file",
                  "create_file", "update_file", "append_to_file", "delete_file", "move_file",
