@@ -1,6 +1,7 @@
 """Structured memory — agent_memory store and helpers."""
 
 import logging
+import re
 import uuid
 from collections import defaultdict
 from typing import Any
@@ -8,6 +9,20 @@ from typing import Any
 from app.db import get_pool
 
 logger = logging.getLogger(__name__)
+
+_MEMORY_PATTERNS: dict[str, re.Pattern] = {
+    "preference": re.compile(
+        r'\b(prefer|like|want|style|format|how i|my (preferred|favorite|usual|default)'
+        r'|always (do|use|write|format)|never (do|use)|instead of|rather than)\b', re.I),
+    "project": re.compile(
+        r'\b(project|work|build|coding|develop|startup|intern|job|goal|objective'
+        r'|current(ly)?|working on|building|making|side.?project)\b', re.I),
+    "relationship": re.compile(
+        r'\b(person|people|friend|colleague|team|partner|contact|collaborat'
+        r'|who is|who are|my (boss|manager|coworker|advisor|professor|mentor))\b', re.I),
+}
+
+_ALWAYS_MEMORY_CATEGORIES: frozenset[str] = frozenset({"personal", "instruction"})
 
 
 async def load_memory() -> list[dict[str, Any]]:
@@ -18,6 +33,27 @@ async def load_memory() -> list[dict[str, Any]]:
         "FROM agent_memory ORDER BY updated_at DESC"
     )
     logger.debug(f"load_memory: {len(rows)} fact(s)")
+    return [dict(row) for row in rows]
+
+
+async def load_relevant_memory(user_message: str) -> list[dict[str, Any]]:
+    """Load only the fact categories relevant to the current user message.
+
+    personal and instruction are always included.
+    preference, project, relationship are pattern-matched from the message.
+    """
+    categories = set(_ALWAYS_MEMORY_CATEGORIES)
+    for cat, pat in _MEMORY_PATTERNS.items():
+        if pat.search(user_message):
+            categories.add(cat)
+
+    pool = get_pool()
+    rows = await pool.fetch(
+        "SELECT id, fact_type, key, value, confidence, source, created_at, updated_at "
+        "FROM agent_memory WHERE fact_type = ANY($1::text[]) ORDER BY updated_at DESC",
+        list(categories),
+    )
+    logger.debug(f"load_relevant_memory: {len(rows)} fact(s) from categories {categories}")
     return [dict(row) for row in rows]
 
 

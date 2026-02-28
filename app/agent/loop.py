@@ -12,7 +12,7 @@ from typing import Any, AsyncIterator
 
 import anthropic
 
-from app.agent.memory import format_for_prompt, load_memory
+from app.agent.memory import format_for_prompt, load_memory, load_relevant_memory
 from app.agent.session import compress_context
 from app.agent.tools import execute_tool, get_tool_schemas, select_tools
 from app.config import settings
@@ -35,8 +35,8 @@ def _tool_sig(name: str, args: dict) -> tuple:
     return (name, tuple(sorted((k, str(v)) for k, v in args.items())))
 
 
-async def _build_system_prompt(mode: str = "chat") -> list[dict[str, Any]]:
-    memory_section = format_for_prompt(await load_memory())
+async def _build_system_prompt(mode: str = "chat", user_message: str = "") -> list[dict[str, Any]]:
+    memory_section = format_for_prompt(await load_relevant_memory(user_message))
     blocks: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -200,7 +200,7 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
 
     client = _get_client()
     final_content: list[dict[str, Any]] = []
-    system = await _build_system_prompt(mode)
+    system = await _build_system_prompt(mode, user_message)
     tools = select_tools(user_message)
     logger.debug(f"  selected {len(tools)} tools for: '{user_message[:80]}'")
 
@@ -360,7 +360,7 @@ async def run_turn_stream(
     yield f"event: session\ndata: {json.dumps({'session_id': session_id})}\n\n"
 
     client = _get_client()
-    system = await _build_system_prompt(mode)
+    system = await _build_system_prompt(mode, user_message)
     tools = select_tools(user_message)
     logger.debug(f"  selected {len(tools)} tools for: '{user_message[:80]}'")
 
