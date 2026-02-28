@@ -19,8 +19,6 @@ from app.db import get_pool
 
 logger = logging.getLogger(__name__)
 
-MAX_TURNS = 10
-
 _client: anthropic.AsyncAnthropic | None = None
 
 
@@ -200,7 +198,7 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
     tools = select_tools(user_message)
     logger.debug(f"  selected {len(tools)} tools for: '{user_message[:80]}'")
 
-    for turn in range(MAX_TURNS):
+    for turn in range(settings.agent_max_turns):
         model = settings.haiku_model
         t0 = time.perf_counter()
         logger.debug(f"  turn {turn}: calling {model} with {len(messages)} messages in context")
@@ -340,7 +338,7 @@ async def run_turn_stream(
     tools = select_tools(user_message)
     logger.debug(f"  selected {len(tools)} tools for: '{user_message[:80]}'")
 
-    for turn in range(MAX_TURNS):
+    for turn in range(settings.agent_max_turns):
         model = settings.haiku_model
         t0 = time.perf_counter()
         logger.debug(f"  stream turn {turn}: calling {model} with {len(messages)} messages")

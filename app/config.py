@@ -33,5 +33,8 @@ class Settings(BaseSettings):
     # Context window
     session_window_size: int = 15  # Recent messages to keep verbatim; older messages are compressed
 
+    # Agent loop
+    agent_max_turns: int = 20  # Maximum tool-call turns per request (AGENT_MAX_TURNS in .env)
+
 
 settings = Settings()
