@@ -1430,18 +1430,35 @@ TOOLS: list[ToolDef] = [
     ),
     ToolDef(
         name="add_subscription",
-        description="Add a new recurring subscription.",
+        description="Add a new recurring subscription or bill.",
         input_schema={
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Service or subscription name."},
-                "amount": {"type": "number", "description": "Billing amount."},
+                "name": {"type": "string", "description": "Service or bill name."},
+                "amount": {"type": "number", "description": "Billing amount (use estimate for variable bills)."},
                 "frequency": {
                     "type": "string",
                     "enum": ["monthly", "annual", "weekly", "biweekly"],
                     "description": "Billing frequency. Defaults to monthly.",
                 },
-                "category": {"type": "string", "description": "Category, e.g. 'streaming', 'software'."},
+                "category": {"type": "string", "description": "Category, e.g. 'streaming', 'utilities', 'software'."},
+                "type": {
+                    "type": "string",
+                    "enum": ["subscription", "bill"],
+                    "description": "subscription for optional services, bill for financial obligations. Defaults to subscription.",
+                },
+                "variable_amount": {
+                    "type": "boolean",
+                    "description": "True if the amount varies month to month (e.g. electricity). Amount is then an estimate.",
+                },
+                "billing_day": {
+                    "type": "integer",
+                    "description": "Day of month the charge occurs (1–31). Use for monthly items.",
+                },
+                "next_billing_date": {
+                    "type": "string",
+                    "description": "Next due/charge date as YYYY-MM-DD. Use for annual, weekly, or biweekly items.",
+                },
                 "notes": {"type": "string", "description": "Optional notes."},
             },
             "required": ["name", "amount", "category"],
@@ -1451,7 +1468,7 @@ TOOLS: list[ToolDef] = [
     ),
     ToolDef(
         name="update_subscription",
-        description="Update fields on an existing subscription (name, amount, frequency, category, active, notes).",
+        description="Update fields on an existing subscription or bill.",
         input_schema={
             "type": "object",
             "properties": {
@@ -1463,12 +1480,30 @@ TOOLS: list[ToolDef] = [
                     "enum": ["monthly", "annual", "weekly", "biweekly"],
                 },
                 "category": {"type": "string"},
+                "type": {"type": "string", "enum": ["subscription", "bill"]},
+                "variable_amount": {"type": "boolean"},
+                "billing_day": {"type": "integer", "description": "Day of month (1–31)."},
+                "next_billing_date": {"type": "string", "description": "Next due date as YYYY-MM-DD."},
                 "active": {"type": "boolean", "description": "Set false to deactivate."},
                 "notes": {"type": "string"},
             },
             "required": ["subscription_id"],
         },
         method="PATCH",
+        endpoint="/finance/subscriptions/{subscription_id}",
+        path_params=["subscription_id"],
+    ),
+    ToolDef(
+        name="delete_subscription",
+        description="Deactivate (soft-delete) a subscription or bill by ID.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "subscription_id": {"type": "string", "description": "Subscription UUID."},
+            },
+            "required": ["subscription_id"],
+        },
+        method="DELETE",
         endpoint="/finance/subscriptions/{subscription_id}",
         path_params=["subscription_id"],
     ),
@@ -1491,6 +1526,20 @@ TOOLS: list[ToolDef] = [
             "required": ["category", "monthly_limit"],
         },
         method="PUT",
+        endpoint="/finance/budget/{category}",
+        path_params=["category"],
+    ),
+    ToolDef(
+        name="delete_budget",
+        description="Remove a budget category limit.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "description": "Budget category to remove."},
+            },
+            "required": ["category"],
+        },
+        method="DELETE",
         endpoint="/finance/budget/{category}",
         path_params=["category"],
     ),
@@ -1521,10 +1570,39 @@ TOOLS: list[ToolDef] = [
         endpoint="/finance/income",
     ),
     ToolDef(
+        name="delete_income",
+        description="Deactivate (soft-delete) an income source by ID.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "income_id": {"type": "string", "description": "Income source UUID."},
+            },
+            "required": ["income_id"],
+        },
+        method="DELETE",
+        endpoint="/finance/income/{income_id}",
+        path_params=["income_id"],
+    ),
+    ToolDef(
+        name="get_upcoming_bills",
+        description=(
+            "List subscriptions and bills with a known billing date that are due within the next N days "
+            "(default 30), sorted by due date. Only returns items that have billing_day or next_billing_date set."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "description": "Look-ahead window in days. Defaults to 30."},
+            },
+        },
+        method="GET",
+        endpoint="/finance/upcoming",
+    ),
+    ToolDef(
         name="get_monthly_summary",
         description=(
-            "Get a computed monthly financial summary: income, subscription costs, net estimated, "
-            "plus full lists of income sources, subscriptions, and budget limits."
+            "Get a computed monthly financial summary: income, subscription/bill costs, net estimated, "
+            "plus full lists of income sources, subscriptions, bills, and budget limits."
         ),
         input_schema={"type": "object", "properties": {}},
         method="GET",
@@ -1606,9 +1684,10 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
                  "list_contributors", "compare_refs"],
     "sheets":   ["create_spreadsheet", "get_spreadsheet_info", "read_sheet", "write_sheet",
                  "append_sheet_rows", "clear_sheet_range"],
-    "finance":  ["get_subscriptions", "add_subscription", "update_subscription",
-                 "get_budget", "set_budget_limit",
-                 "get_income", "add_income_source", "get_monthly_summary"],
+    "finance":  ["get_subscriptions", "add_subscription", "update_subscription", "delete_subscription",
+                 "get_budget", "set_budget_limit", "delete_budget",
+                 "get_income", "add_income_source", "delete_income",
+                 "get_upcoming_bills", "get_monthly_summary"],
 }
 
 _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
@@ -1641,9 +1720,10 @@ _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
     "sheets":   re.compile(
         r'\b(sheet|spreadsheet|excel|google sheets|csv|row|column|cell|table)\b', re.I),
     "finance":  re.compile(
-        r'\b(subscri(ption|be)|budget|income|spend(ing)?|expense|bill(ing)?|payment|monthly cost'
+        r'\b(subscri(ption|be)|budget|income|spend(ing)?|expense|bill(ing|s?)|payment|monthly cost'
         r'|how much (do i |am i )?pay|afford|net (income|pay)|salary|paycheck'
-        r'|financial|finance|money|cash flow|subscription|netflix|spotify|hulu)\b', re.I),
+        r'|financial|finance|money|cash flow|subscription|netflix|spotify|hulu'
+        r'|due (date|on|this)|when (is|does|do).*charge|upcoming (bill|payment|charge))\b', re.I),
 }
 
 _ALWAYS_INCLUDED: frozenset[str] = frozenset({"memory_update"})

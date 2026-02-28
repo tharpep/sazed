@@ -97,6 +97,19 @@ async def update_income(income_id: str, request: Request):
     return await _proxy("PATCH", f"/finance/income/{income_id}", json=await request.json())
 
 
+@router.delete("/income/{income_id}")
+async def delete_income(income_id: str):
+    return await _proxy("DELETE", f"/finance/income/{income_id}")
+
+
+# ── Upcoming bills ──────────────────────────────────────────────────────────
+
+
+@router.get("/upcoming")
+async def upcoming_bills(days: int = Query(default=30)):
+    return await _proxy("GET", "/finance/upcoming", params={"days": days})
+
+
 # ── Summary ────────────────────────────────────────────────────────────────
 
 
