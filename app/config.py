@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     database_url: str = ""
 
     # KB ingestion
-    conversations_folder_id: str = ""   # Drive folder ID for Knowledge Base/Conversations/
+    conversations_folder_id: str = "109Nh8yA11PpQ4iWbJ6LHGIL-2roCn5Ok"  # Drive folder ID for Knowledge Base/Conversations/
 
     # Feature flags
     session_summarization: bool = True  # Generate agent_memory summary after each session
