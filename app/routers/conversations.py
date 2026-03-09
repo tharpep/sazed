@@ -1,5 +1,6 @@
 """Conversation history endpoints."""
 
+import json
 import logging
 from datetime import timezone
 
@@ -106,21 +107,36 @@ async def archive_sessions(
 
     # Process each archived session sequentially — write summary to Drive and sync KB.
     # Runs outside the transaction so a Drive failure never rolls back the DB archive.
+    kb_succeeded = 0
+    kb_failed = 0
+    kb_errors: list[str] = []
     for sid in session_ids:
         async with pool.acquire() as conn:
             msg_rows = await conn.fetch(
                 "SELECT role, content FROM archived_messages WHERE session_id = $1 ORDER BY timestamp ASC",
                 sid,
             )
-        messages = [{"role": r["role"], "content": r["content"]} for r in msg_rows]
+        messages = [{"role": r["role"], "content": json.loads(r["content"])} for r in msg_rows]
         last_activity = session_timestamps[sid]
         session_dt = last_activity.astimezone(timezone.utc) if last_activity.tzinfo else last_activity.replace(tzinfo=timezone.utc)
         try:
-            await process_session(sid, messages, session_dt=session_dt)
+            result = await process_session(sid, messages, session_dt=session_dt)
+            if result.get("kb_ingested"):
+                kb_succeeded += 1
+            elif result.get("kb_error"):
+                kb_failed += 1
+                kb_errors.append(f"{sid}: {result['kb_error']}")
         except Exception as e:
+            kb_failed += 1
+            kb_errors.append(f"{sid}: {e}")
             logger.error(f"process_session failed for archived session {sid}: {e}")
 
-    return {
+    response: dict = {
         "sessions_archived": len(session_ids),
         "messages_archived": messages_archived,
+        "kb_summaries_written": kb_succeeded,
     }
+    if kb_failed:
+        response["kb_failures"] = kb_failed
+        response["kb_errors"] = kb_errors
+    return response

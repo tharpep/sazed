@@ -200,11 +200,12 @@ Conversation:
     return f"# Session — {date_str}\n\n{body}"
 
 
-async def _ingest_session_to_kb(summary: str, session_dt: datetime) -> None:
-    """Write session summary to Drive and trigger KB sync."""
+async def _ingest_session_to_kb(summary: str, session_dt: datetime) -> tuple[bool, str]:
+    """Write session summary to Drive and trigger KB sync. Returns (success, error_message)."""
     if not settings.conversations_folder_id:
-        logger.warning("conversations_folder_id not configured — skipping KB ingestion")
-        return
+        msg = "conversations_folder_id not configured — skipping KB ingestion"
+        logger.warning(msg)
+        return False, msg
 
     filename = f"session-{session_dt.strftime('%Y-%m-%d-%H%M%S')}.md"
     base = settings.gateway_url.rstrip("/")
@@ -222,11 +223,9 @@ async def _ingest_session_to_kb(summary: str, session_dt: datetime) -> None:
             headers=headers,
         )
         if not write_resp.is_success:
-            logger.error(
-                f"Failed to write session summary to Drive: "
-                f"{write_resp.status_code} {write_resp.text}"
-            )
-            return
+            msg = f"Drive upload failed ({write_resp.status_code}): {write_resp.text}"
+            logger.error(f"Failed to write session summary to Drive: {msg}")
+            return False, msg
 
         logger.debug(f"Session summary written to Drive: {filename}")
 
@@ -235,6 +234,8 @@ async def _ingest_session_to_kb(summary: str, session_dt: datetime) -> None:
             logger.warning(f"KB sync trigger failed after session ingestion: {sync_resp.status_code}")
         else:
             logger.debug("KB sync triggered after session ingestion")
+
+    return True, ""
 
 
 async def process_session(
@@ -288,14 +289,19 @@ async def process_session(
         except (KeyError, ValueError):
             continue
 
+    kb_ok = False
+    kb_error = ""
     if kb_summary:
         try:
-            await _ingest_session_to_kb(kb_summary, session_dt)
+            kb_ok, kb_error = await _ingest_session_to_kb(kb_summary, session_dt)
         except Exception as e:
+            kb_error = str(e)
             logger.error(f"KB ingestion failed for session {session_id}: {e}")
 
     return {
         "session_id": session_id,
         "facts_extracted": len(upserted),
         "summary": summary,
+        "kb_ingested": kb_ok,
+        "kb_error": kb_error,
     }
