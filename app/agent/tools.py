@@ -1647,6 +1647,61 @@ TOOLS: list[ToolDef] = [
     # -------------------------------------------------------------------------
     # Memory (internal — does not call the gateway)
     # -------------------------------------------------------------------------
+    # ── Places ──────────────────────────────────────────────────────────────
+    ToolDef(
+        name="search_places",
+        description=(
+            "Search for real-world places using natural language. Use for restaurants, "
+            "coffee shops, gyms, stores, attractions, etc. Optionally provide the user's "
+            "current coordinates for 'near me' queries."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural language search, e.g. 'quiet coffee shop' or 'Italian restaurants in Broad Ripple'.",
+                },
+                "latitude": {
+                    "type": "number",
+                    "description": "User's current latitude for location bias.",
+                },
+                "longitude": {
+                    "type": "number",
+                    "description": "User's current longitude for location bias.",
+                },
+                "radius_meters": {
+                    "type": "number",
+                    "description": "Search radius in meters when using location bias. Defaults to 5000.",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Max results to return (1-20). Defaults to 5.",
+                },
+            },
+            "required": ["query"],
+        },
+        method="POST",
+        endpoint="/places/search",
+    ),
+    ToolDef(
+        name="get_place_details",
+        description="Get full details for a specific place by its Place ID — hours, phone, website, reviews, etc.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "place_id": {
+                    "type": "string",
+                    "description": "The Place ID from a search_places result.",
+                },
+            },
+            "required": ["place_id"],
+        },
+        method="GET",
+        endpoint="/places/{place_id}",
+        path_params=["place_id"],
+    ),
+    # ── Memory ──────────────────────────────────────────────────────────────
     ToolDef(
         name="memory_update",
         description=(
@@ -1723,6 +1778,7 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
                  "get_budget", "set_budget_limit", "delete_budget",
                  "get_income", "add_income_source", "delete_income",
                  "get_upcoming_bills", "get_monthly_summary"],
+    "places":   ["search_places", "get_place_details"],
 }
 
 _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
@@ -1767,6 +1823,10 @@ _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
         r'|how much (do i |am i )?pay|afford|net (income|pay)|salary|paycheck'
         r'|financial|finance|money|cash flow|subscription|netflix|spotify|hulu'
         r'|due (date|on|this)|when (is|does|do).*charge|upcoming (bill|payment|charge))\b', re.I),
+    "places":   re.compile(
+        r'\b(restaurant|cafe|coffee|bar|gym|store|shop|nearby|near me|places?|food|eat|drink'
+        r'|hotel|directions?|open.*(now|today)|hours|visit|dine|dining|takeout|delivery'
+        r'|find (a |the |me )?(place|spot|restaurant|cafe|bar)|where (can|should) (i|we))\b', re.I),
 }
 
 _ALWAYS_INCLUDED: frozenset[str] = frozenset({"memory_update"})

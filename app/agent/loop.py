@@ -35,8 +35,15 @@ def _tool_sig(name: str, args: dict) -> tuple:
     return (name, tuple(sorted((k, str(v)) for k, v in args.items())))
 
 
-async def _build_system_prompt(mode: str = "chat", user_message: str = "") -> list[dict[str, Any]]:
+async def _build_system_prompt(mode: str = "chat", user_message: str = "", location=None) -> list[dict[str, Any]]:
     memory_section = format_for_prompt(await load_relevant_memory(user_message))
+    location_section = ""
+    if location:
+        location_section = (
+            f"\n\n## User's Current Location\n"
+            f"Lat: {location.latitude}, Lng: {location.longitude}\n"
+            f"Use these coordinates when calling search_places for 'near me' queries."
+        )
     blocks: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -51,13 +58,14 @@ async def _build_system_prompt(mode: str = "chat", user_message: str = "") -> li
                 "- The user can always see what tools you use, so skip action telegraphing.\n\n"
                 "## Tools\n"
                 "You have tools for: calendar, tasks, email, Google Drive, GitHub, "
-                "Google Sheets, notifications, web search, and a personal knowledge base.\n\n"
+                "Google Sheets, notifications, web search, places, and a personal knowledge base.\n\n"
                 "## Tool guidance\n"
                 "- Tasks: call get_task_lists first to get valid list IDs before creating, reading, or updating tasks.\n"
                 "- Drive files: call list_files to find a file ID before reading, updating, or deleting.\n"
                 "- Sheets: call get_spreadsheet_info first to confirm tab names and structure before reading or writing.\n"
                 "- Knowledge vs web: search the knowledge base first for anything about the user's personal context, projects, or notes. Use web_search when the knowledge base has nothing useful or the topic requires current information.\n"
                 "- Email: use list_emails with filters before fetching full message content.\n"
+                "- Places: when the user asks about nearby places or 'near me', use the current location coordinates from the system prompt if available.\n"
                 "- Available tools: you only receive tools relevant to the current request. "
                 "If you need a capability not shown in your available tools, say so clearly "
                 "and suggest the user rephrase — more tools are available depending on the topic."
@@ -66,7 +74,7 @@ async def _build_system_prompt(mode: str = "chat", user_message: str = "") -> li
         },
         {
             "type": "text",
-            "text": f"## Known facts about the user\n{memory_section}",
+            "text": f"## Known facts about the user\n{memory_section}{location_section}",
             "cache_control": {"type": "ephemeral"},
         },
     ]
@@ -163,7 +171,7 @@ async def _save_message(pool, session_id: uuid.UUID, role: str, content: Any) ->
     )
 
 
-async def run_turn(session_id: str | None, user_message: str, mode: str = "chat", timezone: str | None = None) -> tuple[str, str]:
+async def run_turn(session_id: str | None, user_message: str, mode: str = "chat", timezone: str | None = None, location=None) -> tuple[str, str]:
     """
     Run one user turn through the agent loop.
     Returns (session_id, response_text).
@@ -201,7 +209,7 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
 
     client = _get_client()
     final_content: list[dict[str, Any]] = []
-    system = await _build_system_prompt(mode, user_message)
+    system = await _build_system_prompt(mode, user_message, location)
     tools = select_tools(user_message)
     logger.debug(f"  selected {len(tools)} tools for: '{user_message[:80]}'")
 
@@ -316,7 +324,7 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
 
 
 async def run_turn_stream(
-    session_id: str | None, user_message: str, mode: str = "chat", timezone: str | None = None
+    session_id: str | None, user_message: str, mode: str = "chat", timezone: str | None = None, location=None
 ) -> AsyncIterator[str]:
     """
     Run one user turn through the agent loop, yielding SSE-formatted strings.
@@ -361,7 +369,7 @@ async def run_turn_stream(
     yield f"event: session\ndata: {json.dumps({'session_id': session_id})}\n\n"
 
     client = _get_client()
-    system = await _build_system_prompt(mode, user_message)
+    system = await _build_system_prompt(mode, user_message, location)
     tools = select_tools(user_message)
     logger.debug(f"  selected {len(tools)} tools for: '{user_message[:80]}'")
 
