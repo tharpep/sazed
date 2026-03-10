@@ -270,7 +270,12 @@ TOOLS: list[ToolDef] = [
     ),
     ToolDef(
         name="create_task",
-        description="Create a new task in a specific list.",
+        description=(
+            "Create a new task in a specific list. "
+            "Also use this to set reminders — tasks with a due datetime appear in Google Calendar "
+            "and fire native push notifications. For reminders, use an appropriate list "
+            "(e.g. find or create a 'Reminders' list) and set a specific due datetime."
+        ),
         input_schema={
             "type": "object",
             "properties": {
@@ -1780,6 +1785,51 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
                  "get_upcoming_bills", "get_monthly_summary"],
     "places":   ["search_places", "get_place_details"],
 }
+
+# ---------------------------------------------------------------------------
+# Think mode — fixed tool set for autonomous proactive reasoning
+# Read broadly, write narrowly.
+# ---------------------------------------------------------------------------
+
+THINK_TOOLS: frozenset[str] = frozenset({
+    # Read — calendar
+    "get_events", "check_availability", "search_events",
+    # Read — tasks
+    "get_task_lists", "get_tasks",
+    # Read — email
+    "list_emails", "search_emails", "get_email",
+    # Read — KB
+    "search_knowledge_base", "list_kb_sources",
+    # Read — Drive
+    "list_files", "list_folders", "get_file_info", "read_file",
+    # Read — GitHub
+    "list_repos", "get_repo", "list_issues", "get_issue",
+    "list_prs", "get_pr", "search_issues", "get_github_file",
+    "list_commits", "get_commit", "list_branches",
+    "list_releases", "get_latest_release", "get_pr_reviews",
+    "get_pr_files", "list_contributors",
+    # Read — Finance
+    "get_subscriptions", "get_budget", "get_income",
+    "get_upcoming_bills", "get_monthly_summary",
+    # Read — Sheets
+    "get_spreadsheet_info", "read_sheet",
+    # Write (limited)
+    "send_notification", "create_task", "memory_update",
+    "append_to_file", "create_file", "sync_kb",
+})
+
+
+def get_think_tool_schemas() -> list[dict]:
+    """Return the fixed tool schema list for think mode."""
+    schemas = [
+        {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+        for t in TOOLS
+        if t.name in THINK_TOOLS
+    ]
+    if schemas:
+        schemas[-1]["cache_control"] = {"type": "ephemeral"}
+    return schemas
+
 
 _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
     "calendar": re.compile(

@@ -520,13 +520,14 @@ async def list_sessions() -> list[dict[str, Any]]:
     """Return all sessions ordered by most recent activity."""
     pool = get_pool()
     rows = await pool.fetch(
-        "SELECT id, message_count, last_activity, created_at FROM sessions ORDER BY last_activity DESC"
+        "SELECT id, message_count, last_activity, created_at, session_type FROM sessions ORDER BY last_activity DESC"
     )
     return [
         {
             "session_id": str(r["id"]),
             "message_count": r["message_count"],
             "last_activity": r["last_activity"].isoformat(),
+            "session_type": r["session_type"] or "chat",
         }
         for r in rows
     ]
