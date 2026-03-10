@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _to_utc(ts):
+    return ts.astimezone(timezone.utc) if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
 @router.get("")
 async def list_conversations():
     return {"conversations": await list_sessions()}
@@ -55,7 +59,7 @@ async def archive_sessions(
             # Identify sessions to archive
             session_rows = await conn.fetch(
                 """
-                SELECT id, last_activity FROM sessions
+                SELECT id, created_at, last_activity FROM sessions
                 WHERE last_activity < NOW() - ($1 || ' days')::INTERVAL
                 """,
                 str(older_than_days),
@@ -66,6 +70,7 @@ async def archive_sessions(
 
             session_ids = [r["id"] for r in session_rows]
             session_timestamps = {r["id"]: r["last_activity"] for r in session_rows}
+            session_created = {r["id"]: r["created_at"] for r in session_rows}
 
             # Copy sessions to archive
             await conn.execute(
@@ -117,10 +122,12 @@ async def archive_sessions(
                 sid,
             )
         messages = [{"role": r["role"], "content": json.loads(r["content"])} for r in msg_rows]
-        last_activity = session_timestamps[sid]
-        session_dt = last_activity.astimezone(timezone.utc) if last_activity.tzinfo else last_activity.replace(tzinfo=timezone.utc)
+
+        session_dt = _to_utc(session_timestamps[sid])
+        created_at = session_created.get(sid)
+        session_start = _to_utc(created_at) if created_at else None
         try:
-            result = await process_session(sid, messages, session_dt=session_dt)
+            result = await process_session(sid, messages, session_dt=session_dt, session_start=session_start)
             if result.get("kb_ingested"):
                 kb_succeeded += 1
             elif result.get("kb_error"):

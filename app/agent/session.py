@@ -172,15 +172,22 @@ Conversation:
     return response.content[0].text.strip()
 
 
-async def _generate_kb_summary(messages: list[dict[str, Any]], session_dt: datetime) -> str:
+async def _generate_kb_summary(
+    messages: list[dict[str, Any]],
+    session_dt: datetime,
+    message_count: int | None = None,
+    session_start: datetime | None = None,
+) -> str:
     """Generate a rich, structured KB summary for Drive ingestion."""
     conversation = _format_messages(messages)
+    count = message_count if message_count is not None else len(messages)
 
     prompt = f"""Generate a structured knowledge base entry for this conversation session.
 Include only sections that have meaningful content:
 
 **Topics:** comma-separated list of main topics discussed
 **Summary:** 2-4 sentences covering what was discussed
+**Actions:** bullet list of things Sazed actually did (files read, searches run, tool calls made, data fetched)
 **Decisions:** bullet list of concrete decisions or conclusions reached
 **Follow-ups:** bullet list of action items or things to revisit
 **Entities:** comma-separated list of files, projects, people, or tools specifically referenced
@@ -192,12 +199,23 @@ Conversation:
 
     response = await _get_client().messages.create(
         model=settings.haiku_model,
-        max_tokens=512,
+        max_tokens=768,
         messages=[{"role": "user", "content": prompt}],
     )
     body = response.content[0].text.strip()
     date_str = session_dt.strftime("%B %d, %Y at %I:%M %p UTC")
-    return f"# Session — {date_str}\n\n{body}"
+
+    meta_parts = [f"{count} messages"]
+    if session_start:
+        duration_mins = int((session_dt - session_start).total_seconds() / 60)
+        if duration_mins < 60:
+            meta_parts.append(f"~{duration_mins} min")
+        else:
+            hours, mins = divmod(duration_mins, 60)
+            meta_parts.append(f"~{hours}h {mins}m")
+    meta = " · ".join(meta_parts)
+
+    return f"# Session — {date_str}\n*{meta}*\n\n{body}"
 
 
 async def _ingest_session_to_kb(summary: str, session_dt: datetime) -> tuple[bool, str]:
@@ -242,18 +260,21 @@ async def process_session(
     session_id: str,
     messages: list[dict[str, Any]],
     session_dt: datetime | None = None,
+    session_start: datetime | None = None,
 ) -> dict[str, Any]:
     """
     Run fact extraction, summarization, and KB ingestion in parallel where enabled.
     Upserts extracted facts to agent_memory.
     When kb_ingest_enabled, writes a structured session summary to Drive and triggers KB sync.
-    session_dt: timestamp used for the Drive filename; defaults to now if not provided.
+    session_dt: last_activity timestamp used for the Drive filename; defaults to now if not provided.
+    session_start: created_at timestamp used to compute session duration; omitted if unavailable.
     """
     if not messages:
         return {"session_id": session_id, "facts_extracted": 0, "summary": ""}
 
     session_dt = session_dt or datetime.now(timezone.utc)
-    logger.debug(f"process_session {session_id}: {len(messages)} messages to process")
+    message_count = len(messages)
+    logger.debug(f"process_session {session_id}: {message_count} messages to process")
     existing_facts = await load_memory()
 
     # Build coroutine map so all active tasks run in parallel
@@ -261,7 +282,9 @@ async def process_session(
     if settings.session_summarization:
         coros["summary"] = _summarize(messages)
     if settings.conversations_folder_id:
-        coros["kb_summary"] = _generate_kb_summary(messages, session_dt)
+        coros["kb_summary"] = _generate_kb_summary(
+            messages, session_dt, message_count=message_count, session_start=session_start
+        )
 
     results = dict(zip(coros.keys(), await asyncio.gather(*coros.values())))
 
