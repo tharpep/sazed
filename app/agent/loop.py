@@ -14,7 +14,7 @@ import anthropic
 
 from app.agent.memory import format_for_prompt, load_memory, load_relevant_memory
 from app.agent.session import compress_context
-from app.agent.tools import execute_tool, get_tool_schemas, select_tools
+from app.agent.tools import execute_tool, expand_tools, get_tool_schemas, select_tools
 from app.config import settings
 from app.db import get_pool
 
@@ -67,8 +67,8 @@ async def _build_system_prompt(mode: str = "chat", user_message: str = "", locat
                 "- Email: use list_emails with filters before fetching full message content.\n"
                 "- Places: when the user asks about nearby places or 'near me', use the current location coordinates from the system prompt if available.\n"
                 "- Available tools: you only receive tools relevant to the current request. "
-                "If you need a capability not shown in your available tools, say so clearly "
-                "and suggest the user rephrase — more tools are available depending on the topic."
+                "If you need a capability not shown in your current tools, call `request_tools` "
+                "with the relevant category — don't tell the user you can't do something until you've tried expanding first."
             ),
             "cache_control": {"type": "ephemeral"},
         },
@@ -244,12 +244,27 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
             tool_blocks = [b for b in response.content if b.type == "tool_use"]
             logger.debug(f"  turn {turn}: tool calls → {[b.name for b in tool_blocks]}")
 
-            # Execute all tool calls concurrently
-            raw_results = await asyncio.gather(*[execute_tool(b.name, b.input) for b in tool_blocks])
+            # Handle request_tools inline — expand tool set before executing others
+            expand_results: dict[str, str] = {}
+            regular_blocks = []
+            for block in tool_blocks:
+                if block.name == "request_tools":
+                    categories = block.input.get("categories", [])
+                    tools, msg = expand_tools(tools, categories)
+                    expand_results[block.id] = msg
+                    logger.debug(f"  turn {turn}: request_tools {categories} → {msg[:80]}")
+                else:
+                    regular_blocks.append(block)
 
-            tool_results = []
+            # Execute remaining tool calls concurrently
+            raw_results = await asyncio.gather(*[execute_tool(b.name, b.input) for b in regular_blocks])
+
+            tool_results = [
+                {"type": "tool_result", "tool_use_id": bid, "content": msg}
+                for bid, msg in expand_results.items()
+            ]
             log_coros = []
-            for block, tool_result in zip(tool_blocks, raw_results):
+            for block, tool_result in zip(regular_blocks, raw_results):
                 sig = _tool_sig(block.name, block.input)
                 tool_call_counts[sig] += 1
                 if tool_call_counts[sig] >= 3:
@@ -408,16 +423,31 @@ async def run_turn_stream(
             tool_blocks = [b for b in response.content if b.type == "tool_use"]
             logger.debug(f"  stream turn {turn}: tool calls → {[b.name for b in tool_blocks]}")
 
-            # Signal all tools are starting before any execute
+            # Handle request_tools inline — expand tool set before signaling/executing others
+            expand_results: dict[str, str] = {}
+            regular_blocks = []
             for block in tool_blocks:
+                if block.name == "request_tools":
+                    categories = block.input.get("categories", [])
+                    tools, msg = expand_tools(tools, categories)
+                    expand_results[block.id] = msg
+                    logger.debug(f"  stream turn {turn}: request_tools {categories} → {msg[:80]}")
+                else:
+                    regular_blocks.append(block)
+
+            # Signal regular tools are starting before any execute
+            for block in regular_blocks:
                 yield f"event: tool_start\ndata: {json.dumps({'name': block.name})}\n\n"
 
-            # Execute all tool calls concurrently
-            raw_results = await asyncio.gather(*[execute_tool(b.name, b.input) for b in tool_blocks])
+            # Execute remaining tool calls concurrently
+            raw_results = await asyncio.gather(*[execute_tool(b.name, b.input) for b in regular_blocks])
 
-            tool_results = []
+            tool_results = [
+                {"type": "tool_result", "tool_use_id": bid, "content": msg}
+                for bid, msg in expand_results.items()
+            ]
             log_coros = []
-            for block, tool_result in zip(tool_blocks, raw_results):
+            for block, tool_result in zip(regular_blocks, raw_results):
                 sig = _tool_sig(block.name, block.input)
                 tool_call_counts[sig] += 1
                 if tool_call_counts[sig] >= 3:

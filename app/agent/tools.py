@@ -1706,6 +1706,28 @@ TOOLS: list[ToolDef] = [
         endpoint="/places/{place_id}",
         path_params=["place_id"],
     ),
+    # ── Tool expansion ───────────────────────────────────────────────────────
+    ToolDef(
+        name="request_tools",
+        description=(
+            "Expand your available tools when you need a capability not currently shown. "
+            "Call this before telling the user you lack a capability. "
+            "Valid categories: calendar, tasks, email, notify, kb, web, drive, github, sheets, finance, places."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "categories": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Tool categories to add, e.g. ['github'] or ['drive', 'sheets'].",
+                },
+            },
+            "required": ["categories"],
+        },
+        method="INTERNAL",
+        endpoint="",
+    ),
     # ── Memory ──────────────────────────────────────────────────────────────
     ToolDef(
         name="memory_update",
@@ -1879,7 +1901,7 @@ _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
         r'|find (a |the |me )?(place|spot|restaurant|cafe|bar)|where (can|should) (i|we))\b', re.I),
 }
 
-_ALWAYS_INCLUDED: frozenset[str] = frozenset({"memory_update"})
+_ALWAYS_INCLUDED: frozenset[str] = frozenset({"memory_update", "request_tools"})
 _DEFAULT_CATEGORIES: frozenset[str] = frozenset({"calendar", "tasks", "kb", "web"})
 _STICKY_CATEGORIES: frozenset[str] = frozenset({"kb"})  # always injected regardless of pattern match
 _CO_SELECT: dict[str, frozenset[str]] = {
@@ -1915,6 +1937,39 @@ def select_tools(user_message: str) -> list[dict]:
     if schemas:
         schemas[-1]["cache_control"] = {"type": "ephemeral"}
     return schemas
+
+
+def expand_tools(current_tools: list[dict], categories: list[str]) -> tuple[list[dict], str]:
+    """Merge tool schemas for the requested categories into the current tool list.
+
+    Returns (updated_tools, result_message). Safe to call with already-loaded categories.
+    """
+    existing_names = {t["name"] for t in current_tools}
+    new_defs = []
+    for cat in categories:
+        for name in TOOL_CATEGORIES.get(cat, []):
+            if name not in existing_names:
+                td = _tool_index.get(name)
+                if td:
+                    new_defs.append({
+                        "name": td.name,
+                        "description": td.description,
+                        "input_schema": td.input_schema,
+                    })
+                    existing_names.add(name)
+
+    if not new_defs:
+        return current_tools, f"No new tools added — {categories} already loaded or unknown."
+
+    expanded = list(current_tools)
+    if expanded and "cache_control" in expanded[-1]:
+        expanded[-1] = {k: v for k, v in expanded[-1].items() if k != "cache_control"}
+    expanded.extend(new_defs)
+    expanded[-1]["cache_control"] = {"type": "ephemeral"}
+
+    added_names = [t["name"] for t in new_defs]
+    msg = f"Tools expanded. Added {len(added_names)} tools from {categories}: {', '.join(added_names)}."
+    return expanded, msg
 
 
 _SSRF_BLOCKED_HOSTS = {"localhost", "metadata.google.internal"}
@@ -2051,6 +2106,10 @@ async def _execute_internal(name: str, args: dict[str, Any], t0: float) -> ToolR
         except Exception as e:
             msg = f"Memory update failed: {e}"
             return ToolResult(content=msg, status="error", error=msg, duration_ms=_ms())
+
+    if name == "request_tools":
+        # Normally handled inline by the agent loop; this is a safety fallback.
+        return ToolResult(content="Tool expansion handled by agent loop.", status="success", error=None, duration_ms=_ms())
 
     msg = f"Unknown internal tool: {name}"
     return ToolResult(content=msg, status="error", error=msg, duration_ms=_ms())
