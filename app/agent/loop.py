@@ -229,8 +229,9 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
         tz = ZoneInfo("UTC")
     now = datetime.now(tz)
     tz_prefix = f"[{now.strftime('%A, %B %d, %Y')} {now.strftime('%I:%M %p')} {tz.key}]\n"
-    messages.append({"role": "user", "content": tz_prefix + user_message})
-    await _save_message(pool, sid, "user", user_message)
+    prefixed_message = tz_prefix + user_message
+    messages.append({"role": "user", "content": prefixed_message})
+    await _save_message(pool, sid, "user", prefixed_message)
     logger.debug(f"session {session_id}: user message='{user_message[:120]}'")
 
     client = _get_client()
@@ -412,8 +413,9 @@ async def run_turn_stream(
         tz = ZoneInfo("UTC")
     now = datetime.now(tz)
     tz_prefix = f"[{now.strftime('%A, %B %d, %Y')} {now.strftime('%I:%M %p')} {tz.key}]\n"
-    messages.append({"role": "user", "content": tz_prefix + user_message})
-    await _save_message(pool, sid, "user", user_message)
+    prefixed_message = tz_prefix + user_message
+    messages.append({"role": "user", "content": prefixed_message})
+    await _save_message(pool, sid, "user", prefixed_message)
     logger.debug(f"stream session {session_id}: user message='{user_message[:120]}'")
 
     yield f"event: session\ndata: {json.dumps({'session_id': session_id})}\n\n"
