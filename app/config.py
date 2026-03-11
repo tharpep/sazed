@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     # Agent loop
     agent_max_turns: int = 20  # Maximum tool-call turns per request (AGENT_MAX_TURNS in .env)
 
+    # Tool result cache
+    tool_cache_ttl_seconds: int = 60  # TTL for read-only tool result cache (TOOL_CACHE_TTL_SECONDS in .env)
+
     # Model routing — Haiku by default, escalate to Sonnet based on these signals
     sonnet_turn_threshold: int = 2          # Turn index at which all remaining turns use Sonnet
     sonnet_message_len_threshold: int = 500  # User message char count that signals Sonnet on turn 0

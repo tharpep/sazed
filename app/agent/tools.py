@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote, urlparse
 
+import cachetools
 import httpx
 
 from app.agent.memory import upsert_fact
@@ -23,11 +24,10 @@ class ToolResult:
 
 
 # ---------------------------------------------------------------------------
-# Tool result cache — read-only tools, 60s TTL, process-scoped in-memory
+# Tool result cache — read-only tools, TTL + maxsize, process-scoped in-memory
 # ---------------------------------------------------------------------------
 
-_TOOL_CACHE: dict[tuple, tuple["ToolResult", float]] = {}
-_CACHE_TTL: float = 60.0
+_TOOL_CACHE: cachetools.TTLCache = cachetools.TTLCache(maxsize=256, ttl=settings.tool_cache_ttl_seconds)
 
 _CACHEABLE_TOOLS: frozenset[str] = frozenset({
     "get_events", "check_availability", "search_events",
@@ -2032,19 +2032,16 @@ async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
     if tool.method == "INTERNAL":
         return await _execute_internal(name, args, t0)
 
-    # Cache lookup — read-only tools only, 60s TTL
+    # Cache lookup — read-only tools only
     cache_key = None
     if name in _CACHEABLE_TOOLS:
         cache_key = (name, tuple(sorted((k, str(v)) for k, v in args.items())))
         cached = _TOOL_CACHE.get(cache_key)
-        if cached:
-            result, expiry = cached
-            if time.time() < expiry:
-                return ToolResult(
-                    content=result.content, status=result.status,
-                    error=result.error, duration_ms=0,
-                )
-            del _TOOL_CACHE[cache_key]
+        if cached is not None:
+            return ToolResult(
+                content=cached.content, status=cached.status,
+                error=cached.error, duration_ms=0,
+            )
 
     # SSRF guard — validate any URL argument before forwarding to the gateway
     if "url" in args:
@@ -2095,7 +2092,7 @@ async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
         result = _ok(resp.text)
 
     if cache_key:
-        _TOOL_CACHE[cache_key] = (result, time.time() + _CACHE_TTL)
+        _TOOL_CACHE[cache_key] = result
     return result
 
 
