@@ -40,20 +40,16 @@ def _select_model(
     user_message_long: bool,
     tools_used: list[str],
     force_sonnet: bool,
-    is_synthesis: bool = False,
 ) -> tuple[str, str]:
     """Return (model_id, reason) for the current turn.
 
     Priority (highest first):
-      1. Synthesis call — always Sonnet, it's the final response after a long tool chain
-      2. Haiku explicitly requested escalation via request_escalation tool
-      3. Turn index >= sonnet_turn_threshold — deep multi-step chain
-      4. A write tool was used in a prior turn — synthesis needs precision
-      5. User message is long — signals a complex ask
-      6. Default — Haiku
+      1. Haiku explicitly requested escalation via request_escalation tool
+      2. Turn index >= sonnet_turn_threshold — deep multi-step chain
+      3. A write tool was used in a prior turn — synthesis needs precision
+      4. User message is long — signals a complex ask
+      5. Default — Haiku
     """
-    if is_synthesis:
-        return settings.sonnet_model, "synthesis"
     if force_sonnet:
         return settings.sonnet_model, "escalation_requested"
     if turn >= settings.sonnet_turn_threshold:
@@ -351,10 +347,9 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
     # If the loop exhausted turns mid-tool-use, final_content has no text.
     # Do one synthesis call (no tools) so the user gets an actual response.
     if not any(b.get("type") == "text" for b in final_content):
-        synth_model, synth_reason = _select_model(0, False, [], False, is_synthesis=True)
-        logger.debug(f"  synthesis: loop ended on tool_use, running final synthesis call ({synth_model}:{synth_reason})")
+        logger.debug(f"  synthesis: loop ended on tool_use, upgrading to {settings.sonnet_model}")
         synth = await client.messages.create(
-            model=synth_model,
+            model=settings.sonnet_model,
             system=system,
             messages=messages,
             max_tokens=1024,
@@ -547,11 +542,9 @@ async def run_turn_stream(
     if messages and messages[-1]["role"] == "user" and isinstance(messages[-1]["content"], list) and any(
         b.get("type") == "tool_result" for b in messages[-1]["content"]
     ):
-        logger.debug("  stream synthesis: loop ended on tool_use, running final synthesis call")
-        synth_model, synth_reason = _select_model(0, False, [], False, is_synthesis=True)
-        logger.debug(f"  stream synthesis: using {synth_model} ({synth_reason})")
+        logger.debug(f"  stream synthesis: loop ended on tool_use, upgrading to {settings.sonnet_model}")
         async with client.messages.stream(
-            model=synth_model,
+            model=settings.sonnet_model,
             system=system,
             messages=messages,
             max_tokens=1024,
