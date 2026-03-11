@@ -1706,6 +1706,18 @@ TOOLS: list[ToolDef] = [
         endpoint="/places/{place_id}",
         path_params=["place_id"],
     ),
+    # ── Model escalation ─────────────────────────────────────────────────────
+    ToolDef(
+        name="request_escalation",
+        description=(
+            "Call this when the task requires complex reasoning, nuanced writing, or multi-step "
+            "synthesis that exceeds your current confidence. Switches to a more capable model "
+            "for all subsequent turns in this conversation turn."
+        ),
+        input_schema={"type": "object", "properties": {}},
+        method="INTERNAL",
+        endpoint="",
+    ),
     # ── Tool expansion ───────────────────────────────────────────────────────
     ToolDef(
         name="request_tools",
@@ -1901,7 +1913,7 @@ _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
         r'|find (a |the |me )?(place|spot|restaurant|cafe|bar)|where (can|should) (i|we))\b', re.I),
 }
 
-_ALWAYS_INCLUDED: frozenset[str] = frozenset({"memory_update", "request_tools"})
+_ALWAYS_INCLUDED: frozenset[str] = frozenset({"memory_update", "request_tools", "request_escalation"})
 _DEFAULT_CATEGORIES: frozenset[str] = frozenset({"calendar", "tasks", "kb", "web"})
 _STICKY_CATEGORIES: frozenset[str] = frozenset({"kb"})  # always injected regardless of pattern match
 _CO_SELECT: dict[str, frozenset[str]] = {
@@ -2110,6 +2122,10 @@ async def _execute_internal(name: str, args: dict[str, Any], t0: float) -> ToolR
     if name == "request_tools":
         # Normally handled inline by the agent loop; this is a safety fallback.
         return ToolResult(content="Tool expansion handled by agent loop.", status="success", error=None, duration_ms=_ms())
+
+    if name == "request_escalation":
+        # Normally handled inline by the agent loop; this is a safety fallback.
+        return ToolResult(content="Escalation handled by agent loop.", status="success", error=None, duration_ms=_ms())
 
     msg = f"Unknown internal tool: {name}"
     return ToolResult(content=msg, status="error", error=msg, duration_ms=_ms())

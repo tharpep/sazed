@@ -36,5 +36,16 @@ class Settings(BaseSettings):
     # Agent loop
     agent_max_turns: int = 20  # Maximum tool-call turns per request (AGENT_MAX_TURNS in .env)
 
+    # Model routing — Haiku by default, escalate to Sonnet based on these signals
+    sonnet_turn_threshold: int = 2          # Turn index at which all remaining turns use Sonnet
+    sonnet_message_len_threshold: int = 500  # User message char count that signals Sonnet on turn 0
+    sonnet_write_tools: list[str] = [        # Any of these in prior turns forces Sonnet for all subsequent turns
+        "draft_email", "compose_email", "send_email",
+        "create_event", "update_event", "delete_event",
+        "create_task", "update_task", "delete_task",
+        "create_task_list", "rename_task_list",
+        "memory_update",
+    ]
+
 
 settings = Settings()

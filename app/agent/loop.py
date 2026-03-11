@@ -35,6 +35,36 @@ def _tool_sig(name: str, args: dict) -> tuple:
     return (name, tuple(sorted((k, str(v)) for k, v in args.items())))
 
 
+def _select_model(
+    turn: int,
+    user_message_long: bool,
+    tools_used: list[str],
+    force_sonnet: bool,
+    is_synthesis: bool = False,
+) -> tuple[str, str]:
+    """Return (model_id, reason) for the current turn.
+
+    Priority (highest first):
+      1. Synthesis call — always Sonnet, it's the final response after a long tool chain
+      2. Haiku explicitly requested escalation via request_escalation tool
+      3. Turn index >= sonnet_turn_threshold — deep multi-step chain
+      4. A write tool was used in a prior turn — synthesis needs precision
+      5. User message is long — signals a complex ask
+      6. Default — Haiku
+    """
+    if is_synthesis:
+        return settings.sonnet_model, "synthesis"
+    if force_sonnet:
+        return settings.sonnet_model, "escalation_requested"
+    if turn >= settings.sonnet_turn_threshold:
+        return settings.sonnet_model, f"turn>={settings.sonnet_turn_threshold}"
+    if any(t in settings.sonnet_write_tools for t in tools_used):
+        return settings.sonnet_model, "write_tool_used"
+    if user_message_long:
+        return settings.sonnet_model, "long_message"
+    return settings.haiku_model, "default"
+
+
 async def _build_system_prompt(mode: str = "chat", user_message: str = "", location=None) -> list[dict[str, Any]]:
     memory_section = format_for_prompt(await load_relevant_memory(user_message))
     location_section = ""
@@ -215,11 +245,14 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
 
     tool_call_counts: Counter = Counter()
     stuck = False
+    force_sonnet = False
+    tools_used: list[str] = []
+    user_message_long = len(user_message) >= settings.sonnet_message_len_threshold
 
     for turn in range(settings.agent_max_turns):
-        model = settings.haiku_model
+        model, model_reason = _select_model(turn, user_message_long, tools_used, force_sonnet)
         t0 = time.perf_counter()
-        logger.debug(f"  turn {turn}: calling {model} with {len(messages)} messages in context")
+        logger.debug(f"  turn {turn}: calling {model} ({model_reason}) with {len(messages)} messages in context")
         response = await client.messages.create(
             model=model,
             system=system,
@@ -244,7 +277,7 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
             tool_blocks = [b for b in response.content if b.type == "tool_use"]
             logger.debug(f"  turn {turn}: tool calls → {[b.name for b in tool_blocks]}")
 
-            # Handle request_tools inline — expand tool set before executing others
+            # Handle request_tools and request_escalation inline before executing others
             expand_results: dict[str, str] = {}
             regular_blocks = []
             for block in tool_blocks:
@@ -253,8 +286,14 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
                     tools, msg = expand_tools(tools, categories)
                     expand_results[block.id] = msg
                     logger.debug(f"  turn {turn}: request_tools {categories} → {msg[:80]}")
+                elif block.name == "request_escalation":
+                    force_sonnet = True
+                    expand_results[block.id] = "Switching to enhanced reasoning mode."
+                    logger.debug(f"  turn {turn}: request_escalation → escalating to Sonnet")
                 else:
                     regular_blocks.append(block)
+
+            tools_used.extend(b.name for b in regular_blocks)
 
             # Execute remaining tool calls concurrently
             raw_results = await asyncio.gather(*[execute_tool(b.name, b.input) for b in regular_blocks])
@@ -312,9 +351,10 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
     # If the loop exhausted turns mid-tool-use, final_content has no text.
     # Do one synthesis call (no tools) so the user gets an actual response.
     if not any(b.get("type") == "text" for b in final_content):
-        logger.debug("  synthesis: loop ended on tool_use, running final synthesis call")
+        synth_model, synth_reason = _select_model(0, False, [], False, is_synthesis=True)
+        logger.debug(f"  synthesis: loop ended on tool_use, running final synthesis call ({synth_model}:{synth_reason})")
         synth = await client.messages.create(
-            model=settings.haiku_model,
+            model=synth_model,
             system=system,
             messages=messages,
             max_tokens=1024,
@@ -390,11 +430,14 @@ async def run_turn_stream(
 
     tool_call_counts: Counter = Counter()
     stuck = False
+    force_sonnet = False
+    tools_used: list[str] = []
+    user_message_long = len(user_message) >= settings.sonnet_message_len_threshold
 
     for turn in range(settings.agent_max_turns):
-        model = settings.haiku_model
+        model, model_reason = _select_model(turn, user_message_long, tools_used, force_sonnet)
         t0 = time.perf_counter()
-        logger.debug(f"  stream turn {turn}: calling {model} with {len(messages)} messages")
+        logger.debug(f"  stream turn {turn}: calling {model} ({model_reason}) with {len(messages)} messages")
 
         async with client.messages.stream(
             model=model,
@@ -423,7 +466,7 @@ async def run_turn_stream(
             tool_blocks = [b for b in response.content if b.type == "tool_use"]
             logger.debug(f"  stream turn {turn}: tool calls → {[b.name for b in tool_blocks]}")
 
-            # Handle request_tools inline — expand tool set before signaling/executing others
+            # Handle request_tools and request_escalation inline before signaling/executing others
             expand_results: dict[str, str] = {}
             regular_blocks = []
             for block in tool_blocks:
@@ -432,8 +475,14 @@ async def run_turn_stream(
                     tools, msg = expand_tools(tools, categories)
                     expand_results[block.id] = msg
                     logger.debug(f"  stream turn {turn}: request_tools {categories} → {msg[:80]}")
+                elif block.name == "request_escalation":
+                    force_sonnet = True
+                    expand_results[block.id] = "Switching to enhanced reasoning mode."
+                    logger.debug(f"  stream turn {turn}: request_escalation → escalating to Sonnet")
                 else:
                     regular_blocks.append(block)
+
+            tools_used.extend(b.name for b in regular_blocks)
 
             # Signal regular tools are starting before any execute
             for block in regular_blocks:
@@ -499,8 +548,10 @@ async def run_turn_stream(
         b.get("type") == "tool_result" for b in messages[-1]["content"]
     ):
         logger.debug("  stream synthesis: loop ended on tool_use, running final synthesis call")
+        synth_model, synth_reason = _select_model(0, False, [], False, is_synthesis=True)
+        logger.debug(f"  stream synthesis: using {synth_model} ({synth_reason})")
         async with client.messages.stream(
-            model=settings.haiku_model,
+            model=synth_model,
             system=system,
             messages=messages,
             max_tokens=1024,
