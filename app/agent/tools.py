@@ -569,6 +569,44 @@ TOOLS: list[ToolDef] = [
         method="POST",
         endpoint="/search/web/fetch",
     ),
+    ToolDef(
+        name="aggregate_search",
+        description=(
+            "Search across Reddit, Hacker News, Bluesky, and news sources simultaneously. "
+            "Returns normalized results with credibility tiers, corroboration clusters, and "
+            "bias signals (hedge ratio, named source count, content type, fact-check hits). "
+            "Use for news, current events, research, or when you need multi-source coverage "
+            "on a topic. Prefer over web_search for news, opinions, and social discourse."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query.",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Max total results across all platforms (1-50). Defaults to 25.",
+                },
+                "platforms": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Platforms to search: 'reddit', 'hn', 'bluesky', 'gnews', "
+                        "'google_news_rss', 'rss'. Omit to search all available."
+                    ),
+                },
+                "since": {
+                    "type": "string",
+                    "description": "ISO 8601 timestamp. Only return results newer than this.",
+                },
+            },
+            "required": ["query"],
+        },
+        method="POST",
+        endpoint="/multi-search/aggregate",
+    ),
 
     # -------------------------------------------------------------------------
     # Storage (Google Drive)
@@ -1801,7 +1839,7 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
     "email":    ["list_emails", "search_emails", "get_email", "draft_email"],
     "notify":   ["send_notification"],
     "kb":       ["search_knowledge_base", "get_kb_index", "list_kb_sources", "delete_kb_source", "sync_kb"],
-    "web":      ["web_search", "fetch_url"],
+    "web":      ["web_search", "fetch_url", "aggregate_search"],
     "drive":    ["list_files", "list_folders", "create_folder", "get_file_info", "read_file",
                  "create_file", "update_file", "append_to_file", "delete_file", "move_file",
                  "copy_file", "copy_file_from_github"],
@@ -1832,6 +1870,8 @@ THINK_TOOLS: frozenset[str] = frozenset({
     "get_task_lists", "get_tasks",
     # Read — email
     "list_emails", "search_emails", "get_email",
+    # Read — web/search
+    "web_search", "aggregate_search",
     # Read — KB
     "search_knowledge_base", "list_kb_sources",
     # Read — Drive
@@ -1894,7 +1934,10 @@ _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
         r'\b(look up|google|browse|find out|who is|news'
         r'|current (price|weather|news|status|version|rate|score)'
         r'|latest (news|version|release|update|price|score)'
-        r'|search (the )?web|search online|search for)\b', re.I),
+        r'|search (the )?web|search online|search for'
+        r'|reddit|hacker news|bluesky|social media'
+        r'|what.s (trending|happening|going on)'
+        r'|aggregate search|cross.?platform)\b', re.I),
     "drive":    re.compile(
         r'\b(file|drive|document|folder|google drive|gdrive|upload|download)\b', re.I),
     "github":   re.compile(
