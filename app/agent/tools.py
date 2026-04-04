@@ -2130,7 +2130,7 @@ async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
         return _err(f"Error {resp.status_code}: {resp.text}")
 
     try:
-        result = _ok(json.dumps(resp.json(), indent=2))
+        result = _ok(json.dumps(resp.json()))
     except Exception:
         result = _ok(resp.text)
 
