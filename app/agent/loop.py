@@ -10,8 +10,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Any, AsyncIterator
 
-import anthropic
-
+from app.agent.client import get_client, tool_sig
 from app.agent.memory import format_for_prompt, load_memory, load_relevant_memory
 from app.agent.session import compress_context
 from app.agent.tools import execute_tool, expand_tools, get_tool_schemas, select_tools
@@ -20,20 +19,11 @@ from app.db import get_pool
 
 logger = logging.getLogger(__name__)
 
-_client: anthropic.AsyncAnthropic | None = None
-
-
-def _get_client() -> anthropic.AsyncAnthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-    return _client
-
 
 async def _generate_session_title(pool, sid: uuid.UUID, user_message: str) -> None:
     """Fire-and-forget: generate a short title for a new session using Haiku."""
     try:
-        resp = await _get_client().messages.create(
+        resp = await get_client().messages.create(
             model=settings.haiku_model,
             max_tokens=20,
             messages=[{
@@ -49,11 +39,6 @@ async def _generate_session_title(pool, sid: uuid.UUID, user_message: str) -> No
         await pool.execute("UPDATE sessions SET title = $1 WHERE id = $2", title, sid)
     except Exception as e:
         logger.warning(f"Failed to generate session title for {sid}: {e}")
-
-
-def _tool_sig(name: str, args: dict) -> tuple:
-    """Stable hashable signature for a tool call — used for stuck loop detection."""
-    return (name, tuple(sorted((k, str(v)) for k, v in args.items())))
 
 
 def _select_model(
@@ -143,7 +128,6 @@ async def _build_system_prompt(mode: str = "chat", user_message: str = "", locat
     return blocks
 
 
-
 def _content_to_dicts(content: list) -> list[dict[str, Any]]:
     """Convert SDK content blocks to plain dicts for the messages array."""
     result = []
@@ -218,21 +202,19 @@ async def _save_message(pool, session_id: uuid.UUID, role: str, content: Any) ->
     )
 
 
-async def run_turn(session_id: str | None, user_message: str, mode: str = "chat", timezone: str | None = None, location=None) -> tuple[str, str]:
+async def _setup_turn(
+    pool,
+    sid: uuid.UUID,
+    user_message: str,
+    mode: str,
+    timezone: str | None,
+    location,
+) -> tuple[list, list, list]:
+    """Load session messages, apply context window, append user message, build system prompt + tools.
+
+    Returns (messages, system, tools).
+    Session INSERT must be done by the caller before calling this.
     """
-    Run one user turn through the agent loop.
-    Returns (session_id, response_text).
-    """
-    if not session_id:
-        session_id = str(uuid.uuid4())
-
-    pool = get_pool()
-    sid = uuid.UUID(session_id)
-
-    await pool.execute(
-        "INSERT INTO sessions (id) VALUES ($1) ON CONFLICT DO NOTHING", sid
-    )
-
     rows = await pool.fetch(
         "SELECT role, content FROM messages WHERE session_id = $1 ORDER BY timestamp",
         sid,
@@ -240,7 +222,7 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
     messages: list[dict[str, Any]] = [
         {"role": r["role"], "content": json.loads(r["content"])} for r in rows
     ]
-    logger.debug(f"session {session_id}: loaded {len(messages)} prior messages")
+    logger.debug(f"session {sid}: loaded {len(messages)} prior messages")
 
     if not rows:
         asyncio.create_task(_generate_session_title(pool, sid, user_message))
@@ -256,16 +238,97 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
     prefixed_message = tz_prefix + user_message
     messages.append({"role": "user", "content": prefixed_message})
     await _save_message(pool, sid, "user", prefixed_message)
-    logger.debug(f"session {session_id}: user message='{user_message[:120]}'")
+    logger.debug(f"session {sid}: user message='{user_message[:120]}'")
 
-    client = _get_client()
-    final_content: list[dict[str, Any]] = []
     system = await _build_system_prompt(mode, user_message, location)
     tools = select_tools(user_message)
     logger.debug(f"  selected {len(tools)} tools for: '{user_message[:80]}'")
 
+    return messages, system, tools
+
+
+async def _execute_regular_tools(
+    pool,
+    sid: uuid.UUID,
+    regular_blocks: list,
+    tool_call_counts: Counter,
+    turn: int,
+) -> tuple[list[tuple], str | None]:
+    """Execute tool blocks concurrently, detect stuck loops, persist action logs.
+
+    Returns ([(block, tool_result), ...], stuck_msg_or_None).
+    On stuck: partial result list (pre-stuck entries only), non-None stuck_msg.
+    Action logs are flushed internally before returning.
+    """
+    if not regular_blocks:
+        return [], None
+
+    raw_results = await asyncio.gather(*[execute_tool(b.name, b.input) for b in regular_blocks])
+
+    results = []
+    log_coros = []
+    stuck_msg = None
+    for block, tool_result in zip(regular_blocks, raw_results):
+        sig = tool_sig(block.name, block.input)
+        tool_call_counts[sig] += 1
+        if tool_call_counts[sig] >= 3:
+            logger.warning(f"  stuck loop detected: {block.name} called 3x with same args")
+            stuck_msg = (
+                f"I seem to be stuck — I've called `{block.name}` three times with the "
+                f"same arguments without making progress. Please try rephrasing your "
+                f"request or providing more specific details."
+            )
+            break
+        logger.debug(
+            f"  turn {turn}: {block.name} {tool_result.status} in "
+            f"{tool_result.duration_ms}ms, {len(tool_result.content)} chars"
+        )
+        log_coros.append(pool.execute(
+            """INSERT INTO action_logs
+                   (session_id, tool_name, input, output, status, error_message, duration_ms)
+               VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7)""",
+            sid, block.name, json.dumps(block.input), tool_result.content,
+            tool_result.status, tool_result.error, tool_result.duration_ms,
+        ))
+        results.append((block, tool_result))
+
+    await asyncio.gather(*log_coros)
+    return results, stuck_msg
+
+
+async def _finalize_turn(pool, sid: uuid.UUID) -> None:
+    """Update session last_activity and message_count."""
+    await pool.execute(
+        """
+        UPDATE sessions
+        SET last_activity = NOW(),
+            message_count = (SELECT COUNT(*) FROM messages WHERE session_id = $1)
+        WHERE id = $1
+        """,
+        sid,
+    )
+
+
+async def run_turn(
+    session_id: str | None,
+    user_message: str,
+    mode: str = "chat",
+    timezone: str | None = None,
+    location=None,
+) -> tuple[str, str]:
+    """Run one user turn through the agent loop. Returns (session_id, response_text)."""
+    if not session_id:
+        session_id = str(uuid.uuid4())
+
+    pool = get_pool()
+    sid = uuid.UUID(session_id)
+    await pool.execute("INSERT INTO sessions (id) VALUES ($1) ON CONFLICT DO NOTHING", sid)
+
+    messages, system, tools = await _setup_turn(pool, sid, user_message, mode, timezone, location)
+
+    client = get_client()
+    final_content: list[dict[str, Any]] = []
     tool_call_counts: Counter = Counter()
-    stuck = False
     force_sonnet = False
     tools_used: list[str] = []
     user_message_long = len(user_message) >= settings.sonnet_message_len_threshold
@@ -274,13 +337,22 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
         model, model_reason = _select_model(turn, user_message_long, tools_used, force_sonnet)
         t0 = time.perf_counter()
         logger.debug(f"  turn {turn}: calling {model} ({model_reason}) with {len(messages)} messages in context")
-        response = await client.messages.create(
-            model=model,
-            system=system,
-            messages=messages,
-            tools=tools,
-            max_tokens=4096,
-        )
+        try:
+            response = await asyncio.wait_for(
+                client.messages.create(
+                    model=model,
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=4096,
+                ),
+                timeout=settings.turn_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"  turn {turn}: LLM call timed out after {settings.turn_timeout_seconds}s")
+            await _finalize_turn(pool, sid)
+            return session_id, "Request timed out — please try again."
+
         logger.debug(
             f"  turn {turn}: stop_reason={response.stop_reason} "
             f"in {time.perf_counter() - t0:.3f}s"
@@ -298,7 +370,6 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
             tool_blocks = [b for b in response.content if b.type == "tool_use"]
             logger.debug(f"  turn {turn}: tool calls → {[b.name for b in tool_blocks]}")
 
-            # Handle request_tools and request_escalation inline before executing others
             expand_results: dict[str, str] = {}
             regular_blocks = []
             for block in tool_blocks:
@@ -316,40 +387,19 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
 
             tools_used.extend(b.name for b in regular_blocks)
 
-            # Execute remaining tool calls concurrently
-            raw_results = await asyncio.gather(*[execute_tool(b.name, b.input) for b in regular_blocks])
-
-            tool_results = [
+            tool_results: list[dict[str, Any]] = [
                 {"type": "tool_result", "tool_use_id": bid, "content": msg}
                 for bid, msg in expand_results.items()
             ]
-            log_coros = []
-            for block, tool_result in zip(regular_blocks, raw_results):
-                sig = _tool_sig(block.name, block.input)
-                tool_call_counts[sig] += 1
-                if tool_call_counts[sig] >= 3:
-                    logger.warning(f"  stuck loop detected: {block.name} called 3x with same args")
-                    stuck_msg = (
-                        f"I seem to be stuck — I've called `{block.name}` three times with the "
-                        f"same arguments without making progress. Please try rephrasing your "
-                        f"request or providing more specific details."
-                    )
-                    final_content = [{"type": "text", "text": stuck_msg}]
-                    await _save_message(pool, sid, "assistant", final_content)
-                    stuck = True
-                    break
+            results, stuck_msg = await _execute_regular_tools(
+                pool, sid, regular_blocks, tool_call_counts, turn
+            )
+            if stuck_msg:
+                final_content = [{"type": "text", "text": stuck_msg}]
+                await _save_message(pool, sid, "assistant", final_content)
+                break
 
-                logger.debug(
-                    f"  turn {turn}: {block.name} {tool_result.status} in "
-                    f"{tool_result.duration_ms}ms, {len(tool_result.content)} chars"
-                )
-                log_coros.append(pool.execute(
-                    """INSERT INTO action_logs
-                           (session_id, tool_name, input, output, status, error_message, duration_ms)
-                       VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7)""",
-                    sid, block.name, json.dumps(block.input), tool_result.content,
-                    tool_result.status, tool_result.error, tool_result.duration_ms,
-                ))
+            for block, tool_result in results:
                 tr: dict[str, Any] = {
                     "type": "tool_result",
                     "tool_use_id": block.id,
@@ -359,10 +409,6 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
                     tr["is_error"] = True
                 tool_results.append(tr)
 
-            if stuck:
-                break
-
-            await asyncio.gather(*log_coros)
             messages.append({"role": "user", "content": tool_results})
             await _save_message(pool, sid, "user", tool_results)
         else:
@@ -373,33 +419,36 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
     # Do one synthesis call (no tools) so the user gets an actual response.
     if not any(b.get("type") == "text" for b in final_content):
         logger.debug(f"  synthesis: loop ended on tool_use, upgrading to {settings.sonnet_model}")
-        synth = await client.messages.create(
-            model=settings.sonnet_model,
-            system=system,
-            messages=messages,
-            max_tokens=1024,
-        )
+        try:
+            synth = await asyncio.wait_for(
+                client.messages.create(
+                    model=settings.sonnet_model,
+                    system=system,
+                    messages=messages,
+                    max_tokens=1024,
+                ),
+                timeout=settings.turn_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"  synthesis: timed out after {settings.turn_timeout_seconds}s")
+            await _finalize_turn(pool, sid)
+            return session_id, "Request timed out during synthesis — please try again."
         content_dicts = _content_to_dicts(synth.content)
         await _save_message(pool, sid, "assistant", content_dicts)
         final_content = content_dicts
 
-    await pool.execute(
-        """
-        UPDATE sessions
-        SET last_activity = NOW(),
-            message_count = (SELECT COUNT(*) FROM messages WHERE session_id = $1)
-        WHERE id = $1
-        """,
-        sid,
-    )
-
+    await _finalize_turn(pool, sid)
     response_text = _extract_text(final_content)
     logger.debug(f"session {session_id}: final response='{response_text[:120]}'")
     return session_id, response_text
 
 
 async def run_turn_stream(
-    session_id: str | None, user_message: str, mode: str = "chat", timezone: str | None = None, location=None
+    session_id: str | None,
+    user_message: str,
+    mode: str = "chat",
+    timezone: str | None = None,
+    location=None,
 ) -> AsyncIterator[str]:
     """
     Run one user turn through the agent loop, yielding SSE-formatted strings.
@@ -416,42 +465,13 @@ async def run_turn_stream(
 
     pool = get_pool()
     sid = uuid.UUID(session_id)
+    await pool.execute("INSERT INTO sessions (id) VALUES ($1) ON CONFLICT DO NOTHING", sid)
 
-    await pool.execute(
-        "INSERT INTO sessions (id) VALUES ($1) ON CONFLICT DO NOTHING", sid
-    )
-
-    rows = await pool.fetch(
-        "SELECT role, content FROM messages WHERE session_id = $1 ORDER BY timestamp",
-        sid,
-    )
-    messages: list[dict[str, Any]] = [
-        {"role": r["role"], "content": json.loads(r["content"])} for r in rows
-    ]
-
-    if not rows:
-        asyncio.create_task(_generate_session_title(pool, sid, user_message))
-
-    messages = await _apply_context_window(pool, sid, messages)
-
-    try:
-        tz = ZoneInfo(timezone) if timezone else ZoneInfo("UTC")
-    except ZoneInfoNotFoundError:
-        tz = ZoneInfo("UTC")
-    now = datetime.now(tz)
-    tz_prefix = f"[{now.strftime('%A, %B %d, %Y')} {now.strftime('%I:%M %p')} {tz.key}]\n"
-    prefixed_message = tz_prefix + user_message
-    messages.append({"role": "user", "content": prefixed_message})
-    await _save_message(pool, sid, "user", prefixed_message)
-    logger.debug(f"stream session {session_id}: user message='{user_message[:120]}'")
+    messages, system, tools = await _setup_turn(pool, sid, user_message, mode, timezone, location)
 
     yield f"event: session\ndata: {json.dumps({'session_id': session_id})}\n\n"
 
-    client = _get_client()
-    system = await _build_system_prompt(mode, user_message, location)
-    tools = select_tools(user_message)
-    logger.debug(f"  selected {len(tools)} tools for: '{user_message[:80]}'")
-
+    client = get_client()
     tool_call_counts: Counter = Counter()
     stuck = False
     force_sonnet = False
@@ -463,16 +483,25 @@ async def run_turn_stream(
         t0 = time.perf_counter()
         logger.debug(f"  stream turn {turn}: calling {model} ({model_reason}) with {len(messages)} messages")
 
-        async with client.messages.stream(
-            model=model,
-            system=system,
-            messages=messages,
-            tools=tools,
-            max_tokens=4096,
-        ) as stream:
-            async for text in stream.text_stream:
-                yield f"event: text_delta\ndata: {json.dumps({'text': text})}\n\n"
-            response = await stream.get_final_message()
+        try:
+            async with asyncio.timeout(settings.turn_timeout_seconds):
+                async with client.messages.stream(
+                    model=model,
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=4096,
+                ) as stream:
+                    async for text in stream.text_stream:
+                        yield f"event: text_delta\ndata: {json.dumps({'text': text})}\n\n"
+                    response = await stream.get_final_message()
+        except asyncio.TimeoutError:
+            logger.warning(f"  stream turn {turn}: timed out after {settings.turn_timeout_seconds}s")
+            timeout_msg = "Request timed out — please try again."
+            yield f"event: text_delta\ndata: {json.dumps({'text': timeout_msg})}\n\n"
+            await _finalize_turn(pool, sid)
+            yield f"event: done\ndata: {{}}\n\n"
+            return
 
         logger.debug(
             f"  stream turn {turn}: stop_reason={response.stop_reason} "
@@ -490,7 +519,6 @@ async def run_turn_stream(
             tool_blocks = [b for b in response.content if b.type == "tool_use"]
             logger.debug(f"  stream turn {turn}: tool calls → {[b.name for b in tool_blocks]}")
 
-            # Handle request_tools and request_escalation inline before signaling/executing others
             expand_results: dict[str, str] = {}
             regular_blocks = []
             for block in tool_blocks:
@@ -508,44 +536,23 @@ async def run_turn_stream(
 
             tools_used.extend(b.name for b in regular_blocks)
 
-            # Signal regular tools are starting before any execute
             for block in regular_blocks:
                 yield f"event: tool_start\ndata: {json.dumps({'name': block.name})}\n\n"
 
-            # Execute remaining tool calls concurrently
-            raw_results = await asyncio.gather(*[execute_tool(b.name, b.input) for b in regular_blocks])
-
-            tool_results = [
+            tool_results: list[dict[str, Any]] = [
                 {"type": "tool_result", "tool_use_id": bid, "content": msg}
                 for bid, msg in expand_results.items()
             ]
-            log_coros = []
-            for block, tool_result in zip(regular_blocks, raw_results):
-                sig = _tool_sig(block.name, block.input)
-                tool_call_counts[sig] += 1
-                if tool_call_counts[sig] >= 3:
-                    logger.warning(f"  stream stuck loop detected: {block.name} called 3x with same args")
-                    stuck_msg = (
-                        f"I seem to be stuck — I've called `{block.name}` three times with the "
-                        f"same arguments without making progress. Please try rephrasing your "
-                        f"request or providing more specific details."
-                    )
-                    await _save_message(pool, sid, "assistant", [{"type": "text", "text": stuck_msg}])
-                    yield f"event: text_delta\ndata: {json.dumps({'text': stuck_msg})}\n\n"
-                    stuck = True
-                    break
+            results, stuck_msg = await _execute_regular_tools(
+                pool, sid, regular_blocks, tool_call_counts, turn
+            )
+            if stuck_msg:
+                await _save_message(pool, sid, "assistant", [{"type": "text", "text": stuck_msg}])
+                yield f"event: text_delta\ndata: {json.dumps({'text': stuck_msg})}\n\n"
+                stuck = True
+                break
 
-                logger.debug(
-                    f"  stream turn {turn}: {block.name} {tool_result.status} in "
-                    f"{tool_result.duration_ms}ms, {len(tool_result.content)} chars"
-                )
-                log_coros.append(pool.execute(
-                    """INSERT INTO action_logs
-                           (session_id, tool_name, input, output, status, error_message, duration_ms)
-                       VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7)""",
-                    sid, block.name, json.dumps(block.input), tool_result.content,
-                    tool_result.status, tool_result.error, tool_result.duration_ms,
-                ))
+            for block, tool_result in results:
                 yield f"event: tool_done\ndata: {json.dumps({'name': block.name, 'status': tool_result.status, 'error': tool_result.error})}\n\n"
                 tr: dict[str, Any] = {
                     "type": "tool_result",
@@ -559,7 +566,6 @@ async def run_turn_stream(
             if stuck:
                 break
 
-            await asyncio.gather(*log_coros)
             messages.append({"role": "user", "content": tool_results})
             await _save_message(pool, sid, "user", tool_results)
         else:
@@ -572,28 +578,25 @@ async def run_turn_stream(
         b.get("type") == "tool_result" for b in messages[-1]["content"]
     ):
         logger.debug(f"  stream synthesis: loop ended on tool_use, upgrading to {settings.sonnet_model}")
-        async with client.messages.stream(
-            model=settings.sonnet_model,
-            system=system,
-            messages=messages,
-            max_tokens=1024,
-        ) as stream:
-            async for text in stream.text_stream:
-                yield f"event: text_delta\ndata: {json.dumps({'text': text})}\n\n"
-            synth = await stream.get_final_message()
-        content_dicts = _content_to_dicts(synth.content)
-        await _save_message(pool, sid, "assistant", content_dicts)
+        try:
+            async with asyncio.timeout(settings.turn_timeout_seconds):
+                async with client.messages.stream(
+                    model=settings.sonnet_model,
+                    system=system,
+                    messages=messages,
+                    max_tokens=1024,
+                ) as stream:
+                    async for text in stream.text_stream:
+                        yield f"event: text_delta\ndata: {json.dumps({'text': text})}\n\n"
+                    synth = await stream.get_final_message()
+        except asyncio.TimeoutError:
+            logger.warning(f"  stream synthesis: timed out after {settings.turn_timeout_seconds}s")
+            yield f"event: text_delta\ndata: {json.dumps({'text': 'Request timed out during synthesis.'})}\n\n"
+        else:
+            content_dicts = _content_to_dicts(synth.content)
+            await _save_message(pool, sid, "assistant", content_dicts)
 
-    await pool.execute(
-        """
-        UPDATE sessions
-        SET last_activity = NOW(),
-            message_count = (SELECT COUNT(*) FROM messages WHERE session_id = $1)
-        WHERE id = $1
-        """,
-        sid,
-    )
-
+    await _finalize_turn(pool, sid)
     logger.debug(f"stream session {session_id}: done")
     yield f"event: done\ndata: {{}}\n\n"
 

@@ -35,6 +35,7 @@ class Settings(BaseSettings):
 
     # Agent loop
     agent_max_turns: int = 20  # Maximum tool-call turns per request (AGENT_MAX_TURNS in .env)
+    turn_timeout_seconds: int = 300  # Max seconds per LLM call before timing out (TURN_TIMEOUT_SECONDS in .env)
 
     # Tool result cache
     tool_cache_ttl_seconds: int = 60  # TTL for read-only tool result cache (TOOL_CACHE_TTL_SECONDS in .env)

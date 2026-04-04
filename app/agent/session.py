@@ -6,22 +6,13 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-import anthropic
 import httpx
 
+from app.agent.client import get_client
 from app.agent.memory import load_memory, upsert_fact
 from app.config import settings
 
 logger = logging.getLogger(__name__)
-
-_client: anthropic.AsyncAnthropic | None = None
-
-
-def _get_client() -> anthropic.AsyncAnthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-    return _client
 
 
 def _format_messages(messages: list[dict[str, Any]]) -> str:
@@ -97,7 +88,7 @@ Be concise — this summary will be prepended to future messages to maintain con
 Conversation:
 {conversation}"""
 
-    response = await _get_client().messages.create(
+    response = await get_client().messages.create(
         model=settings.haiku_model,
         max_tokens=768,
         messages=[{"role": "user", "content": prompt}],
@@ -145,7 +136,7 @@ Existing facts:
 Conversation:
 {conversation}"""
 
-    response = await _get_client().messages.create(
+    response = await get_client().messages.create(
         model=settings.haiku_model,
         max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],
@@ -164,7 +155,7 @@ Be concise and factual.
 Conversation:
 {conversation}"""
 
-    response = await _get_client().messages.create(
+    response = await get_client().messages.create(
         model=settings.haiku_model,
         max_tokens=512,
         messages=[{"role": "user", "content": prompt}],
@@ -197,7 +188,7 @@ Be specific and factual. Include enough detail that this entry is useful without
 Conversation:
 {conversation}"""
 
-    response = await _get_client().messages.create(
+    response = await get_client().messages.create(
         model=settings.haiku_model,
         max_tokens=768,
         messages=[{"role": "user", "content": prompt}],

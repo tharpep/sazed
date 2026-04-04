@@ -10,8 +10,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import anthropic
-
+from app.agent.client import get_client, tool_sig as _tool_sig
 from app.agent.memory import format_for_prompt, load_memory
 from app.agent.session import compress_context
 from app.agent.tools import execute_tool, get_think_tool_schemas
@@ -48,20 +47,6 @@ _CONTEXT_DESCRIPTIONS = {
         "anything worth writing to Drive to preserve context from today."
     ),
 }
-
-
-_client: anthropic.AsyncAnthropic | None = None
-
-
-def _get_client() -> anthropic.AsyncAnthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-    return _client
-
-
-def _tool_sig(name: str, args: dict) -> tuple:
-    return (name, tuple(sorted((k, str(v)) for k, v in args.items())))
 
 
 def _build_think_system_prompt(
@@ -229,7 +214,7 @@ async def run_think(
     memory_section = format_for_prompt(await load_memory())
     system = _build_think_system_prompt(context, trigger, memory_section)
     tools = get_think_tool_schemas()
-    client = _get_client()
+    client = get_client()
 
     tool_call_counts: Counter = Counter()
     final_content: list[dict[str, Any]] = []
