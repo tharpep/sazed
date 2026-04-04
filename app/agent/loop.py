@@ -30,6 +30,27 @@ def _get_client() -> anthropic.AsyncAnthropic:
     return _client
 
 
+async def _generate_session_title(pool, sid: uuid.UUID, user_message: str) -> None:
+    """Fire-and-forget: generate a short title for a new session using Haiku."""
+    try:
+        resp = await _get_client().messages.create(
+            model=settings.haiku_model,
+            max_tokens=20,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Generate a concise 3-5 word title for a chat session that starts with:\n\n"
+                    f"{user_message[:500]}\n\n"
+                    "Reply with only the title, no punctuation, no quotes."
+                ),
+            }],
+        )
+        title = resp.content[0].text.strip()[:100]
+        await pool.execute("UPDATE sessions SET title = $1 WHERE id = $2", title, sid)
+    except Exception as e:
+        logger.warning(f"Failed to generate session title for {sid}: {e}")
+
+
 def _tool_sig(name: str, args: dict) -> tuple:
     """Stable hashable signature for a tool call — used for stuck loop detection."""
     return (name, tuple(sorted((k, str(v)) for k, v in args.items())))
@@ -221,6 +242,9 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
     ]
     logger.debug(f"session {session_id}: loaded {len(messages)} prior messages")
 
+    if not rows:
+        asyncio.create_task(_generate_session_title(pool, sid, user_message))
+
     messages = await _apply_context_window(pool, sid, messages)
 
     try:
@@ -404,6 +428,9 @@ async def run_turn_stream(
     messages: list[dict[str, Any]] = [
         {"role": r["role"], "content": json.loads(r["content"])} for r in rows
     ]
+
+    if not rows:
+        asyncio.create_task(_generate_session_title(pool, sid, user_message))
 
     messages = await _apply_context_window(pool, sid, messages)
 
@@ -596,7 +623,7 @@ async def list_sessions() -> list[dict[str, Any]]:
     """Return all sessions ordered by most recent activity."""
     pool = get_pool()
     rows = await pool.fetch(
-        "SELECT id, message_count, last_activity, created_at, session_type FROM sessions ORDER BY last_activity DESC"
+        "SELECT id, message_count, last_activity, created_at, session_type, title FROM sessions ORDER BY last_activity DESC"
     )
     return [
         {
@@ -604,6 +631,7 @@ async def list_sessions() -> list[dict[str, Any]]:
             "message_count": r["message_count"],
             "last_activity": r["last_activity"].isoformat(),
             "session_type": r["session_type"] or "chat",
+            "title": r["title"],
         }
         for r in rows
     ]

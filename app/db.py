@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS context_summary TEXT;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summarized_through INT DEFAULT 0;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS session_type TEXT DEFAULT 'chat';
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title TEXT;
 
 CREATE TABLE IF NOT EXISTS messages (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
