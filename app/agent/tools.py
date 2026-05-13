@@ -42,6 +42,8 @@ _CACHEABLE_TOOLS: frozenset[str] = frozenset({
     "get_subscriptions", "get_budget", "get_income",
     "get_upcoming_bills", "get_monthly_summary",
     "get_spreadsheet_info", "read_sheet",
+    "list_journal_entries", "get_journal_entry", "list_journal_projects",
+    "get_journal_summary", "export_journal",
 })
 
 
@@ -1688,6 +1690,206 @@ TOOLS: list[ToolDef] = [
     ),
 
     # -------------------------------------------------------------------------
+    # Journal
+    # -------------------------------------------------------------------------
+    ToolDef(
+        name="list_journal_entries",
+        description=(
+            "List journal entries, newest first. Filter by project, tag, or date range. "
+            "Returns up to `limit` entries (default 30)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Filter to a specific project/company."},
+                "tag": {"type": "string", "description": "Filter to entries containing this tag."},
+                "start_date": {"type": "string", "description": "Start date (YYYY-MM-DD)."},
+                "end_date": {"type": "string", "description": "End date (YYYY-MM-DD)."},
+                "limit": {"type": "integer", "description": "Max entries to return. Defaults to 30."},
+            },
+        },
+        method="GET",
+        endpoint="/journal/entries",
+    ),
+    ToolDef(
+        name="get_journal_entry",
+        description="Get a single journal entry by ID.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "entry_id": {"type": "string", "description": "Journal entry UUID."},
+            },
+            "required": ["entry_id"],
+        },
+        method="GET",
+        endpoint="/journal/entries/{entry_id}",
+        path_params=["entry_id"],
+    ),
+    ToolDef(
+        name="create_journal_entry",
+        description=(
+            "Create a new journal entry to log a daily contribution, achievement, or note. "
+            "Each entry has a project/company context, title, body, and optional tags."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Project or company name, e.g. 'Acme Corp'."},
+                "title": {"type": "string", "description": "Short summary of the contribution."},
+                "body": {"type": "string", "description": "Detailed description of what was done."},
+                "entry_date": {
+                    "type": "string",
+                    "description": "Date for the entry as YYYY-MM-DD. Defaults to today.",
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional tags, e.g. ['backend', 'bugfix', 'onboarding'].",
+                },
+            },
+            "required": ["project", "title", "body"],
+        },
+        method="POST",
+        endpoint="/journal/entries",
+    ),
+    ToolDef(
+        name="update_journal_entry",
+        description="Update fields on an existing journal entry.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "entry_id": {"type": "string", "description": "Journal entry UUID."},
+                "project": {"type": "string"},
+                "title": {"type": "string"},
+                "body": {"type": "string"},
+                "entry_date": {"type": "string", "description": "Date as YYYY-MM-DD."},
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["entry_id"],
+        },
+        method="PATCH",
+        endpoint="/journal/entries/{entry_id}",
+        path_params=["entry_id"],
+    ),
+    ToolDef(
+        name="delete_journal_entry",
+        description="Permanently delete a journal entry by ID.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "entry_id": {"type": "string", "description": "Journal entry UUID."},
+            },
+            "required": ["entry_id"],
+        },
+        method="DELETE",
+        endpoint="/journal/entries/{entry_id}",
+        path_params=["entry_id"],
+    ),
+    ToolDef(
+        name="list_journal_projects",
+        description="List all distinct project/company names used in journal entries.",
+        input_schema={"type": "object", "properties": {}},
+        method="GET",
+        endpoint="/journal/projects",
+    ),
+    ToolDef(
+        name="get_journal_summary",
+        description=(
+            "Get a summary of journal entries for a time period, grouped by date "
+            "with stats (entry count, projects, top tags). "
+            "Use for standup prep, weekly reviews, or 1:1 talking points."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {
+                    "type": "string",
+                    "description": "Filter to a specific project/company.",
+                },
+                "period": {
+                    "type": "string",
+                    "enum": ["week", "month", "last_week", "last_month"],
+                    "description": "Shorthand period. Defaults to current week.",
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": "Custom start date (YYYY-MM-DD). Overrides period.",
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "Custom end date (YYYY-MM-DD).",
+                },
+            },
+        },
+        method="GET",
+        endpoint="/journal/summary",
+    ),
+    ToolDef(
+        name="export_journal",
+        description=(
+            "Export journal entries as formatted markdown or plain text. "
+            "Great for pasting into standups, performance reviews, "
+            "or Slack updates."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {
+                    "type": "string",
+                    "description": "Filter to a specific project/company.",
+                },
+                "period": {
+                    "type": "string",
+                    "enum": ["week", "month", "last_week", "last_month"],
+                    "description": "Shorthand period. Defaults to current week.",
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": "Custom start date (YYYY-MM-DD).",
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "Custom end date (YYYY-MM-DD).",
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["markdown", "plain"],
+                    "description": "Output format. Defaults to markdown.",
+                },
+            },
+        },
+        method="GET",
+        endpoint="/journal/export",
+    ),
+    ToolDef(
+        name="sync_journal_to_kb",
+        description=(
+            "Export journal entries for a period to Google Drive and sync "
+            "into the knowledge base, making them searchable via KB queries. "
+            "Requires JOURNAL_FOLDER_ID to be configured."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {
+                    "type": "string",
+                    "description": "Filter to a specific project/company.",
+                },
+                "period": {
+                    "type": "string",
+                    "enum": ["week", "month", "last_week", "last_month"],
+                    "description": "Period to sync. Defaults to current week.",
+                },
+            },
+        },
+        method="POST",
+        endpoint="/journal/sync-kb",
+    ),
+
+    # -------------------------------------------------------------------------
     # Memory (internal — does not call the gateway)
     # -------------------------------------------------------------------------
     # ── Places ──────────────────────────────────────────────────────────────
@@ -1856,6 +2058,9 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
                  "get_income", "add_income_source", "delete_income",
                  "get_upcoming_bills", "get_monthly_summary"],
     "places":   ["search_places", "get_place_details"],
+    "journal":  ["list_journal_entries", "get_journal_entry", "create_journal_entry",
+                 "update_journal_entry", "delete_journal_entry", "list_journal_projects",
+                 "get_journal_summary", "export_journal", "sync_journal_to_kb"],
 }
 
 # ---------------------------------------------------------------------------
@@ -1885,11 +2090,15 @@ THINK_TOOLS: frozenset[str] = frozenset({
     # Read — Finance
     "get_subscriptions", "get_budget", "get_income",
     "get_upcoming_bills", "get_monthly_summary",
+    # Read — Journal
+    "list_journal_entries", "get_journal_entry", "list_journal_projects",
+    "get_journal_summary", "export_journal",
     # Read — Sheets
     "get_spreadsheet_info", "read_sheet",
     # Write (limited)
     "send_notification", "create_task", "memory_update",
     "append_to_file", "create_file", "sync_kb",
+    "create_journal_entry",
 })
 
 
@@ -1950,6 +2159,10 @@ _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
         r'|how much (do i |am i )?pay|afford|net (income|pay)|salary|paycheck'
         r'|financial|finance|money|cash flow|subscription|netflix|spotify|hulu'
         r'|due (date|on|this)|when (is|does|do).*charge|upcoming (bill|payment|charge))\b', re.I),
+    "journal":  re.compile(
+        r'\b(journal|daily log|work log|contribution|what did i do|what i did|standup notes?'
+        r'|log.*(entry|today|yesterday|work|contribution)|my entries'
+        r'|track.*(work|progress|contribution)|work diary)\b', re.I),
     "places":   re.compile(
         r'\b(restaurant|cafe|coffee|bar|gym|store|shop|nearby|near me|places?|food|eat|drink'
         r'|hotel|directions?|open.*(now|today)|hours|visit|dine|dining|takeout|delivery'
