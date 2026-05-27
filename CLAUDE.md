@@ -25,7 +25,7 @@ No test suite yet.
 
 **Entry point:** `app/main.py` — FastAPI app with lifespan (DB pool init/close), CORS, API key auth when `API_KEY` is set. Health and tools are public; all other routes require `X-API-Key` when `API_KEY` is set.
 
-**Configuration:** `app/config.py` — pydantic-settings from `.env`. Key vars: `GATEWAY_URL`, `GATEWAY_API_KEY`, `ANTHROPIC_API_KEY`, `DATABASE_URL`, `haiku_model`, `sonnet_model`, `conversations_folder_id`, `session_summarization`, `session_window_size`.
+**Configuration:** `app/config.py` — pydantic-settings from `.env`. Key vars: `GATEWAY_URL`, `GATEWAY_API_KEY`, `ANTHROPIC_API_KEY`, `DATABASE_URL`, `haiku_model`, `sonnet_model`, `conversations_folder_id`, `journal_folder_id` (Career), `personal_journal_folder_id` (Personal — empty until the Drive folder is created), `session_summarization`, `session_window_size`.
 
 **Flow:** `POST /chat` → agent loop in `app/agent/loop.py`: load memory and session history, apply context window compression if needed, call LLM (Haiku or Sonnet, escalating at turn 3), on `tool_use` execute tools via `app/agent/tools.py` (all tools call the gateway except `memory_update`), repeat up to 5 turns, then return final response and persist messages. Streaming via `GET /chat/stream` (SSE). Session processing in `app/agent/session.py` runs fact extraction, summarization, and optional KB ingestion after a conversation.
 
@@ -41,9 +41,10 @@ No test suite yet.
 - Storage (Drive): `list_files`, `list_folders`, `create_folder`, `get_file_info`, `read_file`, `create_file`, `update_file`, `append_to_file`, `delete_file`, `move_file`, `copy_file`, `copy_file_from_github` → `/storage/*`
 - GitHub: `list_repos`, `get_repo`, `list_issues`, `get_issue`, `create_issue`, `update_issue`, `add_issue_comment`, `list_prs`, `get_pr`, `add_pr_comment`, `create_pr`, `search_issues`, `get_github_file`, `search_code` → `/github/*`
 - Google Sheets: `create_spreadsheet`, `get_spreadsheet_info`, `read_sheet`, `write_sheet`, `append_sheet_rows`, `clear_sheet_range` → `/sheets/*`
+- Journal: `list_journal_entries`, `get_journal_entry`, `create_journal_entry`, `update_journal_entry`, `delete_journal_entry`, `list_journal_subcategories`, `get_journal_summary`, `export_journal`, `sync_journal_to_kb` → `/journal/*`. All take `category` (`career` | `personal`, default `career`) and `subcategory` (free-form). `sync_journal_to_kb` picks the Drive folder per category.
 - Memory (internal): `memory_update`
 
-**Routers:** `health.py` (GET /health), `chat.py` (POST /chat, GET /chat/stream), `conversations.py` (GET /conversations, GET /conversations/{id}, POST /conversations/{id}/process), `memory.py` (GET /memory, PUT /memory, DELETE /memory/{id}), `kb.py` (GET /kb/stats, /kb/sources, /kb/files, POST /kb/search, /kb/sync, DELETE /kb/files/{id}, DELETE /kb), `tools.py` (GET /tools).
+**Routers:** `health.py` (GET /health), `chat.py` (POST /chat, GET /chat/stream), `conversations.py` (GET /conversations, GET /conversations/{id}, POST /conversations/{id}/process), `memory.py` (GET /memory, PUT /memory, DELETE /memory/{id}), `kb.py` (GET /kb/stats, /kb/sources, /kb/files, POST /kb/search, /kb/sync, DELETE /kb/files/{id}, DELETE /kb), `journal.py` (`/journal/*` proxy to api-gateway + `POST /journal/sync-kb` which exports to the per-category Drive folder and triggers KB ingestion), `tools.py` (GET /tools).
 
 **Database:** `app/db.py` — asyncpg pool for sessions and agent_memory. Sessions store `context_summary` and `summarized_through` for context window management.
 
