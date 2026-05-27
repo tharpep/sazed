@@ -26,7 +26,10 @@ class Settings(BaseSettings):
 
     # KB ingestion
     conversations_folder_id: str = "109Nh8yA11PpQ4iWbJ6LHGIL-2roCn5Ok"  # Drive folder ID for Knowledge Base/Conversations/
-    journal_folder_id: str = "1mZrbPlHW0TsP7oNDpzSSi38Hjt-PfAVU"  # KB/Journal/
+    # KB/Journal/Career/ — used by /journal/sync-kb when category=career
+    journal_folder_id: str = "1mZrbPlHW0TsP7oNDpzSSi38Hjt-PfAVU"
+    # TODO: paste KB/Journal/Personal/ Drive folder ID when the folder is created
+    personal_journal_folder_id: str = ""
 
     # Feature flags
     session_summarization: bool = True  # Generate agent_memory summary after each session

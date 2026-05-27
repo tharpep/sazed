@@ -42,7 +42,7 @@ _CACHEABLE_TOOLS: frozenset[str] = frozenset({
     "get_subscriptions", "get_budget", "get_income",
     "get_upcoming_bills", "get_monthly_summary",
     "get_spreadsheet_info", "read_sheet",
-    "list_journal_entries", "get_journal_entry", "list_journal_projects",
+    "list_journal_entries", "get_journal_entry", "list_journal_subcategories",
     "get_journal_summary", "export_journal",
 })
 
@@ -1695,17 +1695,36 @@ TOOLS: list[ToolDef] = [
     ToolDef(
         name="list_journal_entries",
         description=(
-            "List journal entries, newest first. Filter by project, tag, or date range. "
-            "Returns up to `limit` entries (default 30)."
+            "List journal entries, newest first. Filter by category "
+            "('career' | 'personal'), subcategory (e.g. 'eli-lilly'), tag, "
+            "free-text query, or date range. Response is "
+            "{entries, next_cursor}; pass next_cursor back as `cursor` for "
+            "the next page."
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "project": {"type": "string", "description": "Filter to a specific project/company."},
+                "category": {
+                    "type": "string",
+                    "enum": ["career", "personal"],
+                    "description": "Top-level category. Defaults to all if omitted.",
+                },
+                "subcategory": {
+                    "type": "string",
+                    "description": "Sub-axis under a category (e.g. 'eli-lilly').",
+                },
                 "tag": {"type": "string", "description": "Filter to entries containing this tag."},
+                "q": {
+                    "type": "string",
+                    "description": "Case-insensitive text search on title and body.",
+                },
                 "start_date": {"type": "string", "description": "Start date (YYYY-MM-DD)."},
                 "end_date": {"type": "string", "description": "End date (YYYY-MM-DD)."},
                 "limit": {"type": "integer", "description": "Max entries to return. Defaults to 30."},
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque cursor from a prior response's next_cursor.",
+                },
             },
         },
         method="GET",
@@ -1728,15 +1747,24 @@ TOOLS: list[ToolDef] = [
     ToolDef(
         name="create_journal_entry",
         description=(
-            "Create a new journal entry to log a daily contribution, achievement, or note. "
-            "Each entry has a project/company context, title, body, and optional tags."
+            "Create a new journal entry. Each entry has a category "
+            "('career' or 'personal'), a subcategory (e.g. company name or "
+            "personal area), title, body, and optional tags."
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "project": {"type": "string", "description": "Project or company name, e.g. 'Acme Corp'."},
-                "title": {"type": "string", "description": "Short summary of the contribution."},
-                "body": {"type": "string", "description": "Detailed description of what was done."},
+                "category": {
+                    "type": "string",
+                    "enum": ["career", "personal"],
+                    "description": "Top-level category. Defaults to 'career'.",
+                },
+                "subcategory": {
+                    "type": "string",
+                    "description": "Sub-axis, e.g. 'eli-lilly' or 'health'.",
+                },
+                "title": {"type": "string", "description": "Short summary of the entry."},
+                "body": {"type": "string", "description": "Detailed description."},
                 "entry_date": {
                     "type": "string",
                     "description": "Date for the entry as YYYY-MM-DD. Defaults to today.",
@@ -1744,10 +1772,10 @@ TOOLS: list[ToolDef] = [
                 "tags": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional tags, e.g. ['backend', 'bugfix', 'onboarding'].",
+                    "description": "Optional tags, e.g. ['backend', 'bugfix'].",
                 },
             },
-            "required": ["project", "title", "body"],
+            "required": ["subcategory", "title", "body"],
         },
         method="POST",
         endpoint="/journal/entries",
@@ -1759,7 +1787,8 @@ TOOLS: list[ToolDef] = [
             "type": "object",
             "properties": {
                 "entry_id": {"type": "string", "description": "Journal entry UUID."},
-                "project": {"type": "string"},
+                "category": {"type": "string", "enum": ["career", "personal"]},
+                "subcategory": {"type": "string"},
                 "title": {"type": "string"},
                 "body": {"type": "string"},
                 "entry_date": {"type": "string", "description": "Date as YYYY-MM-DD."},
@@ -1789,25 +1818,42 @@ TOOLS: list[ToolDef] = [
         path_params=["entry_id"],
     ),
     ToolDef(
-        name="list_journal_projects",
-        description="List all distinct project/company names used in journal entries.",
-        input_schema={"type": "object", "properties": {}},
+        name="list_journal_subcategories",
+        description=(
+            "List distinct subcategory names used in journal entries, "
+            "optionally filtered to one category."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": ["career", "personal"],
+                    "description": "Restrict to one category. Defaults to all.",
+                },
+            },
+        },
         method="GET",
-        endpoint="/journal/projects",
+        endpoint="/journal/subcategories",
     ),
     ToolDef(
         name="get_journal_summary",
         description=(
             "Get a summary of journal entries for a time period, grouped by date "
-            "with stats (entry count, projects, top tags). "
+            "with stats (entry count, categories, subcategories, top tags). "
             "Use for standup prep, weekly reviews, or 1:1 talking points."
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "project": {
+                "category": {
                     "type": "string",
-                    "description": "Filter to a specific project/company.",
+                    "enum": ["career", "personal"],
+                    "description": "Filter to one category.",
+                },
+                "subcategory": {
+                    "type": "string",
+                    "description": "Filter to one subcategory.",
                 },
                 "period": {
                     "type": "string",
@@ -1837,10 +1883,8 @@ TOOLS: list[ToolDef] = [
         input_schema={
             "type": "object",
             "properties": {
-                "project": {
-                    "type": "string",
-                    "description": "Filter to a specific project/company.",
-                },
+                "category": {"type": "string", "enum": ["career", "personal"]},
+                "subcategory": {"type": "string"},
                 "period": {
                     "type": "string",
                     "enum": ["week", "month", "last_week", "last_month"],
@@ -1869,14 +1913,20 @@ TOOLS: list[ToolDef] = [
         description=(
             "Export journal entries for a period to Google Drive and sync "
             "into the knowledge base, making them searchable via KB queries. "
-            "Requires JOURNAL_FOLDER_ID to be configured."
+            "Drive folder is selected by category (career → career folder, "
+            "personal → personal folder)."
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "project": {
+                "category": {
                     "type": "string",
-                    "description": "Filter to a specific project/company.",
+                    "enum": ["career", "personal"],
+                    "description": "Category to sync. Defaults to 'career'.",
+                },
+                "subcategory": {
+                    "type": "string",
+                    "description": "Optional: limit sync to a single subcategory.",
                 },
                 "period": {
                     "type": "string",
@@ -2059,7 +2109,7 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
                  "get_upcoming_bills", "get_monthly_summary"],
     "places":   ["search_places", "get_place_details"],
     "journal":  ["list_journal_entries", "get_journal_entry", "create_journal_entry",
-                 "update_journal_entry", "delete_journal_entry", "list_journal_projects",
+                 "update_journal_entry", "delete_journal_entry", "list_journal_subcategories",
                  "get_journal_summary", "export_journal", "sync_journal_to_kb"],
 }
 
@@ -2091,7 +2141,7 @@ THINK_TOOLS: frozenset[str] = frozenset({
     "get_subscriptions", "get_budget", "get_income",
     "get_upcoming_bills", "get_monthly_summary",
     # Read — Journal
-    "list_journal_entries", "get_journal_entry", "list_journal_projects",
+    "list_journal_entries", "get_journal_entry", "list_journal_subcategories",
     "get_journal_summary", "export_journal",
     # Read — Sheets
     "get_spreadsheet_info", "read_sheet",
