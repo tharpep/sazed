@@ -1,12 +1,22 @@
 """Conversation history endpoints."""
 
+import json
+import logging
+from datetime import timezone
+
 from fastapi import APIRouter, HTTPException, Query
 
 from app.agent.loop import get_session, list_sessions
 from app.agent.session import process_session
 from app.db import get_pool
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+
+def _to_utc(ts):
+    return ts.astimezone(timezone.utc) if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
 
 
 @router.get("")
@@ -49,7 +59,7 @@ async def archive_sessions(
             # Identify sessions to archive
             session_rows = await conn.fetch(
                 """
-                SELECT id FROM sessions
+                SELECT id, created_at, last_activity FROM sessions
                 WHERE last_activity < NOW() - ($1 || ' days')::INTERVAL
                 """,
                 str(older_than_days),
@@ -59,6 +69,8 @@ async def archive_sessions(
                 return {"sessions_archived": 0, "messages_archived": 0}
 
             session_ids = [r["id"] for r in session_rows]
+            session_timestamps = {r["id"]: r["last_activity"] for r in session_rows}
+            session_created = {r["id"]: r["created_at"] for r in session_rows}
 
             # Copy sessions to archive
             await conn.execute(
@@ -98,7 +110,40 @@ async def archive_sessions(
                 session_ids,
             )
 
-    return {
+    # Process each archived session sequentially — write summary to Drive and sync KB.
+    # Runs outside the transaction so a Drive failure never rolls back the DB archive.
+    kb_succeeded = 0
+    kb_failed = 0
+    kb_errors: list[str] = []
+    for sid in session_ids:
+        async with pool.acquire() as conn:
+            msg_rows = await conn.fetch(
+                "SELECT role, content FROM archived_messages WHERE session_id = $1 ORDER BY timestamp ASC",
+                sid,
+            )
+        messages = [{"role": r["role"], "content": json.loads(r["content"])} for r in msg_rows]
+
+        session_dt = _to_utc(session_timestamps[sid])
+        created_at = session_created.get(sid)
+        session_start = _to_utc(created_at) if created_at else None
+        try:
+            result = await process_session(sid, messages, session_dt=session_dt, session_start=session_start)
+            if result.get("kb_ingested"):
+                kb_succeeded += 1
+            elif result.get("kb_error"):
+                kb_failed += 1
+                kb_errors.append(f"{sid}: {result['kb_error']}")
+        except Exception as e:
+            kb_failed += 1
+            kb_errors.append(f"{sid}: {e}")
+            logger.error(f"process_session failed for archived session {sid}: {e}")
+
+    response: dict = {
         "sessions_archived": len(session_ids),
         "messages_archived": messages_archived,
+        "kb_summaries_written": kb_succeeded,
     }
+    if kb_failed:
+        response["kb_failures"] = kb_failed
+        response["kb_errors"] = kb_errors
+    return response

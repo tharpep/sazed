@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 -- Add columns for existing deployments that predate context windowing
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS context_summary TEXT;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summarized_through INT DEFAULT 0;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS session_type TEXT DEFAULT 'chat';
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title TEXT;
 
 CREATE TABLE IF NOT EXISTS messages (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -72,6 +74,21 @@ CREATE TABLE IF NOT EXISTS agent_memory (
     updated_at  TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE (fact_type, key)
 );
+
+CREATE TABLE IF NOT EXISTS action_logs (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id    UUID REFERENCES sessions(id) ON DELETE CASCADE,
+    timestamp     TIMESTAMPTZ DEFAULT NOW(),
+    tool_name     TEXT NOT NULL,
+    input         JSONB,
+    output        TEXT,
+    status        TEXT NOT NULL,
+    error_message TEXT,
+    duration_ms   INT
+);
+
+CREATE INDEX IF NOT EXISTS action_logs_session_id_idx ON action_logs (session_id);
+CREATE INDEX IF NOT EXISTS action_logs_timestamp_idx  ON action_logs (timestamp DESC);
 """
 
 

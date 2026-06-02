@@ -39,10 +39,6 @@ async def _proxy(method: str, path: str, **kwargs) -> Response:
     )
 
 
-# ---------------------------------------------------------------------------
-# Stats + file listings
-# ---------------------------------------------------------------------------
-
 
 @router.get("/stats")
 async def kb_stats():
@@ -59,10 +55,6 @@ async def kb_files():
     return await _proxy("GET", "/kb/files")
 
 
-# ---------------------------------------------------------------------------
-# Search
-# ---------------------------------------------------------------------------
-
 
 @router.post("/search")
 async def kb_search(request: Request):
@@ -70,19 +62,11 @@ async def kb_search(request: Request):
     return await _proxy("POST", "/kb/search", json=body)
 
 
-# ---------------------------------------------------------------------------
-# Sync
-# ---------------------------------------------------------------------------
-
 
 @router.post("/sync")
 async def kb_sync(force: bool = Query(False)):
     return await _proxy("POST", "/kb/sync", params={"force": force})
 
-
-# ---------------------------------------------------------------------------
-# Deletions
-# ---------------------------------------------------------------------------
 
 
 @router.delete("/files/{drive_file_id}")

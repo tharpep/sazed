@@ -2,13 +2,49 @@
 
 import ipaddress
 import json
+import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote, urlparse
 
+import cachetools
 import httpx
 
+from app.agent.memory import upsert_fact
 from app.config import settings
+
+
+@dataclass
+class ToolResult:
+    content: str       # string sent to the LLM as tool result
+    status: str        # "success" | "error"
+    error: str | None  # human-readable error cause, None on success
+    duration_ms: int
+
+
+# ---------------------------------------------------------------------------
+# Tool result cache — read-only tools, TTL + maxsize, process-scoped in-memory
+# ---------------------------------------------------------------------------
+
+_TOOL_CACHE: cachetools.TTLCache = cachetools.TTLCache(maxsize=256, ttl=settings.tool_cache_ttl_seconds)
+
+_CACHEABLE_TOOLS: frozenset[str] = frozenset({
+    "get_events", "check_availability", "search_events",
+    "get_task_lists", "get_tasks",
+    "list_emails", "search_emails", "get_email",
+    "search_knowledge_base", "get_kb_index", "list_kb_sources",
+    "list_files", "list_folders", "get_file_info", "read_file",
+    "web_search", "fetch_url",
+    "list_repos", "get_repo", "list_issues", "get_issue",
+    "list_prs", "get_pr", "get_github_file", "list_commits",
+    "list_branches", "list_releases", "get_latest_release",
+    "get_subscriptions", "get_budget", "get_income",
+    "get_upcoming_bills", "get_monthly_summary",
+    "get_spreadsheet_info", "read_sheet",
+    "list_journal_entries", "get_journal_entry", "list_journal_subcategories",
+    "get_journal_summary", "export_journal",
+})
 
 
 @dataclass
@@ -236,7 +272,12 @@ TOOLS: list[ToolDef] = [
     ),
     ToolDef(
         name="create_task",
-        description="Create a new task in a specific list.",
+        description=(
+            "Create a new task in a specific list. "
+            "Also use this to set reminders — tasks with a due datetime appear in Google Calendar "
+            "and fire native push notifications. For reminders, use an appropriate list "
+            "(e.g. find or create a 'Reminders' list) and set a specific due datetime."
+        ),
         input_schema={
             "type": "object",
             "properties": {
@@ -430,14 +471,18 @@ TOOLS: list[ToolDef] = [
         method="POST",
         endpoint="/kb/search",
     ),
-    # KB write workflow: use create_file to place a file in the correct Drive
-    # KB subfolder, then call sync_kb to index it. The KB is Drive-backed so
-    # sync is the only write path — direct ingest would be wiped on next sync.
-    #
-    # Drive KB subfolder IDs per category are not yet configured. Use list_files
-    # with a folder search to locate the right subfolder before creating a file.
-    # TODO: expose KB_FOLDER_IDS as an env var / config so the agent can look
-    #       them up without a list_files round-trip each time.
+    ToolDef(
+        name="get_kb_index",
+        description=(
+            "Get a directory of all documents in the knowledge base with one-line summaries. "
+            "Use this before searching when you need to discover what topics or files exist, "
+            "or when the user asks what you know about a broad subject. "
+            "More efficient than searching blindly — call this first to triage, then search specific files."
+        ),
+        input_schema={"type": "object", "properties": {}},
+        method="GET",
+        endpoint="/kb/index",
+    ),
     ToolDef(
         name="list_kb_sources",
         description=(
@@ -525,6 +570,44 @@ TOOLS: list[ToolDef] = [
         },
         method="POST",
         endpoint="/search/web/fetch",
+    ),
+    ToolDef(
+        name="aggregate_search",
+        description=(
+            "Search across Reddit, Hacker News, Bluesky, and news sources simultaneously. "
+            "Returns normalized results with credibility tiers, corroboration clusters, and "
+            "bias signals (hedge ratio, named source count, content type, fact-check hits). "
+            "Use for news, current events, research, or when you need multi-source coverage "
+            "on a topic. Prefer over web_search for news, opinions, and social discourse."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query.",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Max total results across all platforms (1-50). Defaults to 25.",
+                },
+                "platforms": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Platforms to search: 'reddit', 'hn', 'bluesky', 'gnews', "
+                        "'google_news_rss', 'rss'. Omit to search all available."
+                    ),
+                },
+                "since": {
+                    "type": "string",
+                    "description": "ISO 8601 timestamp. Only return results newer than this.",
+                },
+            },
+            "required": ["query"],
+        },
+        method="POST",
+        endpoint="/multi-search/aggregate",
     ),
 
     # -------------------------------------------------------------------------
@@ -1074,6 +1157,171 @@ TOOLS: list[ToolDef] = [
         method="GET",
         endpoint="/github/search/code",
     ),
+    ToolDef(
+        name="list_commits",
+        description="List commits on a GitHub repository. Filter by branch/tag (sha), author, file path, or date range.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner (GitHub username or org)."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "sha": {"type": "string", "description": "Branch, tag, or commit SHA to start listing from."},
+                "author": {"type": "string", "description": "Filter by GitHub username or email address."},
+                "path": {"type": "string", "description": "Only return commits that touched this file path."},
+                "since": {"type": "string", "description": "ISO 8601 timestamp — only commits after this date."},
+                "until": {"type": "string", "description": "ISO 8601 timestamp — only commits before this date."},
+                "per_page": {"type": "integer", "description": "Max commits to return (1–100). Defaults to 20."},
+            },
+            "required": ["owner", "repo"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/commits",
+        path_params=["owner", "repo"],
+    ),
+    ToolDef(
+        name="get_commit",
+        description="Get full details for a single commit: message, author, stats (additions/deletions), and per-file diffs.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "sha": {"type": "string", "description": "Full or short commit SHA."},
+            },
+            "required": ["owner", "repo", "sha"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/commits/{sha}",
+        path_params=["owner", "repo", "sha"],
+    ),
+    ToolDef(
+        name="list_branches",
+        description="List branches in a GitHub repository, including their HEAD SHA and whether they are protected.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "per_page": {"type": "integer", "description": "Max branches to return (1–100). Defaults to 30."},
+            },
+            "required": ["owner", "repo"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/branches",
+        path_params=["owner", "repo"],
+    ),
+    ToolDef(
+        name="list_tags",
+        description="List tags in a GitHub repository.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "per_page": {"type": "integer", "description": "Max tags to return (1–100). Defaults to 30."},
+            },
+            "required": ["owner", "repo"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/tags",
+        path_params=["owner", "repo"],
+    ),
+    ToolDef(
+        name="list_releases",
+        description="List releases in a GitHub repository, including tag, name, draft/prerelease flags, and release notes.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "per_page": {"type": "integer", "description": "Max releases to return (1–100). Defaults to 10."},
+            },
+            "required": ["owner", "repo"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/releases",
+        path_params=["owner", "repo"],
+    ),
+    ToolDef(
+        name="get_latest_release",
+        description="Get the latest published (non-draft, non-prerelease) release for a GitHub repository.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+            },
+            "required": ["owner", "repo"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/releases/latest",
+        path_params=["owner", "repo"],
+    ),
+    ToolDef(
+        name="get_pr_reviews",
+        description="Get all reviews on a pull request — shows reviewer, state (APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED), and review body.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "number": {"type": "integer", "description": "Pull request number."},
+            },
+            "required": ["owner", "repo", "number"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/pulls/{number}/reviews",
+        path_params=["owner", "repo", "number"],
+    ),
+    ToolDef(
+        name="get_pr_files",
+        description="List files changed in a pull request with additions, deletions, and patch diffs.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "number": {"type": "integer", "description": "Pull request number."},
+            },
+            "required": ["owner", "repo", "number"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/pulls/{number}/files",
+        path_params=["owner", "repo", "number"],
+    ),
+    ToolDef(
+        name="list_contributors",
+        description="List contributors to a GitHub repository sorted by commit count.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "per_page": {"type": "integer", "description": "Max contributors to return (1–100). Defaults to 20."},
+            },
+            "required": ["owner", "repo"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/contributors",
+        path_params=["owner", "repo"],
+    ),
+    ToolDef(
+        name="compare_refs",
+        description="Compare two refs (branches, tags, or SHAs) in a repository. Returns status (ahead/behind/diverged/identical), commit list, and changed files.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "base": {"type": "string", "description": "Base ref (branch, tag, or SHA) to compare from."},
+                "head": {"type": "string", "description": "Head ref to compare against base."},
+            },
+            "required": ["owner", "repo", "base", "head"],
+        },
+        method="GET",
+        endpoint="/github/repos/{owner}/{repo}/compare",
+        path_params=["owner", "repo"],
+    ),
 
     # -------------------------------------------------------------------------
     # Google Sheets
@@ -1144,7 +1392,11 @@ TOOLS: list[ToolDef] = [
         name="write_sheet",
         description=(
             "Overwrite values in a spreadsheet range. Existing values in the range are replaced. "
-            "values is a 2D array where each inner array is a row, e.g. [['Name', 'Amount'], ['Coffee', '4.50']]."
+            "The range must exactly match the data: for N rows × M columns use e.g. 'Tab!A1:CM' — "
+            "extra cells in a larger range are cleared; rows beyond the range are silently dropped. "
+            "Tab names that contain spaces must be single-quoted: e.g. \"'My Sheet'!A1:C3\". "
+            "values is a 2D array; each inner array is one row, e.g. [['Name', 'Amount'], ['Coffee', '4.50']]. "
+            "Call get_spreadsheet_info first if you don't already know the exact tab name."
         ),
         input_schema={
             "type": "object",
@@ -1155,11 +1407,14 @@ TOOLS: list[ToolDef] = [
                 },
                 "range": {
                     "type": "string",
-                    "description": "A1 notation range, e.g. 'Sheet1!A1:C3'.",
+                    "description": "A1 notation range, e.g. 'Sheet1!A1:C3'. Single-quote tab names with spaces: \"'My Sheet'!A1:C3\".",
                 },
                 "values": {
                     "type": "array",
-                    "items": {"type": "array"},
+                    "items": {
+                        "type": "array",
+                        "items": {"type": ["string", "number", "boolean", "null"]},
+                    },
                     "description": "2D array of values to write. Each inner array is one row.",
                 },
                 "value_input_option": {
@@ -1178,8 +1433,9 @@ TOOLS: list[ToolDef] = [
         name="append_sheet_rows",
         description=(
             "Append rows to a spreadsheet after the last row of existing data. "
-            "Use the column range of the table, e.g. 'Sheet1!A:D', not a specific row. "
-            "values is a 2D array where each inner array is a row to append."
+            "Use the full column range of the table, e.g. 'Sheet1!A:D' — do not include a row number. "
+            "Tab names that contain spaces must be single-quoted: e.g. \"'My Sheet'!A:D\". "
+            "values is a 2D array; each inner array is one row, e.g. [['Alice', '100'], ['Bob', '200']]."
         ),
         input_schema={
             "type": "object",
@@ -1190,11 +1446,14 @@ TOOLS: list[ToolDef] = [
                 },
                 "range": {
                     "type": "string",
-                    "description": "A1 notation column range indicating the table, e.g. 'Sheet1!A:D'.",
+                    "description": "A1 notation column range indicating the table, e.g. 'Sheet1!A:D'. Single-quote tab names with spaces: \"'My Sheet'!A:D\".",
                 },
                 "values": {
                     "type": "array",
-                    "items": {"type": "array"},
+                    "items": {
+                        "type": "array",
+                        "items": {"type": ["string", "number", "boolean", "null"]},
+                    },
                     "description": "2D array of rows to append. Each inner array is one row.",
                 },
                 "value_input_option": {
@@ -1232,8 +1491,546 @@ TOOLS: list[ToolDef] = [
     ),
 
     # -------------------------------------------------------------------------
+    # Finance
+    # -------------------------------------------------------------------------
+    ToolDef(
+        name="get_subscriptions",
+        description="List active subscriptions. Pass all=true to include inactive ones.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "all": {
+                    "type": "boolean",
+                    "description": "Include inactive subscriptions. Defaults to false.",
+                },
+            },
+        },
+        method="GET",
+        endpoint="/finance/subscriptions",
+    ),
+    ToolDef(
+        name="add_subscription",
+        description="Add a new recurring subscription or bill.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Service or bill name."},
+                "amount": {"type": "number", "description": "Billing amount (use estimate for variable bills)."},
+                "frequency": {
+                    "type": "string",
+                    "enum": ["monthly", "annual", "weekly", "biweekly"],
+                    "description": "Billing frequency. Defaults to monthly.",
+                },
+                "category": {"type": "string", "description": "Category, e.g. 'streaming', 'utilities', 'software'."},
+                "type": {
+                    "type": "string",
+                    "enum": ["subscription", "bill"],
+                    "description": "subscription for optional services, bill for financial obligations. Defaults to subscription.",
+                },
+                "variable_amount": {
+                    "type": "boolean",
+                    "description": "True if the amount varies month to month (e.g. electricity). Amount is then an estimate.",
+                },
+                "billing_day": {
+                    "type": "integer",
+                    "description": "Day of month the charge occurs (1–31). Use for monthly items.",
+                },
+                "next_billing_date": {
+                    "type": "string",
+                    "description": "Next due/charge date as YYYY-MM-DD. Use for annual, weekly, or biweekly items.",
+                },
+                "notes": {"type": "string", "description": "Optional notes."},
+            },
+            "required": ["name", "amount", "category"],
+        },
+        method="POST",
+        endpoint="/finance/subscriptions",
+    ),
+    ToolDef(
+        name="update_subscription",
+        description="Update fields on an existing subscription or bill.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "subscription_id": {"type": "string", "description": "Subscription UUID."},
+                "name": {"type": "string"},
+                "amount": {"type": "number"},
+                "frequency": {
+                    "type": "string",
+                    "enum": ["monthly", "annual", "weekly", "biweekly"],
+                },
+                "category": {"type": "string"},
+                "type": {"type": "string", "enum": ["subscription", "bill"]},
+                "variable_amount": {"type": "boolean"},
+                "billing_day": {"type": "integer", "description": "Day of month (1–31)."},
+                "next_billing_date": {"type": "string", "description": "Next due date as YYYY-MM-DD."},
+                "active": {"type": "boolean", "description": "Set false to deactivate."},
+                "notes": {"type": "string"},
+            },
+            "required": ["subscription_id"],
+        },
+        method="PATCH",
+        endpoint="/finance/subscriptions/{subscription_id}",
+        path_params=["subscription_id"],
+    ),
+    ToolDef(
+        name="delete_subscription",
+        description="Deactivate (soft-delete) a subscription or bill by ID.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "subscription_id": {"type": "string", "description": "Subscription UUID."},
+            },
+            "required": ["subscription_id"],
+        },
+        method="DELETE",
+        endpoint="/finance/subscriptions/{subscription_id}",
+        path_params=["subscription_id"],
+    ),
+    ToolDef(
+        name="get_budget",
+        description="List all budget category limits.",
+        input_schema={"type": "object", "properties": {}},
+        method="GET",
+        endpoint="/finance/budget",
+    ),
+    ToolDef(
+        name="set_budget_limit",
+        description="Set or update the monthly spending limit for a budget category.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "description": "Budget category name."},
+                "monthly_limit": {"type": "number", "description": "Monthly limit in dollars."},
+            },
+            "required": ["category", "monthly_limit"],
+        },
+        method="PUT",
+        endpoint="/finance/budget/{category}",
+        path_params=["category"],
+    ),
+    ToolDef(
+        name="delete_budget",
+        description="Remove a budget category limit.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "description": "Budget category to remove."},
+            },
+            "required": ["category"],
+        },
+        method="DELETE",
+        endpoint="/finance/budget/{category}",
+        path_params=["category"],
+    ),
+    ToolDef(
+        name="get_income",
+        description="List active income sources.",
+        input_schema={"type": "object", "properties": {}},
+        method="GET",
+        endpoint="/finance/income",
+    ),
+    ToolDef(
+        name="add_income_source",
+        description="Add a new income source.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "description": "Income source name, e.g. 'Job', 'Freelance'."},
+                "amount": {"type": "number", "description": "Income amount."},
+                "frequency": {
+                    "type": "string",
+                    "enum": ["monthly", "annual", "weekly", "biweekly"],
+                    "description": "Pay frequency. Defaults to monthly.",
+                },
+            },
+            "required": ["source", "amount"],
+        },
+        method="POST",
+        endpoint="/finance/income",
+    ),
+    ToolDef(
+        name="delete_income",
+        description="Deactivate (soft-delete) an income source by ID.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "income_id": {"type": "string", "description": "Income source UUID."},
+            },
+            "required": ["income_id"],
+        },
+        method="DELETE",
+        endpoint="/finance/income/{income_id}",
+        path_params=["income_id"],
+    ),
+    ToolDef(
+        name="get_upcoming_bills",
+        description=(
+            "List subscriptions and bills with a known billing date that are due within the next N days "
+            "(default 30), sorted by due date. Only returns items that have billing_day or next_billing_date set."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "description": "Look-ahead window in days. Defaults to 30."},
+            },
+        },
+        method="GET",
+        endpoint="/finance/upcoming",
+    ),
+    ToolDef(
+        name="get_monthly_summary",
+        description=(
+            "Get a computed monthly financial summary: income, subscription/bill costs, net estimated, "
+            "plus full lists of income sources, subscriptions, bills, and budget limits."
+        ),
+        input_schema={"type": "object", "properties": {}},
+        method="GET",
+        endpoint="/finance/summary",
+    ),
+
+    # -------------------------------------------------------------------------
+    # Journal
+    # -------------------------------------------------------------------------
+    ToolDef(
+        name="list_journal_entries",
+        description=(
+            "List journal entries, newest first. Filter by category "
+            "('career' | 'personal'), subcategory (e.g. 'eli-lilly'), tag, "
+            "free-text query, or date range. Response is "
+            "{entries, next_cursor}; pass next_cursor back as `cursor` for "
+            "the next page."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": ["career", "personal"],
+                    "description": "Top-level category. Defaults to all if omitted.",
+                },
+                "subcategory": {
+                    "type": "string",
+                    "description": "Sub-axis under a category (e.g. 'eli-lilly').",
+                },
+                "tag": {"type": "string", "description": "Filter to entries containing this tag."},
+                "q": {
+                    "type": "string",
+                    "description": "Case-insensitive text search on title and body.",
+                },
+                "start_date": {"type": "string", "description": "Start date (YYYY-MM-DD)."},
+                "end_date": {"type": "string", "description": "End date (YYYY-MM-DD)."},
+                "limit": {"type": "integer", "description": "Max entries to return. Defaults to 30."},
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque cursor from a prior response's next_cursor.",
+                },
+            },
+        },
+        method="GET",
+        endpoint="/journal/entries",
+    ),
+    ToolDef(
+        name="get_journal_entry",
+        description="Get a single journal entry by ID.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "entry_id": {"type": "string", "description": "Journal entry UUID."},
+            },
+            "required": ["entry_id"],
+        },
+        method="GET",
+        endpoint="/journal/entries/{entry_id}",
+        path_params=["entry_id"],
+    ),
+    ToolDef(
+        name="create_journal_entry",
+        description=(
+            "Create a new journal entry. Each entry has a category "
+            "('career' or 'personal'), a subcategory (e.g. company name or "
+            "personal area), title, body, and optional tags."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": ["career", "personal"],
+                    "description": "Top-level category. Defaults to 'career'.",
+                },
+                "subcategory": {
+                    "type": "string",
+                    "description": "Sub-axis, e.g. 'eli-lilly' or 'health'.",
+                },
+                "title": {"type": "string", "description": "Short summary of the entry."},
+                "body": {"type": "string", "description": "Detailed description."},
+                "entry_date": {
+                    "type": "string",
+                    "description": "Date for the entry as YYYY-MM-DD. Defaults to today.",
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional tags, e.g. ['backend', 'bugfix'].",
+                },
+            },
+            "required": ["subcategory", "title", "body"],
+        },
+        method="POST",
+        endpoint="/journal/entries",
+    ),
+    ToolDef(
+        name="update_journal_entry",
+        description="Update fields on an existing journal entry.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "entry_id": {"type": "string", "description": "Journal entry UUID."},
+                "category": {"type": "string", "enum": ["career", "personal"]},
+                "subcategory": {"type": "string"},
+                "title": {"type": "string"},
+                "body": {"type": "string"},
+                "entry_date": {"type": "string", "description": "Date as YYYY-MM-DD."},
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["entry_id"],
+        },
+        method="PATCH",
+        endpoint="/journal/entries/{entry_id}",
+        path_params=["entry_id"],
+    ),
+    ToolDef(
+        name="delete_journal_entry",
+        description="Permanently delete a journal entry by ID.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "entry_id": {"type": "string", "description": "Journal entry UUID."},
+            },
+            "required": ["entry_id"],
+        },
+        method="DELETE",
+        endpoint="/journal/entries/{entry_id}",
+        path_params=["entry_id"],
+    ),
+    ToolDef(
+        name="list_journal_subcategories",
+        description=(
+            "List distinct subcategory names used in journal entries, "
+            "optionally filtered to one category."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": ["career", "personal"],
+                    "description": "Restrict to one category. Defaults to all.",
+                },
+            },
+        },
+        method="GET",
+        endpoint="/journal/subcategories",
+    ),
+    ToolDef(
+        name="get_journal_summary",
+        description=(
+            "Get a summary of journal entries for a time period, grouped by date "
+            "with stats (entry count, categories, subcategories, top tags). "
+            "Use for standup prep, weekly reviews, or 1:1 talking points."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": ["career", "personal"],
+                    "description": "Filter to one category.",
+                },
+                "subcategory": {
+                    "type": "string",
+                    "description": "Filter to one subcategory.",
+                },
+                "period": {
+                    "type": "string",
+                    "enum": ["week", "month", "last_week", "last_month"],
+                    "description": "Shorthand period. Defaults to current week.",
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": "Custom start date (YYYY-MM-DD). Overrides period.",
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "Custom end date (YYYY-MM-DD).",
+                },
+            },
+        },
+        method="GET",
+        endpoint="/journal/summary",
+    ),
+    ToolDef(
+        name="export_journal",
+        description=(
+            "Export journal entries as formatted markdown or plain text. "
+            "Great for pasting into standups, performance reviews, "
+            "or Slack updates."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "enum": ["career", "personal"]},
+                "subcategory": {"type": "string"},
+                "period": {
+                    "type": "string",
+                    "enum": ["week", "month", "last_week", "last_month"],
+                    "description": "Shorthand period. Defaults to current week.",
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": "Custom start date (YYYY-MM-DD).",
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "Custom end date (YYYY-MM-DD).",
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["markdown", "plain"],
+                    "description": "Output format. Defaults to markdown.",
+                },
+            },
+        },
+        method="GET",
+        endpoint="/journal/export",
+    ),
+    ToolDef(
+        name="sync_journal_to_kb",
+        description=(
+            "Export journal entries for a period to Google Drive and sync "
+            "into the knowledge base, making them searchable via KB queries. "
+            "Drive folder is selected by category (career → career folder, "
+            "personal → personal folder)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": ["career", "personal"],
+                    "description": "Category to sync. Defaults to 'career'.",
+                },
+                "subcategory": {
+                    "type": "string",
+                    "description": "Optional: limit sync to a single subcategory.",
+                },
+                "period": {
+                    "type": "string",
+                    "enum": ["week", "month", "last_week", "last_month"],
+                    "description": "Period to sync. Defaults to current week.",
+                },
+            },
+        },
+        method="POST",
+        endpoint="/journal/sync-kb",
+    ),
+
+    # -------------------------------------------------------------------------
     # Memory (internal — does not call the gateway)
     # -------------------------------------------------------------------------
+    # ── Places ──────────────────────────────────────────────────────────────
+    ToolDef(
+        name="search_places",
+        description=(
+            "Search for real-world places using natural language. Use for restaurants, "
+            "coffee shops, gyms, stores, attractions, etc. Optionally provide the user's "
+            "current coordinates for 'near me' queries."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural language search, e.g. 'quiet coffee shop' or 'Italian restaurants in Broad Ripple'.",
+                },
+                "latitude": {
+                    "type": "number",
+                    "description": "User's current latitude for location bias.",
+                },
+                "longitude": {
+                    "type": "number",
+                    "description": "User's current longitude for location bias.",
+                },
+                "radius_meters": {
+                    "type": "number",
+                    "description": "Search radius in meters when using location bias. Defaults to 5000.",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Max results to return (1-20). Defaults to 5.",
+                },
+            },
+            "required": ["query"],
+        },
+        method="POST",
+        endpoint="/places/search",
+    ),
+    ToolDef(
+        name="get_place_details",
+        description="Get full details for a specific place by its Place ID — hours, phone, website, reviews, etc.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "place_id": {
+                    "type": "string",
+                    "description": "The Place ID from a search_places result.",
+                },
+            },
+            "required": ["place_id"],
+        },
+        method="GET",
+        endpoint="/places/{place_id}",
+        path_params=["place_id"],
+    ),
+    # ── Model escalation ─────────────────────────────────────────────────────
+    ToolDef(
+        name="request_escalation",
+        description=(
+            "Call this when the task requires complex reasoning, nuanced writing, or multi-step "
+            "synthesis that exceeds your current confidence. Switches to a more capable model "
+            "for all subsequent turns in this conversation turn."
+        ),
+        input_schema={"type": "object", "properties": {}},
+        method="INTERNAL",
+        endpoint="",
+    ),
+    # ── Tool expansion ───────────────────────────────────────────────────────
+    ToolDef(
+        name="request_tools",
+        description=(
+            "Expand your available tools when you need a capability not currently shown. "
+            "Call this before telling the user you lack a capability. "
+            "Valid categories: calendar, tasks, email, notify, kb, web, drive, github, sheets, finance, places."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "categories": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Tool categories to add, e.g. ['github'] or ['drive', 'sheets'].",
+                },
+            },
+            "required": ["categories"],
+        },
+        method="INTERNAL",
+        endpoint="",
+    ),
+    # ── Memory ──────────────────────────────────────────────────────────────
     ToolDef(
         name="memory_update",
         description=(
@@ -1265,10 +2062,6 @@ TOOLS: list[ToolDef] = [
     ),
 ]
 
-# ---------------------------------------------------------------------------
-# Index + public helpers
-# ---------------------------------------------------------------------------
-
 _tool_index: dict[str, ToolDef] = {t.name: t for t in TOOLS}
 
 
@@ -1284,6 +2077,217 @@ def get_tool_schemas() -> list[dict]:
     ]
     schemas[-1]["cache_control"] = {"type": "ephemeral"}
     return schemas
+
+
+# ---------------------------------------------------------------------------
+# Selective tool injection
+# ---------------------------------------------------------------------------
+
+TOOL_CATEGORIES: dict[str, list[str]] = {
+    "calendar": ["get_events", "check_availability", "create_event", "update_event",
+                 "delete_event", "search_events"],
+    "tasks":    ["get_task_lists", "get_tasks", "create_task_list", "rename_task_list",
+                 "create_task", "update_task", "delete_task"],
+    "email":    ["list_emails", "search_emails", "get_email", "draft_email"],
+    "notify":   ["send_notification"],
+    "kb":       ["search_knowledge_base", "get_kb_index", "list_kb_sources", "delete_kb_source", "sync_kb"],
+    "web":      ["web_search", "fetch_url", "aggregate_search"],
+    "drive":    ["list_files", "list_folders", "create_folder", "get_file_info", "read_file",
+                 "create_file", "update_file", "append_to_file", "delete_file", "move_file",
+                 "copy_file", "copy_file_from_github"],
+    "github":   ["list_repos", "get_repo", "list_issues", "get_issue", "create_issue",
+                 "update_issue", "add_issue_comment", "list_prs", "get_pr", "add_pr_comment",
+                 "create_pr", "search_issues", "get_github_file", "search_code",
+                 "list_commits", "get_commit", "list_branches", "list_tags",
+                 "list_releases", "get_latest_release", "get_pr_reviews", "get_pr_files",
+                 "list_contributors", "compare_refs"],
+    "sheets":   ["create_spreadsheet", "get_spreadsheet_info", "read_sheet", "write_sheet",
+                 "append_sheet_rows", "clear_sheet_range"],
+    "finance":  ["get_subscriptions", "add_subscription", "update_subscription", "delete_subscription",
+                 "get_budget", "set_budget_limit", "delete_budget",
+                 "get_income", "add_income_source", "delete_income",
+                 "get_upcoming_bills", "get_monthly_summary"],
+    "places":   ["search_places", "get_place_details"],
+    "journal":  ["list_journal_entries", "get_journal_entry", "create_journal_entry",
+                 "update_journal_entry", "delete_journal_entry", "list_journal_subcategories",
+                 "get_journal_summary", "export_journal", "sync_journal_to_kb"],
+}
+
+# ---------------------------------------------------------------------------
+# Think mode — fixed tool set for autonomous proactive reasoning
+# Read broadly, write narrowly.
+# ---------------------------------------------------------------------------
+
+THINK_TOOLS: frozenset[str] = frozenset({
+    # Read — calendar
+    "get_events", "check_availability", "search_events",
+    # Read — tasks
+    "get_task_lists", "get_tasks",
+    # Read — email
+    "list_emails", "search_emails", "get_email",
+    # Read — web/search
+    "web_search", "aggregate_search",
+    # Read — KB
+    "search_knowledge_base", "list_kb_sources",
+    # Read — Drive
+    "list_files", "list_folders", "get_file_info", "read_file",
+    # Read — GitHub
+    "list_repos", "get_repo", "list_issues", "get_issue",
+    "list_prs", "get_pr", "search_issues", "get_github_file",
+    "list_commits", "get_commit", "list_branches",
+    "list_releases", "get_latest_release", "get_pr_reviews",
+    "get_pr_files", "list_contributors",
+    # Read — Finance
+    "get_subscriptions", "get_budget", "get_income",
+    "get_upcoming_bills", "get_monthly_summary",
+    # Read — Journal
+    "list_journal_entries", "get_journal_entry", "list_journal_subcategories",
+    "get_journal_summary", "export_journal",
+    # Read — Sheets
+    "get_spreadsheet_info", "read_sheet",
+    # Write (limited)
+    "send_notification", "create_task", "memory_update",
+    "append_to_file", "create_file", "sync_kb",
+    "create_journal_entry",
+})
+
+
+def get_think_tool_schemas() -> list[dict]:
+    """Return the fixed tool schema list for think mode."""
+    schemas = [
+        {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+        for t in TOOLS
+        if t.name in THINK_TOOLS
+    ]
+    if schemas:
+        schemas[-1]["cache_control"] = {"type": "ephemeral"}
+    return schemas
+
+
+_CATEGORY_PATTERNS: dict[str, re.Pattern] = {
+    "calendar": re.compile(
+        r'\b(calendar|event|meeting|appointment|schedule|busy|free|availability|rsvp|invite'
+        r'|standup|stand-up|reschedule|tomorrow|tonight|zoom)\b', re.I),
+    "tasks":    re.compile(
+        r'\b(tasks?|todo|to-do|to do|to.do list|reminder|checklist|things to do|get done'
+        r'|mark.*done)\b', re.I),
+    "email":    re.compile(
+        r'\b(email|gmail|inbox|mail|unread|draft|subject|reply|forward|messages?)\b', re.I),
+    "notify":   re.compile(
+        r'\b(notify|notification|push.?notification|alert|pushover'
+        r'|ping me|heads.?up|let me know when|remind me)\b', re.I),
+    "kb":       re.compile(
+        r'\b(knowledge.?base|my notes?|my docs?|recall'
+        r'|what (do |have )?i (know|noted|written|saved|documented|decided|said|mentioned)'
+        r'|look up in my notes?|search my notes?|in my notes?'
+        r'|do i have (any |a )?(info|notes?|docs?|document|file|something) (on|about|for|regarding)'
+        r'|from my notes?|check my notes?'
+        r'|what did (i|we) (discuss|decide|talk about|say|mention|write)'
+        r'|do you (know|have|remember) (anything|something) about'
+        r'|find (my |the )?(notes?|docs?|info|document) (on|about|for)'
+        r'|what.s in my (notes?|docs?|kb|knowledge)'
+        r'|is there (anything|something) (on|about|regarding)'
+        r'|remind me (what|about|of)'
+        r'|what (is|are) (my|the) (notes?|docs?|info) (on|about))\b', re.I),
+    "web":      re.compile(
+        r'\b(look up|google|browse|find out|who is|news'
+        r'|current (price|weather|news|status|version|rate|score)'
+        r'|latest (news|version|release|update|price|score)'
+        r'|search (the )?web|search online|search for'
+        r'|reddit|hacker news|bluesky|social media'
+        r'|what.s (trending|happening|going on)'
+        r'|aggregate search|cross.?platform)\b', re.I),
+    "drive":    re.compile(
+        r'\b(file|drive|document|folder|google drive|gdrive|upload|download)\b', re.I),
+    "github":   re.compile(
+        r'\b(github|repo|repository|issue|pull request|\bpr\b|commit|branch|merge|fork|git)\b',
+        re.I),
+    "sheets":   re.compile(
+        r'\b(sheet|spreadsheet|excel|google sheets|csv|row|column|cell|table)\b', re.I),
+    "finance":  re.compile(
+        r'\b(subscri(ption|be)|budget|income|spend(ing)?|expense|bill(ing|s?)|payment|monthly cost'
+        r'|how much (do i |am i )?pay|afford|net (income|pay)|salary|paycheck'
+        r'|financial|finance|money|cash flow|subscription|netflix|spotify|hulu'
+        r'|due (date|on|this)|when (is|does|do).*charge|upcoming (bill|payment|charge))\b', re.I),
+    "journal":  re.compile(
+        r'\b(journal|daily log|work log|contribution|what did i do|what i did|standup notes?'
+        r'|log.*(entry|today|yesterday|work|contribution)|my entries'
+        r'|track.*(work|progress|contribution)|work diary)\b', re.I),
+    "places":   re.compile(
+        r'\b(restaurant|cafe|coffee|bar|gym|store|shop|nearby|near me|places?|food|eat|drink'
+        r'|hotel|directions?|open.*(now|today)|hours|visit|dine|dining|takeout|delivery'
+        r'|find (a |the |me )?(place|spot|restaurant|cafe|bar)|where (can|should) (i|we))\b', re.I),
+}
+
+_ALWAYS_INCLUDED: frozenset[str] = frozenset({"memory_update", "request_tools", "request_escalation"})
+_DEFAULT_CATEGORIES: frozenset[str] = frozenset({"calendar", "tasks", "kb", "web"})
+_STICKY_CATEGORIES: frozenset[str] = frozenset({"kb"})  # always injected regardless of pattern match
+_CO_SELECT: dict[str, frozenset[str]] = {
+    "sheets": frozenset({"drive"}),
+}
+
+
+def select_tools(user_message: str) -> list[dict]:
+    """Return tool schemas for categories matching the user message.
+
+    Falls back to _DEFAULT_CATEGORIES if no patterns match.
+    Co-selection rules in _CO_SELECT are applied after initial matching.
+    memory_update is always included regardless.
+    Preserves original TOOLS ordering. cache_control applied to last schema.
+    """
+    matched = {cat for cat, pat in _CATEGORY_PATTERNS.items() if pat.search(user_message)}
+    categories = matched if matched else _DEFAULT_CATEGORIES
+    categories = categories | _STICKY_CATEGORIES
+
+    # Apply co-selection: some categories implicitly require others
+    for cat in list(categories):
+        categories = categories | _CO_SELECT.get(cat, frozenset())
+
+    selected_names: set[str] = set(_ALWAYS_INCLUDED)
+    for cat in categories:
+        selected_names.update(TOOL_CATEGORIES.get(cat, []))
+
+    schemas = [
+        {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+        for t in TOOLS
+        if t.name in selected_names
+    ]
+    if schemas:
+        schemas[-1]["cache_control"] = {"type": "ephemeral"}
+    return schemas
+
+
+def expand_tools(current_tools: list[dict], categories: list[str]) -> tuple[list[dict], str]:
+    """Merge tool schemas for the requested categories into the current tool list.
+
+    Returns (updated_tools, result_message). Safe to call with already-loaded categories.
+    """
+    existing_names = {t["name"] for t in current_tools}
+    new_defs = []
+    for cat in categories:
+        for name in TOOL_CATEGORIES.get(cat, []):
+            if name not in existing_names:
+                td = _tool_index.get(name)
+                if td:
+                    new_defs.append({
+                        "name": td.name,
+                        "description": td.description,
+                        "input_schema": td.input_schema,
+                    })
+                    existing_names.add(name)
+
+    if not new_defs:
+        return current_tools, f"No new tools added — {categories} already loaded or unknown."
+
+    expanded = list(current_tools)
+    if expanded and "cache_control" in expanded[-1]:
+        expanded[-1] = {k: v for k, v in expanded[-1].items() if k != "cache_control"}
+    expanded.extend(new_defs)
+    expanded[-1]["cache_control"] = {"type": "ephemeral"}
+
+    added_names = [t["name"] for t in new_defs]
+    msg = f"Tools expanded. Added {len(added_names)} tools from {categories}: {', '.join(added_names)}."
+    return expanded, msg
 
 
 _SSRF_BLOCKED_HOSTS = {"localhost", "metadata.google.internal"}
@@ -1314,20 +2318,42 @@ def _check_ssrf(url: str) -> str | None:
     return None
 
 
-async def execute_tool(name: str, args: dict[str, Any]) -> str:
-    """Dispatch a tool call and return the result as a string for the LLM."""
+async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
+    """Dispatch a tool call and return a ToolResult for the LLM and audit log."""
+    t0 = time.perf_counter()
+
+    def _ms() -> int:
+        return int((time.perf_counter() - t0) * 1000)
+
+    def _err(msg: str) -> ToolResult:
+        return ToolResult(content=msg, status="error", error=msg, duration_ms=_ms())
+
+    def _ok(content: str) -> ToolResult:
+        return ToolResult(content=content, status="success", error=None, duration_ms=_ms())
+
     tool = _tool_index.get(name)
     if tool is None:
-        return f"Unknown tool: {name}"
+        return _err(f"Unknown tool: {name}")
 
     if tool.method == "INTERNAL":
-        return await _execute_internal(name, args)
+        return await _execute_internal(name, args, t0)
+
+    # Cache lookup — read-only tools only
+    cache_key = None
+    if name in _CACHEABLE_TOOLS:
+        cache_key = (name, tuple(sorted((k, str(v)) for k, v in args.items())))
+        cached = _TOOL_CACHE.get(cache_key)
+        if cached is not None:
+            return ToolResult(
+                content=cached.content, status=cached.status,
+                error=cached.error, duration_ms=0,
+            )
 
     # SSRF guard — validate any URL argument before forwarding to the gateway
     if "url" in args:
         ssrf_err = _check_ssrf(str(args["url"]))
         if ssrf_err:
-            return f"Blocked: {ssrf_err}"
+            return _err(ssrf_err)
 
     # Interpolate path params, keeping remaining args for query/body
     endpoint = tool.endpoint
@@ -1335,7 +2361,7 @@ async def execute_tool(name: str, args: dict[str, Any]) -> str:
     for param in tool.path_params:
         val = remaining.pop(param, None)
         if val is None:
-            return f"Missing required path parameter: {param}"
+            return _err(f"Missing required path parameter: {param}")
         endpoint = endpoint.replace(f"{{{param}}}", quote(str(val), safe=""))
 
     url = f"{settings.gateway_url}{endpoint}"
@@ -1355,34 +2381,54 @@ async def execute_tool(name: str, args: dict[str, Any]) -> str:
             elif tool.method == "DELETE":
                 resp = await client.delete(url, headers=headers)
                 if resp.status_code == 204:
-                    return "Deleted successfully."
+                    return _ok("Deleted successfully.")
             else:
-                return f"Unsupported method: {tool.method}"
+                return _err(f"Unsupported method: {tool.method}")
     except httpx.TimeoutException:
-        return "Request timed out."
+        return _err("Request timed out.")
     except httpx.RequestError as e:
-        return f"Request error: {e}"
+        return _err(f"Request error: {e}")
 
     if not resp.is_success:
-        return f"Error {resp.status_code}: {resp.text}"
+        return _err(f"Error {resp.status_code}: {resp.text}")
 
     try:
-        return json.dumps(resp.json(), indent=2)
+        result = _ok(json.dumps(resp.json()))
     except Exception:
-        return resp.text
+        result = _ok(resp.text)
+
+    if cache_key:
+        _TOOL_CACHE[cache_key] = result
+    return result
 
 
-async def _execute_internal(name: str, args: dict[str, Any]) -> str:
+async def _execute_internal(name: str, args: dict[str, Any], t0: float) -> ToolResult:
     """Handle internal tools that don't call the gateway."""
-    if name == "memory_update":
-        from app.agent.memory import upsert_fact
-        fact = await upsert_fact(
-            fact_type=args["fact_type"],
-            key=args["key"],
-            value=args["value"],
-            confidence=1.0,
-            source="user_explicit",
-        )
-        return f"Remembered: [{fact['fact_type']}] {fact['key']} = {fact['value']}"
+    def _ms() -> int:
+        return int((time.perf_counter() - t0) * 1000)
 
-    return f"Unknown internal tool: {name}"
+    if name == "memory_update":
+        try:
+            fact = await upsert_fact(
+                fact_type=args["fact_type"],
+                key=args["key"],
+                value=args["value"],
+                confidence=1.0,
+                source="user_explicit",
+            )
+            content = f"Remembered: [{fact['fact_type']}] {fact['key']} = {fact['value']}"
+            return ToolResult(content=content, status="success", error=None, duration_ms=_ms())
+        except Exception as e:
+            msg = f"Memory update failed: {e}"
+            return ToolResult(content=msg, status="error", error=msg, duration_ms=_ms())
+
+    if name == "request_tools":
+        # Normally handled inline by the agent loop; this is a safety fallback.
+        return ToolResult(content="Tool expansion handled by agent loop.", status="success", error=None, duration_ms=_ms())
+
+    if name == "request_escalation":
+        # Normally handled inline by the agent loop; this is a safety fallback.
+        return ToolResult(content="Escalation handled by agent loop.", status="success", error=None, duration_ms=_ms())
+
+    msg = f"Unknown internal tool: {name}"
+    return ToolResult(content=msg, status="error", error=msg, duration_ms=_ms())

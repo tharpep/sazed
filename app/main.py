@@ -9,7 +9,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.db import close_pool, init_pool
 from app.dependencies import verify_api_key
-from app.routers import chat, conversations, health, kb, memory, tools
+from app.routers import (
+    audit,
+    chat,
+    conversations,
+    finance,
+    health,
+    journal,
+    kb,
+    memory,
+    think,
+    tools,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,4 +75,16 @@ app.include_router(
 )
 app.include_router(
     tools.router, prefix="/tools", tags=["tools"], dependencies=[Depends(verify_api_key)]
+)
+app.include_router(
+    audit.router, prefix="/audit", tags=["audit"], dependencies=[Depends(verify_api_key)]
+)
+app.include_router(
+    finance.router, prefix="/finance", tags=["finance"], dependencies=[Depends(verify_api_key)]
+)
+app.include_router(
+    journal.router, prefix="/journal", tags=["journal"], dependencies=[Depends(verify_api_key)]
+)
+app.include_router(
+    think.router, prefix="/think", tags=["think"], dependencies=[Depends(verify_api_key)]
 )

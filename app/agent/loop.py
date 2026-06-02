@@ -1,44 +1,81 @@
 """Agent loop — core reasoning cycle."""
 
+import asyncio
 import json
 import logging
 import time
 import uuid
+from collections import Counter
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Any, AsyncIterator
 
-import anthropic
-
-from app.agent.memory import format_for_prompt, load_memory
+from app.agent.client import get_client, tool_sig
+from app.agent.memory import format_for_prompt, load_memory, load_relevant_memory
 from app.agent.session import compress_context
-from app.agent.tools import execute_tool, get_tool_schemas
+from app.agent.tools import execute_tool, expand_tools, get_tool_schemas, select_tools
 from app.config import settings
 from app.db import get_pool
 
 logger = logging.getLogger(__name__)
 
-MAX_TURNS = 5
 
-_client: anthropic.AsyncAnthropic | None = None
-
-
-def _get_client() -> anthropic.AsyncAnthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-    return _client
-
-
-async def _build_system_prompt(mode: str = "chat", timezone: str | None = None) -> list[dict[str, Any]]:
+async def _generate_session_title(pool, sid: uuid.UUID, user_message: str) -> None:
+    """Fire-and-forget: generate a short title for a new session using Haiku."""
     try:
-        tz = ZoneInfo(timezone) if timezone else ZoneInfo("UTC")
-    except ZoneInfoNotFoundError:
-        tz = ZoneInfo("UTC")
-    now = datetime.now(tz)
-    today = now.strftime("%A, %B %d, %Y")
-    time_of_day = now.strftime("%I:%M %p")
-    memory_section = format_for_prompt(await load_memory())
+        resp = await get_client().messages.create(
+            model=settings.haiku_model,
+            max_tokens=20,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Generate a concise 3-5 word title for a chat session that starts with:\n\n"
+                    f"{user_message[:500]}\n\n"
+                    "Reply with only the title, no punctuation, no quotes."
+                ),
+            }],
+        )
+        title = resp.content[0].text.strip()[:100]
+        await pool.execute("UPDATE sessions SET title = $1 WHERE id = $2", title, sid)
+    except Exception as e:
+        logger.warning(f"Failed to generate session title for {sid}: {e}")
+
+
+def _select_model(
+    turn: int,
+    user_message_long: bool,
+    tools_used: list[str],
+    force_sonnet: bool,
+) -> tuple[str, str]:
+    """Return (model_id, reason) for the current turn.
+
+    Priority (highest first):
+      1. Haiku explicitly requested escalation via request_escalation tool
+      2. Turn index >= sonnet_turn_threshold — deep multi-step chain
+      3. A write tool was used in a prior turn — synthesis needs precision
+      4. User message is long — signals a complex ask
+      5. Default — Haiku
+    """
+    if force_sonnet:
+        return settings.sonnet_model, "escalation_requested"
+    if turn >= settings.sonnet_turn_threshold:
+        return settings.sonnet_model, f"turn>={settings.sonnet_turn_threshold}"
+    if any(t in settings.sonnet_write_tools for t in tools_used):
+        return settings.sonnet_model, "write_tool_used"
+    if user_message_long:
+        return settings.sonnet_model, "long_message"
+    return settings.haiku_model, "default"
+
+
+async def _build_system_prompt(mode: str = "chat", user_message: str = "", location=None) -> list[dict[str, Any]]:
+    memory_section = format_for_prompt(await load_relevant_memory(user_message))
+    location_section = ""
+    if location:
+        location_section = (
+            f"\n\n## User's Current Location\n"
+            f"Lat: {location.latitude}, Lng: {location.longitude}\n"
+            f"Use these coordinates when calling search_places for 'near me' queries."
+        )
     blocks: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -49,23 +86,28 @@ async def _build_system_prompt(mode: str = "chat", timezone: str | None = None) 
                 "- Always use tools to get real data. Never answer from assumption when a tool can verify.\n"
                 "- Match response length to the question — short for simple answers, structured only when it genuinely helps.\n"
                 "- When a tool fails, say so clearly and suggest what to try instead.\n"
-                "- When the user asks you to remember something, call memory_update immediately.\n\n"
+                "- When the user asks you to remember something, call memory_update immediately.\n"
+                "- The user can always see what tools you use, so skip action telegraphing.\n\n"
+                "## Tools\n"
+                "You have tools for: calendar, tasks, email, Google Drive, GitHub, "
+                "Google Sheets, notifications, web search, places, and a personal knowledge base.\n\n"
                 "## Tool guidance\n"
                 "- Tasks: call get_task_lists first to get valid list IDs before creating, reading, or updating tasks.\n"
                 "- Drive files: call list_files to find a file ID before reading, updating, or deleting.\n"
+                "- Sheets: call get_spreadsheet_info first to confirm tab names and structure before reading or writing.\n"
                 "- Knowledge vs web: search the knowledge base first for anything about the user's personal context, projects, or notes. Use web_search when the knowledge base has nothing useful or the topic requires current information.\n"
-                "- Email: use list_emails with filters before fetching full message content."
+                "- Email: use list_emails with filters before fetching full message content.\n"
+                "- Places: when the user asks about nearby places or 'near me', use the current location coordinates from the system prompt if available.\n"
+                "- Available tools: you only receive tools relevant to the current request. "
+                "If you need a capability not shown in your current tools, call `request_tools` "
+                "with the relevant category — don't tell the user you can't do something until you've tried expanding first."
             ),
             "cache_control": {"type": "ephemeral"},
         },
         {
             "type": "text",
-            "text": f"## Known facts about the user\n{memory_section}",
+            "text": f"## Known facts about the user\n{memory_section}{location_section}",
             "cache_control": {"type": "ephemeral"},
-        },
-        {
-            "type": "text",
-            "text": f"Today is {today}, {time_of_day} ({tz.key}). Always display dates and times in this timezone; convert tool result timestamps before presenting them.",
         },
     ]
     if mode == "voice":
@@ -79,17 +121,11 @@ async def _build_system_prompt(mode: str = "chat", timezone: str | None = None) 
                 "- Speak conversationally, as if talking to someone in person.\n"
                 "- Give the core answer directly. If a topic needs more depth, cover the key point "
                 "and offer to elaborate if they want.\n"
-                "- Never open with filler words like 'certainly', 'absolutely', or 'of course'."
+                "- Never open with filler words like 'certainly', 'absolutely', or 'of course'.\n"
+                "- After using a tool, summarize the result in plain speech — do not repeat raw data, dates in ISO format, or structured output."
             ),
         })
     return blocks
-
-
-def _select_model(turn: int) -> str:
-    """Haiku for early turns; escalate to Sonnet if the task is still running by turn 3."""
-    if turn >= 3:
-        return settings.sonnet_model
-    return settings.haiku_model
 
 
 def _content_to_dicts(content: list) -> list[dict[str, Any]]:
@@ -166,23 +202,19 @@ async def _save_message(pool, session_id: uuid.UUID, role: str, content: Any) ->
     )
 
 
-async def run_turn(session_id: str | None, user_message: str, mode: str = "chat", timezone: str | None = None) -> tuple[str, str]:
+async def _setup_turn(
+    pool,
+    sid: uuid.UUID,
+    user_message: str,
+    mode: str,
+    timezone: str | None,
+    location,
+) -> tuple[list, list, list]:
+    """Load session messages, apply context window, append user message, build system prompt + tools.
+
+    Returns (messages, system, tools).
+    Session INSERT must be done by the caller before calling this.
     """
-    Run one user turn through the agent loop.
-    Returns (session_id, response_text).
-    """
-    if not session_id:
-        session_id = str(uuid.uuid4())
-
-    pool = get_pool()
-    sid = uuid.UUID(session_id)
-
-    # Ensure the session row exists
-    await pool.execute(
-        "INSERT INTO sessions (id) VALUES ($1) ON CONFLICT DO NOTHING", sid
-    )
-
-    # Load existing history
     rows = await pool.fetch(
         "SELECT role, content FROM messages WHERE session_id = $1 ORDER BY timestamp",
         sid,
@@ -190,31 +222,137 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
     messages: list[dict[str, Any]] = [
         {"role": r["role"], "content": json.loads(r["content"])} for r in rows
     ]
-    logger.debug(f"session {session_id}: loaded {len(messages)} prior messages")
+    logger.debug(f"session {sid}: loaded {len(messages)} prior messages")
 
-    # Apply context window — compresses overflow into a rolling summary if needed
+    if not rows:
+        asyncio.create_task(_generate_session_title(pool, sid, user_message))
+
     messages = await _apply_context_window(pool, sid, messages)
 
-    # Append and persist the new user message
-    messages.append({"role": "user", "content": user_message})
-    await _save_message(pool, sid, "user", user_message)
-    logger.debug(f"session {session_id}: user message='{user_message[:120]}'")
+    try:
+        tz = ZoneInfo(timezone) if timezone else ZoneInfo("UTC")
+    except ZoneInfoNotFoundError:
+        tz = ZoneInfo("UTC")
+    now = datetime.now(tz)
+    tz_prefix = f"[{now.strftime('%A, %B %d, %Y')} {now.strftime('%I:%M %p')} {tz.key}]\n"
+    prefixed_message = tz_prefix + user_message
+    messages.append({"role": "user", "content": prefixed_message})
+    await _save_message(pool, sid, "user", prefixed_message)
+    logger.debug(f"session {sid}: user message='{user_message[:120]}'")
 
-    client = _get_client()
-    final_content: list[dict[str, Any]] = []
+    system = await _build_system_prompt(mode, user_message, location)
+    tools = select_tools(user_message)
+    logger.debug(f"  selected {len(tools)} tools for: '{user_message[:80]}'")
 
-    for turn in range(MAX_TURNS):
-        model = _select_model(turn)
-        system = await _build_system_prompt(mode, timezone)
-        t0 = time.perf_counter()
-        logger.debug(f"  turn {turn}: calling {model} with {len(messages)} messages in context")
-        response = await client.messages.create(
-            model=model,
-            system=system,
-            messages=messages,
-            tools=get_tool_schemas(),
-            max_tokens=4096,
+    return messages, system, tools
+
+
+async def _execute_regular_tools(
+    pool,
+    sid: uuid.UUID,
+    regular_blocks: list,
+    tool_call_counts: Counter,
+    turn: int,
+) -> tuple[list[tuple], str | None]:
+    """Execute tool blocks concurrently, detect stuck loops, persist action logs.
+
+    Returns ([(block, tool_result), ...], stuck_msg_or_None).
+    On stuck: partial result list (pre-stuck entries only), non-None stuck_msg.
+    Action logs are flushed internally before returning.
+    """
+    if not regular_blocks:
+        return [], None
+
+    raw_results = await asyncio.gather(*[execute_tool(b.name, b.input) for b in regular_blocks])
+
+    results = []
+    log_coros = []
+    stuck_msg = None
+    for block, tool_result in zip(regular_blocks, raw_results):
+        sig = tool_sig(block.name, block.input)
+        tool_call_counts[sig] += 1
+        if tool_call_counts[sig] >= 3:
+            logger.warning(f"  stuck loop detected: {block.name} called 3x with same args")
+            stuck_msg = (
+                f"I seem to be stuck — I've called `{block.name}` three times with the "
+                f"same arguments without making progress. Please try rephrasing your "
+                f"request or providing more specific details."
+            )
+            break
+        logger.debug(
+            f"  turn {turn}: {block.name} {tool_result.status} in "
+            f"{tool_result.duration_ms}ms, {len(tool_result.content)} chars"
         )
+        log_coros.append(pool.execute(
+            """INSERT INTO action_logs
+                   (session_id, tool_name, input, output, status, error_message, duration_ms)
+               VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7)""",
+            sid, block.name, json.dumps(block.input), tool_result.content,
+            tool_result.status, tool_result.error, tool_result.duration_ms,
+        ))
+        results.append((block, tool_result))
+
+    await asyncio.gather(*log_coros)
+    return results, stuck_msg
+
+
+async def _finalize_turn(pool, sid: uuid.UUID) -> None:
+    """Update session last_activity and message_count."""
+    await pool.execute(
+        """
+        UPDATE sessions
+        SET last_activity = NOW(),
+            message_count = (SELECT COUNT(*) FROM messages WHERE session_id = $1)
+        WHERE id = $1
+        """,
+        sid,
+    )
+
+
+async def run_turn(
+    session_id: str | None,
+    user_message: str,
+    mode: str = "chat",
+    timezone: str | None = None,
+    location=None,
+) -> tuple[str, str]:
+    """Run one user turn through the agent loop. Returns (session_id, response_text)."""
+    if not session_id:
+        session_id = str(uuid.uuid4())
+
+    pool = get_pool()
+    sid = uuid.UUID(session_id)
+    await pool.execute("INSERT INTO sessions (id) VALUES ($1) ON CONFLICT DO NOTHING", sid)
+
+    messages, system, tools = await _setup_turn(pool, sid, user_message, mode, timezone, location)
+
+    client = get_client()
+    final_content: list[dict[str, Any]] = []
+    tool_call_counts: Counter = Counter()
+    force_sonnet = False
+    tools_used: list[str] = []
+    user_message_long = len(user_message) >= settings.sonnet_message_len_threshold
+
+    for turn in range(settings.agent_max_turns):
+        model, model_reason = _select_model(turn, user_message_long, tools_used, force_sonnet)
+        t0 = time.perf_counter()
+        logger.debug(f"  turn {turn}: calling {model} ({model_reason}) with {len(messages)} messages in context")
+        try:
+            response = await asyncio.wait_for(
+                client.messages.create(
+                    model=model,
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=4096,
+                ),
+                timeout=settings.turn_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"  turn {turn}: LLM call timed out after {settings.turn_timeout_seconds}s")
+            await _finalize_turn(pool, sid)
+            return session_id, "Request timed out — please try again."
+
         logger.debug(
             f"  turn {turn}: stop_reason={response.stop_reason} "
             f"in {time.perf_counter() - t0:.3f}s"
@@ -229,103 +367,141 @@ async def run_turn(session_id: str | None, user_message: str, mode: str = "chat"
             break
 
         if response.stop_reason == "tool_use":
-            tool_names = [b.name for b in response.content if b.type == "tool_use"]
-            logger.debug(f"  turn {turn}: tool calls → {tool_names}")
-            tool_results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    t1 = time.perf_counter()
-                    result = await execute_tool(block.name, block.input)
-                    logger.debug(
-                        f"  turn {turn}: {block.name} completed in {time.perf_counter() - t1:.3f}s, "
-                        f"{len(result)} chars"
-                    )
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result,
-                    })
+            tool_blocks = [b for b in response.content if b.type == "tool_use"]
+            logger.debug(f"  turn {turn}: tool calls → {[b.name for b in tool_blocks]}")
+
+            expand_results: dict[str, str] = {}
+            regular_blocks = []
+            for block in tool_blocks:
+                if block.name == "request_tools":
+                    categories = block.input.get("categories", [])
+                    tools, msg = expand_tools(tools, categories)
+                    expand_results[block.id] = msg
+                    logger.debug(f"  turn {turn}: request_tools {categories} → {msg[:80]}")
+                elif block.name == "request_escalation":
+                    force_sonnet = True
+                    expand_results[block.id] = "Switching to enhanced reasoning mode."
+                    logger.debug(f"  turn {turn}: request_escalation → escalating to Sonnet")
+                else:
+                    regular_blocks.append(block)
+
+            tools_used.extend(b.name for b in regular_blocks)
+
+            tool_results: list[dict[str, Any]] = [
+                {"type": "tool_result", "tool_use_id": bid, "content": msg}
+                for bid, msg in expand_results.items()
+            ]
+            results, stuck_msg = await _execute_regular_tools(
+                pool, sid, regular_blocks, tool_call_counts, turn
+            )
+            if stuck_msg:
+                final_content = [{"type": "text", "text": stuck_msg}]
+                await _save_message(pool, sid, "assistant", final_content)
+                break
+
+            for block, tool_result in results:
+                tr: dict[str, Any] = {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": tool_result.content,
+                }
+                if tool_result.status == "error":
+                    tr["is_error"] = True
+                tool_results.append(tr)
+
             messages.append({"role": "user", "content": tool_results})
             await _save_message(pool, sid, "user", tool_results)
         else:
-            # Unexpected stop reason — bail out
             logger.debug(f"  turn {turn}: unexpected stop_reason, bailing out")
             break
 
-    # Update session stats
-    await pool.execute(
-        """
-        UPDATE sessions
-        SET last_activity = NOW(),
-            message_count = (SELECT COUNT(*) FROM messages WHERE session_id = $1)
-        WHERE id = $1
-        """,
-        sid,
-    )
+    # If the loop exhausted turns mid-tool-use, final_content has no text.
+    # Do one synthesis call (no tools) so the user gets an actual response.
+    if not any(b.get("type") == "text" for b in final_content):
+        logger.debug(f"  synthesis: loop ended on tool_use, upgrading to {settings.sonnet_model}")
+        try:
+            synth = await asyncio.wait_for(
+                client.messages.create(
+                    model=settings.sonnet_model,
+                    system=system,
+                    messages=messages,
+                    max_tokens=1024,
+                ),
+                timeout=settings.turn_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"  synthesis: timed out after {settings.turn_timeout_seconds}s")
+            await _finalize_turn(pool, sid)
+            return session_id, "Request timed out during synthesis — please try again."
+        content_dicts = _content_to_dicts(synth.content)
+        await _save_message(pool, sid, "assistant", content_dicts)
+        final_content = content_dicts
 
+    await _finalize_turn(pool, sid)
     response_text = _extract_text(final_content)
     logger.debug(f"session {session_id}: final response='{response_text[:120]}'")
     return session_id, response_text
 
 
 async def run_turn_stream(
-    session_id: str | None, user_message: str, mode: str = "chat", timezone: str | None = None
+    session_id: str | None,
+    user_message: str,
+    mode: str = "chat",
+    timezone: str | None = None,
+    location=None,
 ) -> AsyncIterator[str]:
     """
     Run one user turn through the agent loop, yielding SSE-formatted strings.
 
     Events yielded:
-        event: session    data: {"session_id": "..."}   — before first LLM call
-        event: tool_start data: {"name": "..."}          — before each tool execution
-        event: tool_done  data: {"name": "..."}          — after each tool execution
-        event: text_delta data: {"text": "..."}          — streaming text tokens
-        event: done       data: {}                       — after session persisted
+        event: session    data: {"session_id": "..."}                              — before first LLM call
+        event: tool_start data: {"name": "..."}                                    — before each tool execution
+        event: tool_done  data: {"name": "...", "status": "success"|"error", "error": "..."|null}
+        event: text_delta data: {"text": "..."}                                    — streaming text tokens
+        event: done       data: {}                                                 — after session persisted
     """
     if not session_id:
         session_id = str(uuid.uuid4())
 
     pool = get_pool()
     sid = uuid.UUID(session_id)
+    await pool.execute("INSERT INTO sessions (id) VALUES ($1) ON CONFLICT DO NOTHING", sid)
 
-    await pool.execute(
-        "INSERT INTO sessions (id) VALUES ($1) ON CONFLICT DO NOTHING", sid
-    )
-
-    rows = await pool.fetch(
-        "SELECT role, content FROM messages WHERE session_id = $1 ORDER BY timestamp",
-        sid,
-    )
-    messages: list[dict[str, Any]] = [
-        {"role": r["role"], "content": json.loads(r["content"])} for r in rows
-    ]
-
-    # Apply context window — compresses overflow into a rolling summary if needed
-    messages = await _apply_context_window(pool, sid, messages)
-
-    messages.append({"role": "user", "content": user_message})
-    await _save_message(pool, sid, "user", user_message)
-    logger.debug(f"stream session {session_id}: user message='{user_message[:120]}'")
+    messages, system, tools = await _setup_turn(pool, sid, user_message, mode, timezone, location)
 
     yield f"event: session\ndata: {json.dumps({'session_id': session_id})}\n\n"
 
-    client = _get_client()
+    client = get_client()
+    tool_call_counts: Counter = Counter()
+    stuck = False
+    force_sonnet = False
+    tools_used: list[str] = []
+    user_message_long = len(user_message) >= settings.sonnet_message_len_threshold
 
-    for turn in range(MAX_TURNS):
-        model = _select_model(turn)
-        system = await _build_system_prompt(mode, timezone)
+    for turn in range(settings.agent_max_turns):
+        model, model_reason = _select_model(turn, user_message_long, tools_used, force_sonnet)
         t0 = time.perf_counter()
-        logger.debug(f"  stream turn {turn}: calling {model} with {len(messages)} messages")
+        logger.debug(f"  stream turn {turn}: calling {model} ({model_reason}) with {len(messages)} messages")
 
-        async with client.messages.stream(
-            model=model,
-            system=system,
-            messages=messages,
-            tools=get_tool_schemas(),
-            max_tokens=4096,
-        ) as stream:
-            async for text in stream.text_stream:
-                yield f"event: text_delta\ndata: {json.dumps({'text': text})}\n\n"
-            response = await stream.get_final_message()
+        try:
+            async with asyncio.timeout(settings.turn_timeout_seconds):
+                async with client.messages.stream(
+                    model=model,
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=4096,
+                ) as stream:
+                    async for text in stream.text_stream:
+                        yield f"event: text_delta\ndata: {json.dumps({'text': text})}\n\n"
+                    response = await stream.get_final_message()
+        except asyncio.TimeoutError:
+            logger.warning(f"  stream turn {turn}: timed out after {settings.turn_timeout_seconds}s")
+            timeout_msg = "Request timed out — please try again."
+            yield f"event: text_delta\ndata: {json.dumps({'text': timeout_msg})}\n\n"
+            await _finalize_turn(pool, sid)
+            yield f"event: done\ndata: {{}}\n\n"
+            return
 
         logger.debug(
             f"  stream turn {turn}: stop_reason={response.stop_reason} "
@@ -340,25 +516,55 @@ async def run_turn_stream(
             break
 
         if response.stop_reason == "tool_use":
-            tool_names = [b.name for b in response.content if b.type == "tool_use"]
-            logger.debug(f"  stream turn {turn}: tool calls → {tool_names}")
+            tool_blocks = [b for b in response.content if b.type == "tool_use"]
+            logger.debug(f"  stream turn {turn}: tool calls → {[b.name for b in tool_blocks]}")
 
-            tool_results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    yield f"event: tool_start\ndata: {json.dumps({'name': block.name})}\n\n"
-                    t1 = time.perf_counter()
-                    result = await execute_tool(block.name, block.input)
-                    logger.debug(
-                        f"  stream turn {turn}: {block.name} completed in "
-                        f"{time.perf_counter() - t1:.3f}s, {len(result)} chars"
-                    )
-                    yield f"event: tool_done\ndata: {json.dumps({'name': block.name})}\n\n"
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result,
-                    })
+            expand_results: dict[str, str] = {}
+            regular_blocks = []
+            for block in tool_blocks:
+                if block.name == "request_tools":
+                    categories = block.input.get("categories", [])
+                    tools, msg = expand_tools(tools, categories)
+                    expand_results[block.id] = msg
+                    logger.debug(f"  stream turn {turn}: request_tools {categories} → {msg[:80]}")
+                elif block.name == "request_escalation":
+                    force_sonnet = True
+                    expand_results[block.id] = "Switching to enhanced reasoning mode."
+                    logger.debug(f"  stream turn {turn}: request_escalation → escalating to Sonnet")
+                else:
+                    regular_blocks.append(block)
+
+            tools_used.extend(b.name for b in regular_blocks)
+
+            for block in regular_blocks:
+                yield f"event: tool_start\ndata: {json.dumps({'name': block.name})}\n\n"
+
+            tool_results: list[dict[str, Any]] = [
+                {"type": "tool_result", "tool_use_id": bid, "content": msg}
+                for bid, msg in expand_results.items()
+            ]
+            results, stuck_msg = await _execute_regular_tools(
+                pool, sid, regular_blocks, tool_call_counts, turn
+            )
+            if stuck_msg:
+                await _save_message(pool, sid, "assistant", [{"type": "text", "text": stuck_msg}])
+                yield f"event: text_delta\ndata: {json.dumps({'text': stuck_msg})}\n\n"
+                stuck = True
+                break
+
+            for block, tool_result in results:
+                yield f"event: tool_done\ndata: {json.dumps({'name': block.name, 'status': tool_result.status, 'error': tool_result.error})}\n\n"
+                tr: dict[str, Any] = {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": tool_result.content,
+                }
+                if tool_result.status == "error":
+                    tr["is_error"] = True
+                tool_results.append(tr)
+
+            if stuck:
+                break
 
             messages.append({"role": "user", "content": tool_results})
             await _save_message(pool, sid, "user", tool_results)
@@ -366,16 +572,31 @@ async def run_turn_stream(
             logger.debug(f"  stream turn {turn}: unexpected stop_reason, bailing")
             break
 
-    await pool.execute(
-        """
-        UPDATE sessions
-        SET last_activity = NOW(),
-            message_count = (SELECT COUNT(*) FROM messages WHERE session_id = $1)
-        WHERE id = $1
-        """,
-        sid,
-    )
+    # If the loop exhausted turns mid-tool-use, no text was streamed.
+    # Do one synthesis call (no tools) and stream its output.
+    if messages and messages[-1]["role"] == "user" and isinstance(messages[-1]["content"], list) and any(
+        b.get("type") == "tool_result" for b in messages[-1]["content"]
+    ):
+        logger.debug(f"  stream synthesis: loop ended on tool_use, upgrading to {settings.sonnet_model}")
+        try:
+            async with asyncio.timeout(settings.turn_timeout_seconds):
+                async with client.messages.stream(
+                    model=settings.sonnet_model,
+                    system=system,
+                    messages=messages,
+                    max_tokens=1024,
+                ) as stream:
+                    async for text in stream.text_stream:
+                        yield f"event: text_delta\ndata: {json.dumps({'text': text})}\n\n"
+                    synth = await stream.get_final_message()
+        except asyncio.TimeoutError:
+            logger.warning(f"  stream synthesis: timed out after {settings.turn_timeout_seconds}s")
+            yield f"event: text_delta\ndata: {json.dumps({'text': 'Request timed out during synthesis.'})}\n\n"
+        else:
+            content_dicts = _content_to_dicts(synth.content)
+            await _save_message(pool, sid, "assistant", content_dicts)
 
+    await _finalize_turn(pool, sid)
     logger.debug(f"stream session {session_id}: done")
     yield f"event: done\ndata: {{}}\n\n"
 
@@ -405,13 +626,15 @@ async def list_sessions() -> list[dict[str, Any]]:
     """Return all sessions ordered by most recent activity."""
     pool = get_pool()
     rows = await pool.fetch(
-        "SELECT id, message_count, last_activity, created_at FROM sessions ORDER BY last_activity DESC"
+        "SELECT id, message_count, last_activity, created_at, session_type, title FROM sessions ORDER BY last_activity DESC"
     )
     return [
         {
             "session_id": str(r["id"]),
             "message_count": r["message_count"],
             "last_activity": r["last_activity"].isoformat(),
+            "session_type": r["session_type"] or "chat",
+            "title": r["title"],
         }
         for r in rows
     ]

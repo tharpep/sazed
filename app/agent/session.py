@@ -6,22 +6,13 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-import anthropic
 import httpx
 
+from app.agent.client import get_client
 from app.agent.memory import load_memory, upsert_fact
 from app.config import settings
 
 logger = logging.getLogger(__name__)
-
-_client: anthropic.AsyncAnthropic | None = None
-
-
-def _get_client() -> anthropic.AsyncAnthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-    return _client
 
 
 def _format_messages(messages: list[dict[str, Any]]) -> str:
@@ -97,7 +88,7 @@ Be concise — this summary will be prepended to future messages to maintain con
 Conversation:
 {conversation}"""
 
-    response = await _get_client().messages.create(
+    response = await get_client().messages.create(
         model=settings.haiku_model,
         max_tokens=768,
         messages=[{"role": "user", "content": prompt}],
@@ -132,7 +123,7 @@ Do not duplicate facts already in the existing list unless the value has changed
 
 Return a JSON array of objects with these fields:
   fact_type: one of "personal", "preference", "project", "instruction", "relationship"
-  key: short identifier, e.g. "primary_language"
+  key: short snake_case identifier — use the same key as an existing fact if it refers to the same concept, e.g. "primary_language" not "main_language" or "preferred_language"
   value: the fact value, e.g. "Python"
   confidence: 1.0 if explicitly stated, 0.7 if clearly implied
 
@@ -145,7 +136,7 @@ Existing facts:
 Conversation:
 {conversation}"""
 
-    response = await _get_client().messages.create(
+    response = await get_client().messages.create(
         model=settings.haiku_model,
         max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],
@@ -164,7 +155,7 @@ Be concise and factual.
 Conversation:
 {conversation}"""
 
-    response = await _get_client().messages.create(
+    response = await get_client().messages.create(
         model=settings.haiku_model,
         max_tokens=512,
         messages=[{"role": "user", "content": prompt}],
@@ -172,15 +163,22 @@ Conversation:
     return response.content[0].text.strip()
 
 
-async def _generate_kb_summary(messages: list[dict[str, Any]], session_dt: datetime) -> str:
+async def _generate_kb_summary(
+    messages: list[dict[str, Any]],
+    session_dt: datetime,
+    message_count: int | None = None,
+    session_start: datetime | None = None,
+) -> str:
     """Generate a rich, structured KB summary for Drive ingestion."""
     conversation = _format_messages(messages)
+    count = message_count if message_count is not None else len(messages)
 
     prompt = f"""Generate a structured knowledge base entry for this conversation session.
 Include only sections that have meaningful content:
 
 **Topics:** comma-separated list of main topics discussed
 **Summary:** 2-4 sentences covering what was discussed
+**Actions:** bullet list of things Sazed actually did (files read, searches run, tool calls made, data fetched)
 **Decisions:** bullet list of concrete decisions or conclusions reached
 **Follow-ups:** bullet list of action items or things to revisit
 **Entities:** comma-separated list of files, projects, people, or tools specifically referenced
@@ -190,21 +188,33 @@ Be specific and factual. Include enough detail that this entry is useful without
 Conversation:
 {conversation}"""
 
-    response = await _get_client().messages.create(
+    response = await get_client().messages.create(
         model=settings.haiku_model,
-        max_tokens=512,
+        max_tokens=768,
         messages=[{"role": "user", "content": prompt}],
     )
     body = response.content[0].text.strip()
     date_str = session_dt.strftime("%B %d, %Y at %I:%M %p UTC")
-    return f"# Session — {date_str}\n\n{body}"
+
+    meta_parts = [f"{count} messages"]
+    if session_start:
+        duration_mins = int((session_dt - session_start).total_seconds() / 60)
+        if duration_mins < 60:
+            meta_parts.append(f"~{duration_mins} min")
+        else:
+            hours, mins = divmod(duration_mins, 60)
+            meta_parts.append(f"~{hours}h {mins}m")
+    meta = " · ".join(meta_parts)
+
+    return f"# Session — {date_str}\n*{meta}*\n\n{body}"
 
 
-async def _ingest_session_to_kb(summary: str, session_dt: datetime) -> None:
-    """Write session summary to Drive and trigger KB sync."""
+async def _ingest_session_to_kb(summary: str, session_dt: datetime) -> tuple[bool, str]:
+    """Write session summary to Drive and trigger KB sync. Returns (success, error_message)."""
     if not settings.conversations_folder_id:
-        logger.warning("conversations_folder_id not configured — skipping KB ingestion")
-        return
+        msg = "conversations_folder_id not configured — skipping KB ingestion"
+        logger.warning(msg)
+        return False, msg
 
     filename = f"session-{session_dt.strftime('%Y-%m-%d-%H%M%S')}.md"
     base = settings.gateway_url.rstrip("/")
@@ -222,11 +232,9 @@ async def _ingest_session_to_kb(summary: str, session_dt: datetime) -> None:
             headers=headers,
         )
         if not write_resp.is_success:
-            logger.error(
-                f"Failed to write session summary to Drive: "
-                f"{write_resp.status_code} {write_resp.text}"
-            )
-            return
+            msg = f"Drive upload failed ({write_resp.status_code}): {write_resp.text}"
+            logger.error(f"Failed to write session summary to Drive: {msg}")
+            return False, msg
 
         logger.debug(f"Session summary written to Drive: {filename}")
 
@@ -236,21 +244,28 @@ async def _ingest_session_to_kb(summary: str, session_dt: datetime) -> None:
         else:
             logger.debug("KB sync triggered after session ingestion")
 
+    return True, ""
+
 
 async def process_session(
     session_id: str,
     messages: list[dict[str, Any]],
+    session_dt: datetime | None = None,
+    session_start: datetime | None = None,
 ) -> dict[str, Any]:
     """
     Run fact extraction, summarization, and KB ingestion in parallel where enabled.
     Upserts extracted facts to agent_memory.
     When kb_ingest_enabled, writes a structured session summary to Drive and triggers KB sync.
+    session_dt: last_activity timestamp used for the Drive filename; defaults to now if not provided.
+    session_start: created_at timestamp used to compute session duration; omitted if unavailable.
     """
     if not messages:
         return {"session_id": session_id, "facts_extracted": 0, "summary": ""}
 
-    session_dt = datetime.now(timezone.utc)
-    logger.debug(f"process_session {session_id}: {len(messages)} messages to process")
+    session_dt = session_dt or datetime.now(timezone.utc)
+    message_count = len(messages)
+    logger.debug(f"process_session {session_id}: {message_count} messages to process")
     existing_facts = await load_memory()
 
     # Build coroutine map so all active tasks run in parallel
@@ -258,7 +273,9 @@ async def process_session(
     if settings.session_summarization:
         coros["summary"] = _summarize(messages)
     if settings.conversations_folder_id:
-        coros["kb_summary"] = _generate_kb_summary(messages, session_dt)
+        coros["kb_summary"] = _generate_kb_summary(
+            messages, session_dt, message_count=message_count, session_start=session_start
+        )
 
     results = dict(zip(coros.keys(), await asyncio.gather(*coros.values())))
 
@@ -286,14 +303,19 @@ async def process_session(
         except (KeyError, ValueError):
             continue
 
+    kb_ok = False
+    kb_error = ""
     if kb_summary:
         try:
-            await _ingest_session_to_kb(kb_summary, session_dt)
+            kb_ok, kb_error = await _ingest_session_to_kb(kb_summary, session_dt)
         except Exception as e:
+            kb_error = str(e)
             logger.error(f"KB ingestion failed for session {session_id}: {e}")
 
     return {
         "session_id": session_id,
         "facts_extracted": len(upserted),
         "summary": summary,
+        "kb_ingested": kb_ok,
+        "kb_error": kb_error,
     }
