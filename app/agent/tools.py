@@ -2290,6 +2290,23 @@ def expand_tools(current_tools: list[dict], categories: list[str]) -> tuple[list
     return expanded, msg
 
 
+def is_sensitive(name: str) -> bool:
+    """Return True if a tool requires user confirmation before execution."""
+    return name in settings.sensitive_tools
+
+
+def _in_allowlist(to: str, allowlist: list[str]) -> bool:
+    """Return True if `to` matches any entry in the allowlist (exact or @domain suffix)."""
+    for entry in allowlist:
+        if entry.startswith("@"):
+            parts = to.split("@")
+            if len(parts) == 2 and f"@{parts[1]}" == entry:
+                return True
+        elif to == entry:
+            return True
+    return False
+
+
 _SSRF_BLOCKED_HOSTS = {"localhost", "metadata.google.internal"}
 
 
@@ -2344,16 +2361,22 @@ async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
         cache_key = (name, tuple(sorted((k, str(v)) for k, v in args.items())))
         cached = _TOOL_CACHE.get(cache_key)
         if cached is not None:
-            return ToolResult(
-                content=cached.content, status=cached.status,
-                error=cached.error, duration_ms=0,
-            )
+            content = cached.content
+            if name in settings.untrusted_content_tools:
+                content = f'<untrusted_data source="{name}">\n{content}\n</untrusted_data>'
+            return ToolResult(content=content, status=cached.status, error=cached.error, duration_ms=0)
 
     # SSRF guard — validate any URL argument before forwarding to the gateway
     if "url" in args:
         ssrf_err = _check_ssrf(str(args["url"]))
         if ssrf_err:
             return _err(ssrf_err)
+
+    # Layer C: email egress allowlist
+    if name == "draft_email" and settings.email_recipient_allowlist:
+        to = args.get("to", "")
+        if not _in_allowlist(to, settings.email_recipient_allowlist):
+            return _err("Recipient not in allowlist — blocked for safety.")
 
     # Interpolate path params, keeping remaining args for query/body
     endpoint = tool.endpoint
@@ -2398,7 +2421,17 @@ async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
         result = _ok(resp.text)
 
     if cache_key:
-        _TOOL_CACHE[cache_key] = result
+        _TOOL_CACHE[cache_key] = result  # cache clean content before wrapping
+
+    # Layer B: label content from untrusted sources so the LLM treats it as data, not instructions
+    if result.status == "success" and name in settings.untrusted_content_tools:
+        result = ToolResult(
+            content=f'<untrusted_data source="{name}">\n{result.content}\n</untrusted_data>',
+            status=result.status,
+            error=result.error,
+            duration_ms=result.duration_ms,
+        )
+
     return result
 
 

@@ -62,5 +62,19 @@ class Settings(BaseSettings):
         "create_issue", "update_issue", "create_pr",
     ]
 
+    # Security: prompt-injection hardening
+    confirmation_required: bool = True
+    sensitive_tools: list[str] = [
+        "draft_email", "delete_event", "delete_task", "delete_file",
+        "delete_kb_source", "delete_journal_entry", "delete_subscription",
+        "delete_income", "delete_budget",
+    ]
+    untrusted_content_tools: list[str] = [
+        "get_email", "list_emails", "search_emails", "read_file", "fetch_url",
+        "web_search", "aggregate_search", "search_knowledge_base", "get_kb_index",
+        "get_github_file", "search_code", "search_places",
+    ]
+    email_recipient_allowlist: list[str] = []  # empty = allow all
+
 
 settings = Settings()

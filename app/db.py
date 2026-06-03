@@ -89,6 +89,16 @@ CREATE TABLE IF NOT EXISTS action_logs (
 
 CREATE INDEX IF NOT EXISTS action_logs_session_id_idx ON action_logs (session_id);
 CREATE INDEX IF NOT EXISTS action_logs_timestamp_idx  ON action_logs (timestamp DESC);
+
+CREATE TABLE IF NOT EXISTS pending_actions (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id  UUID REFERENCES sessions(id) ON DELETE CASCADE,
+    tool_name   TEXT NOT NULL,
+    tool_input  JSONB NOT NULL,
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    status      TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE INDEX IF NOT EXISTS pending_actions_session_idx ON pending_actions (session_id, status);
 """
 
 
