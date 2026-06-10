@@ -1,9 +1,15 @@
 """Structured memory (agent_memory) endpoints."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from app.agent.memory import delete_fact, load_memory, upsert_fact
+from app.agent.memory import (
+    delete_fact,
+    load_memory,
+    load_stale_memory,
+    memory_history,
+    upsert_fact,
+)
 
 router = APIRouter()
 
@@ -19,6 +25,18 @@ class UpsertMemoryRequest(BaseModel):
 async def list_memory():
     facts = await load_memory()
     return {"facts": facts, "count": len(facts)}
+
+
+@router.get("/stale")
+async def get_stale_memory(days: int = Query(default=30, ge=1)):
+    facts = await load_stale_memory(days)
+    return {"facts": facts, "count": len(facts), "days": days}
+
+
+@router.get("/{fact_type}/{key}/history")
+async def get_memory_history(fact_type: str, key: str):
+    rows = await memory_history(fact_type, key)
+    return {"fact_type": fact_type, "key": key, "history": rows, "count": len(rows)}
 
 
 @router.put("")
