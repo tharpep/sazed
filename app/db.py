@@ -1,7 +1,6 @@
 """PostgreSQL connection pool and schema initialization."""
 
 import logging
-from typing import Optional
 
 import asyncpg
 
@@ -9,7 +8,7 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_pool: Optional[asyncpg.Pool] = None
+_pool: asyncpg.Pool | None = None
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -74,6 +73,24 @@ CREATE TABLE IF NOT EXISTS agent_memory (
     updated_at  TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE (fact_type, key)
 );
+
+-- bi-temporal columns on the live table (idempotent)
+ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS valid_from    TIMESTAMPTZ DEFAULT NOW();
+ALTER TABLE agent_memory ADD COLUMN IF NOT EXISTS last_confirmed TIMESTAMPTZ DEFAULT NOW();
+
+-- append-only history of superseded values
+CREATE TABLE IF NOT EXISTS agent_memory_history (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    fact_type     TEXT NOT NULL,
+    key           TEXT NOT NULL,
+    value         TEXT NOT NULL,
+    confidence    FLOAT,
+    source        TEXT,
+    valid_from    TIMESTAMPTZ,
+    valid_to      TIMESTAMPTZ DEFAULT NOW(),
+    superseded_by TEXT
+);
+CREATE INDEX IF NOT EXISTS agent_memory_history_key_idx ON agent_memory_history (fact_type, key);
 
 CREATE TABLE IF NOT EXISTS action_logs (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
