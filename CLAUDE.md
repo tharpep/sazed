@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Sazed** is the personal AI agent: it runs an agent loop (LLM + tool calls), talks to the api-gateway for calendar, tasks, email, storage, notifications, knowledge-base, web search, GitHub, and Google Sheets, and keeps structured memory and conversation sessions. Part of a larger personal AI ecosystem — see `api-gateway` and `knowledge-base` repos.
 
-**Stack:** FastAPI (Python 3.11+), Anthropic SDK (tool_use + streaming), asyncpg for session/memory, Poetry. Deployed via Docker to GCP Cloud Run (workflow present but currently disabled).
+**Stack:** FastAPI (Python 3.11+), Anthropic SDK (tool_use + streaming), asyncpg for session/memory, Poetry. Deployed via Docker to GCP Cloud Run on every push to main (`.github/workflows/deploy.yml`).
 
 ## Commands
 
