@@ -2079,6 +2079,11 @@ def get_tool_schemas() -> list[dict]:
     return schemas
 
 
+def known_tool_names() -> frozenset[str]:
+    """Return every registered tool name — used to validate stored procedure steps."""
+    return frozenset(_tool_index.keys())
+
+
 # ---------------------------------------------------------------------------
 # Selective tool injection
 # ---------------------------------------------------------------------------

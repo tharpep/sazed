@@ -3,14 +3,18 @@
 import asyncio
 import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 
 from app.agent.client import get_client
+from app.agent.json_utils import strip_json_fence
 from app.agent.memory import load_memory, upsert_fact
+from app.agent.procedures import list_procedures, propose_procedure_from_session
 from app.config import settings
+from app.db import get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +56,8 @@ def _format_existing_facts(facts: list[dict[str, Any]]) -> str:
 
 def _parse_json_list(text: str) -> list[dict[str, Any]]:
     """Parse a JSON array from LLM output, handling markdown code fences."""
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        text = "\n".join(lines[1:-1])
     try:
-        result = json.loads(text)
+        result = json.loads(strip_json_fence(text))
         return result if isinstance(result, list) else []
     except json.JSONDecodeError:
         return []
@@ -268,6 +268,24 @@ async def process_session(
     logger.debug(f"process_session {session_id}: {message_count} messages to process")
     existing_facts = await load_memory()
 
+    action_logs: list[dict[str, Any]] = []
+    propose_procedure = False
+    if settings.procedural_memory_enabled:
+        pool = get_pool()
+        rows = await pool.fetch(
+            "SELECT tool_name, input, status FROM action_logs "
+            "WHERE session_id = $1 ORDER BY timestamp",
+            uuid.UUID(session_id),
+        )
+        action_logs = [dict(row) for row in rows]
+        write_tool_calls = sum(
+            1 for r in action_logs if r["tool_name"] in settings.sonnet_write_tools
+        )
+        session_failed = any(r["status"] == "error" for r in action_logs)
+        propose_procedure = (
+            not session_failed and write_tool_calls >= settings.procedure_min_write_tools
+        )
+
     # Build coroutine map so all active tasks run in parallel
     coros: dict[str, Any] = {"facts": _extract_facts(messages, existing_facts)}
     if settings.session_summarization:
@@ -276,12 +294,18 @@ async def process_session(
         coros["kb_summary"] = _generate_kb_summary(
             messages, session_dt, message_count=message_count, session_start=session_start
         )
+    if propose_procedure:
+        existing_names = [p["name"] for p in await list_procedures(status="active")]
+        coros["procedure"] = propose_procedure_from_session(
+            session_id, _format_messages(messages), action_logs, existing_names
+        )
 
     results = dict(zip(coros.keys(), await asyncio.gather(*coros.values())))
 
     raw_facts = results["facts"]
     summary = results.get("summary", "")
     kb_summary = results.get("kb_summary", "")
+    proposed_procedure = results.get("procedure")
 
     logger.debug(
         f"process_session {session_id}: extracted {len(raw_facts)} raw fact(s), "
@@ -318,4 +342,5 @@ async def process_session(
         "summary": summary,
         "kb_ingested": kb_ok,
         "kb_error": kb_error,
+        "procedure_proposed": proposed_procedure["name"] if proposed_procedure else None,
     }

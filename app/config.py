@@ -76,5 +76,10 @@ class Settings(BaseSettings):
     ]
     email_recipient_allowlist: list[str] = []  # empty = allow all
 
+    # Procedural memory
+    procedural_memory_enabled: bool = True
+    procedure_min_write_tools: int = 2   # min write tools in a session to propose a procedure
+    max_procedures_in_prompt: int = 3
+
 
 settings = Settings()

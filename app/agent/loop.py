@@ -13,6 +13,7 @@ from typing import Any, AsyncIterator
 
 from app.agent.client import get_client, tool_sig
 from app.agent.memory import format_for_prompt, load_memory, load_relevant_memory
+from app.agent.procedures import format_procedures_for_prompt, load_relevant_procedures
 from app.agent.session import compress_context
 from app.agent.tools import execute_tool, expand_tools, get_tool_schemas, is_sensitive, select_tools
 from app.config import settings
@@ -200,6 +201,14 @@ async def _build_system_prompt(mode: str = "chat", user_message: str = "", locat
             "cache_control": {"type": "ephemeral"},
         },
     ]
+    if settings.procedural_memory_enabled:
+        procedures = await load_relevant_procedures(user_message)
+        if procedures:
+            blocks.append({
+                "type": "text",
+                "text": format_procedures_for_prompt(procedures),
+                "cache_control": {"type": "ephemeral"},
+            })
     if mode == "voice":
         blocks.append({
             "type": "text",
