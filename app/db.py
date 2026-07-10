@@ -116,6 +116,20 @@ CREATE TABLE IF NOT EXISTS pending_actions (
     status      TEXT NOT NULL DEFAULT 'pending'
 );
 CREATE INDEX IF NOT EXISTS pending_actions_session_idx ON pending_actions (session_id, status);
+
+CREATE TABLE IF NOT EXISTS procedures (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name            TEXT NOT NULL,
+    trigger_desc    TEXT NOT NULL,
+    trigger_keywords TEXT[],
+    steps           JSONB NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'proposed',
+    source_session  UUID,
+    use_count       INT DEFAULT 0,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    last_used_at    TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS procedures_status_idx ON procedures (status);
 """
 
 
