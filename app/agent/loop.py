@@ -11,7 +11,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Any, AsyncIterator
 
-from app.agent.client import get_client, tool_sig
+from app.agent.client import get_client, log_llm_call, tool_sig
 from app.agent.memory import format_for_prompt, load_memory, load_relevant_memory
 from app.agent.procedures import format_procedures_for_prompt, load_relevant_procedures
 from app.agent.session import compress_context
@@ -29,7 +29,7 @@ _CONFIRMATION_PROMPT = (
 )
 
 
-async def _classify_affirmative(msg: str) -> bool:
+async def _classify_affirmative(msg: str, session_id: uuid.UUID | None = None) -> bool:
     """Ask Haiku whether a message expresses confirmation. Defaults to False on any failure."""
     try:
         resp = await get_client().messages.create(
@@ -44,6 +44,10 @@ async def _classify_affirmative(msg: str) -> bool:
                 ),
             }],
         )
+        if settings.llm_cost_tracking:
+            asyncio.create_task(
+                log_llm_call(session_id, None, settings.haiku_model, "confirm", resp)
+            )
         return resp.content[0].text.strip().upper().startswith("YES")
     except Exception:
         logger.warning("_classify_affirmative: Haiku call failed, defaulting to non-affirmative")
@@ -74,7 +78,7 @@ async def _handle_pending_actions(pool, sid: uuid.UUID, user_message: str) -> st
 
     is_affirmative = bool(_AFFIRMATIVE_RE.match(user_message))
     if not is_affirmative:
-        is_affirmative = await _classify_affirmative(user_message)
+        is_affirmative = await _classify_affirmative(user_message, session_id=sid)
 
     if not is_affirmative:
         ids = [row["id"] for row in rows]
@@ -122,6 +126,8 @@ async def _generate_session_title(pool, sid: uuid.UUID, user_message: str) -> No
                 ),
             }],
         )
+        if settings.llm_cost_tracking:
+            asyncio.create_task(log_llm_call(sid, None, settings.haiku_model, "title", resp))
         title = resp.content[0].text.strip()[:100]
         await pool.execute("UPDATE sessions SET title = $1 WHERE id = $2", title, sid)
     except Exception as e:
@@ -275,7 +281,7 @@ async def _apply_context_window(
             f"  context window: compressing {len(overflow)} overflow messages "
             f"(previously {summarized_through})"
         )
-        summary = await compress_context(overflow, existing_summary)
+        summary = await compress_context(overflow, existing_summary, session_id=session_id)
         await pool.execute(
             "UPDATE sessions SET context_summary = $1, summarized_through = $2 WHERE id = $3",
             summary, len(overflow), session_id,
@@ -466,6 +472,9 @@ async def run_turn(
             await _finalize_turn(pool, sid)
             return session_id, "Request timed out — please try again."
 
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+        if settings.llm_cost_tracking:
+            asyncio.create_task(log_llm_call(sid, turn, model, "chat", response, duration_ms))
         logger.debug(
             f"  turn {turn}: stop_reason={response.stop_reason} "
             f"in {time.perf_counter() - t0:.3f}s"
@@ -550,6 +559,7 @@ async def run_turn(
     # Do one synthesis call (no tools) so the user gets an actual response.
     if not any(b.get("type") == "text" for b in final_content):
         logger.debug(f"  synthesis: loop ended on tool_use, upgrading to {settings.sonnet_model}")
+        synth_t0 = time.perf_counter()
         try:
             synth = await asyncio.wait_for(
                 client.messages.create(
@@ -564,6 +574,11 @@ async def run_turn(
             logger.warning(f"  synthesis: timed out after {settings.turn_timeout_seconds}s")
             await _finalize_turn(pool, sid)
             return session_id, "Request timed out during synthesis — please try again."
+        if settings.llm_cost_tracking:
+            synth_ms = int((time.perf_counter() - synth_t0) * 1000)
+            asyncio.create_task(
+                log_llm_call(sid, None, settings.sonnet_model, "synthesis", synth, synth_ms)
+            )
         content_dicts = _content_to_dicts(synth.content)
         await _save_message(pool, sid, "assistant", content_dicts)
         final_content = content_dicts
@@ -649,6 +664,9 @@ async def run_turn_stream(
             yield f"event: done\ndata: {{}}\n\n"
             return
 
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+        if settings.llm_cost_tracking:
+            asyncio.create_task(log_llm_call(sid, turn, model, "chat", response, duration_ms))
         logger.debug(
             f"  stream turn {turn}: stop_reason={response.stop_reason} "
             f"in {time.perf_counter() - t0:.3f}s"
@@ -747,6 +765,7 @@ async def run_turn_stream(
         b.get("type") == "tool_result" for b in messages[-1]["content"]
     ):
         logger.debug(f"  stream synthesis: loop ended on tool_use, upgrading to {settings.sonnet_model}")
+        synth_t0 = time.perf_counter()
         try:
             async with asyncio.timeout(settings.turn_timeout_seconds):
                 async with client.messages.stream(
@@ -762,6 +781,11 @@ async def run_turn_stream(
             logger.warning(f"  stream synthesis: timed out after {settings.turn_timeout_seconds}s")
             yield f"event: text_delta\ndata: {json.dumps({'text': 'Request timed out during synthesis.'})}\n\n"
         else:
+            if settings.llm_cost_tracking:
+                synth_ms = int((time.perf_counter() - synth_t0) * 1000)
+                asyncio.create_task(
+                    log_llm_call(sid, None, settings.sonnet_model, "synthesis", synth, synth_ms)
+                )
             content_dicts = _content_to_dicts(synth.content)
             await _save_message(pool, sid, "assistant", content_dicts)
 
