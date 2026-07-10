@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from app.agent.client import get_client, log_llm_call
+from app.agent.client import get_client, schedule_llm_log
 from app.agent.json_utils import strip_json_fence
 from app.agent.memory import load_memory, upsert_fact
 from app.agent.procedures import list_procedures, propose_procedure_from_session
@@ -66,7 +66,7 @@ def _parse_json_list(text: str) -> list[dict[str, Any]]:
 async def compress_context(
     overflow_messages: list[dict[str, Any]],
     existing_summary: str | None,
-    session_id: Any = None,
+    session_id: uuid.UUID | str | None = None,
 ) -> str:
     """Compress overflow messages into a rolling context summary for the session."""
     conversation = _format_messages(overflow_messages)
@@ -95,9 +95,7 @@ Conversation:
         messages=[{"role": "user", "content": prompt}],
     )
     if settings.llm_cost_tracking:
-        asyncio.create_task(
-            log_llm_call(session_id, None, settings.haiku_model, "context_compress", response)
-        )
+        schedule_llm_log(session_id, None, settings.haiku_model, "context_compress", response)
     return response.content[0].text.strip()
 
 
@@ -148,7 +146,7 @@ Conversation:
         messages=[{"role": "user", "content": prompt}],
     )
     if settings.llm_cost_tracking:
-        asyncio.create_task(log_llm_call(session_id, None, settings.haiku_model, "facts", response))
+        schedule_llm_log(session_id, None, settings.haiku_model, "facts", response)
     return _parse_json_list(response.content[0].text)
 
 
@@ -169,9 +167,7 @@ Conversation:
         messages=[{"role": "user", "content": prompt}],
     )
     if settings.llm_cost_tracking:
-        asyncio.create_task(
-            log_llm_call(session_id, None, settings.haiku_model, "summary", response)
-        )
+        schedule_llm_log(session_id, None, settings.haiku_model, "summary", response)
     return response.content[0].text.strip()
 
 
@@ -207,9 +203,7 @@ Conversation:
         messages=[{"role": "user", "content": prompt}],
     )
     if settings.llm_cost_tracking:
-        asyncio.create_task(
-            log_llm_call(session_id, None, settings.haiku_model, "kb_summary", response)
-        )
+        schedule_llm_log(session_id, None, settings.haiku_model, "kb_summary", response)
     body = response.content[0].text.strip()
     date_str = session_dt.strftime("%B %d, %Y at %I:%M %p UTC")
 

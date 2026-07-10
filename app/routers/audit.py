@@ -67,6 +67,20 @@ def _percentile(sorted_data: list[int], pct: float) -> int | None:
     return sorted_data[idx]
 
 
+def _row_cost_usd(row) -> float:
+    """Estimate USD cost for one llm_calls row (0.0 if the model is unpriced)."""
+    return (
+        estimate_cost_usd(
+            row["model"],
+            row["input_tokens"] or 0,
+            row["output_tokens"] or 0,
+            row["cache_read_tokens"] or 0,
+            row["cache_write_tokens"] or 0,
+        )
+        or 0.0
+    )
+
+
 @router.get("/metrics")
 async def get_metrics(since_hours: int = Query(24, ge=1, le=24 * 30)):
     """Rollup metrics: LLM token/cost by model and purpose, tool success rate and latency."""
@@ -86,16 +100,7 @@ async def get_metrics(since_hours: int = Query(24, ge=1, le=24 * 30)):
     total_input = total_output = 0
 
     for r in llm_rows:
-        cost = (
-            estimate_cost_usd(
-                r["model"],
-                r["input_tokens"] or 0,
-                r["output_tokens"] or 0,
-                r["cache_read_tokens"] or 0,
-                r["cache_write_tokens"] or 0,
-            )
-            or 0.0
-        )
+        cost = _row_cost_usd(r)
         total_cost += cost
         total_input += r["input_tokens"] or 0
         total_output += r["output_tokens"] or 0
@@ -170,16 +175,7 @@ async def get_session_cost(session_id: str):
     total_cost = 0.0
     total_input = total_output = 0
     for r in llm_rows:
-        cost = (
-            estimate_cost_usd(
-                r["model"],
-                r["input_tokens"] or 0,
-                r["output_tokens"] or 0,
-                r["cache_read_tokens"] or 0,
-                r["cache_write_tokens"] or 0,
-            )
-            or 0.0
-        )
+        cost = _row_cost_usd(r)
         total_cost += cost
         total_input += r["input_tokens"] or 0
         total_output += r["output_tokens"] or 0

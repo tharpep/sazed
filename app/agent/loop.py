@@ -11,7 +11,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Any, AsyncIterator
 
-from app.agent.client import get_client, log_llm_call, tool_sig
+from app.agent.client import get_client, schedule_llm_log, tool_sig
 from app.agent.memory import format_for_prompt, load_memory, load_relevant_memory
 from app.agent.procedures import format_procedures_for_prompt, load_relevant_procedures
 from app.agent.session import compress_context
@@ -45,9 +45,7 @@ async def _classify_affirmative(msg: str, session_id: uuid.UUID | None = None) -
             }],
         )
         if settings.llm_cost_tracking:
-            asyncio.create_task(
-                log_llm_call(session_id, None, settings.haiku_model, "confirm", resp)
-            )
+            schedule_llm_log(session_id, None, settings.haiku_model, "confirm", resp)
         return resp.content[0].text.strip().upper().startswith("YES")
     except Exception:
         logger.warning("_classify_affirmative: Haiku call failed, defaulting to non-affirmative")
@@ -127,7 +125,7 @@ async def _generate_session_title(pool, sid: uuid.UUID, user_message: str) -> No
             }],
         )
         if settings.llm_cost_tracking:
-            asyncio.create_task(log_llm_call(sid, None, settings.haiku_model, "title", resp))
+            schedule_llm_log(sid, None, settings.haiku_model, "title", resp)
         title = resp.content[0].text.strip()[:100]
         await pool.execute("UPDATE sessions SET title = $1 WHERE id = $2", title, sid)
     except Exception as e:
@@ -474,7 +472,7 @@ async def run_turn(
 
         duration_ms = int((time.perf_counter() - t0) * 1000)
         if settings.llm_cost_tracking:
-            asyncio.create_task(log_llm_call(sid, turn, model, "chat", response, duration_ms))
+            schedule_llm_log(sid, turn, model, "chat", response, duration_ms)
         logger.debug(
             f"  turn {turn}: stop_reason={response.stop_reason} "
             f"in {time.perf_counter() - t0:.3f}s"
@@ -576,9 +574,7 @@ async def run_turn(
             return session_id, "Request timed out during synthesis — please try again."
         if settings.llm_cost_tracking:
             synth_ms = int((time.perf_counter() - synth_t0) * 1000)
-            asyncio.create_task(
-                log_llm_call(sid, None, settings.sonnet_model, "synthesis", synth, synth_ms)
-            )
+            schedule_llm_log(sid, None, settings.sonnet_model, "synthesis", synth, synth_ms)
         content_dicts = _content_to_dicts(synth.content)
         await _save_message(pool, sid, "assistant", content_dicts)
         final_content = content_dicts
@@ -666,7 +662,7 @@ async def run_turn_stream(
 
         duration_ms = int((time.perf_counter() - t0) * 1000)
         if settings.llm_cost_tracking:
-            asyncio.create_task(log_llm_call(sid, turn, model, "chat", response, duration_ms))
+            schedule_llm_log(sid, turn, model, "chat", response, duration_ms)
         logger.debug(
             f"  stream turn {turn}: stop_reason={response.stop_reason} "
             f"in {time.perf_counter() - t0:.3f}s"
@@ -783,9 +779,7 @@ async def run_turn_stream(
         else:
             if settings.llm_cost_tracking:
                 synth_ms = int((time.perf_counter() - synth_t0) * 1000)
-                asyncio.create_task(
-                    log_llm_call(sid, None, settings.sonnet_model, "synthesis", synth, synth_ms)
-                )
+                schedule_llm_log(sid, None, settings.sonnet_model, "synthesis", synth, synth_ms)
             content_dicts = _content_to_dicts(synth.content)
             await _save_message(pool, sid, "assistant", content_dicts)
 

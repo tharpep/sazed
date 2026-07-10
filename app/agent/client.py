@@ -1,5 +1,6 @@
 """Shared Anthropic client singleton and common agent utilities."""
 
+import asyncio
 import logging
 import uuid
 from typing import Any
@@ -12,6 +13,12 @@ from app.db import get_pool
 logger = logging.getLogger(__name__)
 
 _client: anthropic.AsyncAnthropic | None = None
+
+# Recognized `purpose` values for log_llm_call / schedule_llm_log — free-form strings,
+# not an enum, but every call site should use one of these so `GET /audit/metrics`'s
+# by_purpose rollup doesn't fragment on a typo. Update this list when adding a call site.
+# chat | synthesis | confirm | title | context_compress | facts | summary
+# | kb_summary | procedure | think
 
 
 def get_client() -> anthropic.AsyncAnthropic:
@@ -36,9 +43,8 @@ async def log_llm_call(
 ) -> None:
     """Persist token usage for one LLM call. Never raises — logs and swallows on failure.
 
-    Callers dispatch this via `asyncio.create_task(...)` so it never blocks the
-    request path (per the plan's fire-and-forget requirement) — this function
-    itself is a plain coroutine, not a task-spawning wrapper.
+    Call via `schedule_llm_log(...)` below, not a bare `asyncio.create_task(...)` —
+    an unreferenced task can be garbage-collected mid-write.
     """
     try:
         usage = response.usage
@@ -61,3 +67,25 @@ async def log_llm_call(
         )
     except Exception as e:
         logger.warning(f"log_llm_call failed (purpose={purpose}, model={model}): {e}")
+
+
+# asyncio only holds a weak reference to a task — with nothing else referencing it,
+# a fire-and-forget task can be garbage-collected before it finishes. Keep a strong
+# reference here until each task completes, then let the done-callback drop it.
+_pending_log_tasks: set[asyncio.Task] = set()
+
+
+def schedule_llm_log(
+    session_id: uuid.UUID | str | None,
+    turn: int | None,
+    model: str,
+    purpose: str,
+    response: Any,
+    duration_ms: int | None = None,
+) -> None:
+    """Fire-and-forget wrapper around log_llm_call — never blocks the caller."""
+    task = asyncio.create_task(
+        log_llm_call(session_id, turn, model, purpose, response, duration_ms)
+    )
+    _pending_log_tasks.add(task)
+    task.add_done_callback(_pending_log_tasks.discard)
