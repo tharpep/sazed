@@ -54,6 +54,45 @@ def _format_existing_facts(facts: list[dict[str, Any]]) -> str:
     return "\n".join(f"- [{f['fact_type']}] {f['key']}: {f['value']}" for f in facts)
 
 
+def _notable_action_logs(action_logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rows worth reflecting on: real failures, plus any row belonging to a
+    (tool_name, input) pair that was actually executed 2+ times this session.
+
+    The latter is the strongest available proxy for a stuck loop: loop.py's
+    stuck-loop detector breaks *before* logging the 3rd (blocking) call with an
+    identical signature, so the persisted evidence of thrash is two prior
+    successful executions of the same call, not a 3rd failed one.
+    """
+    sig_counts: dict[tuple[str, str], int] = {}
+    for r in action_logs:
+        raw_input = r["input"]
+        sig = (r["tool_name"], raw_input if isinstance(raw_input, str) else json.dumps(raw_input))
+        sig_counts[sig] = sig_counts.get(sig, 0) + 1
+
+    notable = []
+    for r in action_logs:
+        raw_input = r["input"]
+        sig = (r["tool_name"], raw_input if isinstance(raw_input, str) else json.dumps(raw_input))
+        if r["status"] == "error" or sig_counts[sig] >= 2:
+            notable.append(r)
+    return notable
+
+
+def _format_notable_action_logs(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "(none)"
+    lines = []
+    for r in rows:
+        raw_input = r["input"]
+        try:
+            args = json.loads(raw_input) if isinstance(raw_input, str) else raw_input
+        except (json.JSONDecodeError, TypeError):
+            args = raw_input
+        err = f" — {r['error_message']}" if r.get("error_message") else ""
+        lines.append(f"- {r['tool_name']}({args}) → {r['status']}{err}")
+    return "\n".join(lines)
+
+
 def _parse_json_list(text: str) -> list[dict[str, Any]]:
     """Parse a JSON array from LLM output, handling markdown code fences."""
     try:
@@ -218,6 +257,85 @@ Conversation:
     meta = " · ".join(meta_parts)
 
     return f"# Session — {date_str}\n*{meta}*\n\n{body}"
+
+
+_MAX_ACTION_LOGS_IN_PROMPT = 20  # cap prompt size for unusually chatty/failing sessions
+
+
+async def _reflect(
+    session_id: str,
+    conversation_text: str,
+    notable_logs: list[dict[str, Any]],
+    existing_instructions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Haiku call: turn a session's failures/thrash into 0-N behavioral lessons.
+
+    Only ever writes lessons about Sazed's OWN tool-calling behavior — never
+    about the user (that's fact-extraction's job). Caller guarantees
+    notable_logs is non-empty (checked before this coroutine is scheduled) so
+    every invocation of this function makes exactly one Haiku call.
+    """
+    existing = _format_existing_facts(existing_instructions)
+    logs_preview = _format_notable_action_logs(notable_logs[:_MAX_ACTION_LOGS_IN_PROMPT])
+
+    prompt = f"""You are reviewing a session where Sazed (a personal AI assistant) hit tool
+failures or got stuck repeating the same tool call. Extract generalizable lessons about
+Sazed's OWN tool-calling behavior — never about the user, and never fabricated from a
+single isolated failure that looks like a transient error (e.g. one unexplained 5xx with
+no retry). Only propose a lesson if the pattern suggests something Sazed should genuinely
+do differently next time: wrong tool order, a missing prerequisite call, malformed args,
+or retrying the same broken approach without adapting.
+
+Do not duplicate an existing instruction — if a lesson already covers this, skip it.
+Existing instructions:
+{existing}
+
+Failed/repeated tool calls this session, in order:
+{logs_preview}
+
+Conversation:
+{conversation_text}
+
+Return a JSON array of 0 to {settings.max_lessons_per_session} objects, each:
+  scope: "instruction" (a behavioral rule) or "procedure" (a better tool ordering/recipe)
+  key: short snake_case identifier — reuse an existing instruction's key if this refines it
+  lesson: one concise sentence Sazed should follow next time
+
+Return [] if nothing genuinely generalizable happened. Return only the JSON array, no other text."""
+
+    response = await get_client().messages.create(
+        model=settings.haiku_model,
+        max_tokens=512,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    if settings.llm_cost_tracking:
+        schedule_llm_log(session_id, None, settings.haiku_model, "reflection", response)
+
+    raw_lessons = _parse_json_list(response.content[0].text)[: settings.max_lessons_per_session]
+
+    applied: list[dict[str, Any]] = []
+    for item in raw_lessons:
+        try:
+            scope = item.get("scope", "instruction")
+            key = item["key"]
+            lesson = item["lesson"]
+        except (KeyError, AttributeError):
+            continue
+
+        # v1: procedure-scope lessons fall back to an instruction fact — see this
+        # plan's header note on why (no patch-an-existing-procedure function exists).
+        await upsert_fact(
+            fact_type="instruction",
+            key=key,
+            value=lesson,
+            confidence=0.8,
+            source=f"reflection:{session_id}",
+        )
+        applied.append({"scope": scope, "key": key, "lesson": lesson})
+
+    if applied:
+        logger.info(f"process_session {session_id}: reflection produced {len(applied)} lesson(s)")
+    return applied
 
 
 async def _ingest_session_to_kb(summary: str, session_dt: datetime) -> tuple[bool, str]:
