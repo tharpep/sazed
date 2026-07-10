@@ -276,7 +276,10 @@ async def _reflect(
     every invocation of this function makes exactly one Haiku call.
     """
     existing = _format_existing_facts(existing_instructions)
-    logs_preview = _format_notable_action_logs(notable_logs[:_MAX_ACTION_LOGS_IN_PROMPT])
+    # notable_logs is chronological (ORDER BY timestamp) — keep the most recent
+    # ones, since what Sazed should do differently "next time" is best judged
+    # from what just happened, not the earliest failures in a long session.
+    logs_preview = _format_notable_action_logs(notable_logs[-_MAX_ACTION_LOGS_IN_PROMPT:])
 
     prompt = f"""You are reviewing a session where Sazed (a personal AI assistant) hit tool
 failures or got stuck repeating the same tool call. Extract generalizable lessons about
@@ -322,8 +325,11 @@ Return [] if nothing genuinely generalizable happened. Return only the JSON arra
         except (KeyError, AttributeError):
             continue
 
-        # v1: procedure-scope lessons fall back to an instruction fact — see this
-        # plan's header note on why (no patch-an-existing-procedure function exists).
+        # v1: procedure-scope lessons fall back to an instruction fact too — there's
+        # no way to patch an existing procedure's steps yet (app/agent/procedures.py
+        # only supports proposing a brand-new one), so there's nowhere else to send
+        # a procedure-scope correction. `scope` is kept in the prompt/output as a
+        # forward-looking hook for whenever that patch capability gets built.
         await upsert_fact(
             fact_type="instruction",
             key=key,
