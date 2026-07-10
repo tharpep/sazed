@@ -6,6 +6,7 @@ import uuid
 from typing import Any
 
 from app.agent.client import get_client
+from app.agent.json_utils import strip_json_fence
 from app.agent.tools import known_tool_names
 from app.config import settings
 from app.db import get_pool
@@ -80,12 +81,8 @@ def format_procedures_for_prompt(procedures: list[dict[str, Any]]) -> str:
 
 def _parse_json_object(text: str) -> dict[str, Any] | None:
     """Parse a single JSON object from LLM output, handling markdown fences and `null`."""
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        text = "\n".join(lines[1:-1])
     try:
-        result = json.loads(text)
+        result = json.loads(strip_json_fence(text))
         return result if isinstance(result, dict) else None
     except json.JSONDecodeError:
         return None

@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from app.agent.client import get_client
+from app.agent.json_utils import strip_json_fence
 from app.agent.memory import load_memory, upsert_fact
 from app.agent.procedures import list_procedures, propose_procedure_from_session
 from app.config import settings
@@ -55,12 +56,8 @@ def _format_existing_facts(facts: list[dict[str, Any]]) -> str:
 
 def _parse_json_list(text: str) -> list[dict[str, Any]]:
     """Parse a JSON array from LLM output, handling markdown code fences."""
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        text = "\n".join(lines[1:-1])
     try:
-        result = json.loads(text)
+        result = json.loads(strip_json_fence(text))
         return result if isinstance(result, list) else []
     except json.JSONDecodeError:
         return []
