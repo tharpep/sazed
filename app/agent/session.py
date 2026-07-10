@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from app.agent.client import get_client
+from app.agent.client import get_client, log_llm_call
 from app.agent.json_utils import strip_json_fence
 from app.agent.memory import load_memory, upsert_fact
 from app.agent.procedures import list_procedures, propose_procedure_from_session
@@ -66,6 +66,7 @@ def _parse_json_list(text: str) -> list[dict[str, Any]]:
 async def compress_context(
     overflow_messages: list[dict[str, Any]],
     existing_summary: str | None,
+    session_id: Any = None,
 ) -> str:
     """Compress overflow messages into a rolling context summary for the session."""
     conversation = _format_messages(overflow_messages)
@@ -93,12 +94,17 @@ Conversation:
         max_tokens=768,
         messages=[{"role": "user", "content": prompt}],
     )
+    if settings.llm_cost_tracking:
+        asyncio.create_task(
+            log_llm_call(session_id, None, settings.haiku_model, "context_compress", response)
+        )
     return response.content[0].text.strip()
 
 
 async def _extract_facts(
     messages: list[dict[str, Any]],
     existing_facts: list[dict[str, Any]],
+    session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Ask Haiku to extract personal facts from the conversation."""
     conversation = _format_messages(messages)
@@ -141,10 +147,12 @@ Conversation:
         max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],
     )
+    if settings.llm_cost_tracking:
+        asyncio.create_task(log_llm_call(session_id, None, settings.haiku_model, "facts", response))
     return _parse_json_list(response.content[0].text)
 
 
-async def _summarize(messages: list[dict[str, Any]]) -> str:
+async def _summarize(messages: list[dict[str, Any]], session_id: str | None = None) -> str:
     """Ask Haiku to summarize the session."""
     conversation = _format_messages(messages)
 
@@ -160,6 +168,10 @@ Conversation:
         max_tokens=512,
         messages=[{"role": "user", "content": prompt}],
     )
+    if settings.llm_cost_tracking:
+        asyncio.create_task(
+            log_llm_call(session_id, None, settings.haiku_model, "summary", response)
+        )
     return response.content[0].text.strip()
 
 
@@ -168,6 +180,7 @@ async def _generate_kb_summary(
     session_dt: datetime,
     message_count: int | None = None,
     session_start: datetime | None = None,
+    session_id: str | None = None,
 ) -> str:
     """Generate a rich, structured KB summary for Drive ingestion."""
     conversation = _format_messages(messages)
@@ -193,6 +206,10 @@ Conversation:
         max_tokens=768,
         messages=[{"role": "user", "content": prompt}],
     )
+    if settings.llm_cost_tracking:
+        asyncio.create_task(
+            log_llm_call(session_id, None, settings.haiku_model, "kb_summary", response)
+        )
     body = response.content[0].text.strip()
     date_str = session_dt.strftime("%B %d, %Y at %I:%M %p UTC")
 
@@ -287,12 +304,15 @@ async def process_session(
         )
 
     # Build coroutine map so all active tasks run in parallel
-    coros: dict[str, Any] = {"facts": _extract_facts(messages, existing_facts)}
+    coros: dict[str, Any] = {
+        "facts": _extract_facts(messages, existing_facts, session_id=session_id)
+    }
     if settings.session_summarization:
-        coros["summary"] = _summarize(messages)
+        coros["summary"] = _summarize(messages, session_id=session_id)
     if settings.conversations_folder_id:
         coros["kb_summary"] = _generate_kb_summary(
-            messages, session_dt, message_count=message_count, session_start=session_start
+            messages, session_dt, message_count=message_count, session_start=session_start,
+            session_id=session_id,
         )
     if propose_procedure:
         existing_names = [p["name"] for p in await list_procedures(status="active")]
