@@ -85,5 +85,9 @@ class Settings(BaseSettings):
     llm_cost_tracking: bool = True
     eval_enabled: bool = False
 
+    # Reflection loop
+    reflection_enabled: bool = True
+    max_lessons_per_session: int = 2
+
 
 settings = Settings()
