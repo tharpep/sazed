@@ -25,7 +25,7 @@ No test suite yet.
 
 **Entry point:** `app/main.py` — FastAPI app with lifespan (DB pool init/close), CORS, API key auth when `API_KEY` is set. Health and tools are public; all other routes require `X-API-Key` when `API_KEY` is set.
 
-**Configuration:** `app/config.py` — pydantic-settings from `.env`. Key vars: `GATEWAY_URL`, `GATEWAY_API_KEY`, `ANTHROPIC_API_KEY`, `DATABASE_URL`, `haiku_model`, `sonnet_model`, `conversations_folder_id`, `journal_folder_id` (Career), `personal_journal_folder_id` (Personal — empty until the Drive folder is created), `session_summarization`, `session_window_size`.
+**Configuration:** `app/config.py` — pydantic-settings from `.env`. Key vars: `GATEWAY_URL`, `GATEWAY_API_KEY`, `ANTHROPIC_API_KEY`, `DATABASE_URL`, `haiku_model`, `sonnet_model`, `journal_folder_id` (Career), `personal_journal_folder_id` (Personal — empty until the Drive folder is created), `session_summarization`, `session_kb_ingest_enabled`, `session_window_size`.
 
 **Flow:** `POST /chat` → agent loop in `app/agent/loop.py`: load memory and session history, apply context window compression if needed, call LLM (Haiku or Sonnet, escalating at turn 3), on `tool_use` execute tools via `app/agent/tools.py` (all tools call the gateway except `memory_update`), repeat up to 5 turns, then return final response and persist messages. Streaming via `GET /chat/stream` (SSE). Session processing in `app/agent/session.py` runs fact extraction, summarization, and optional KB ingestion after a conversation.
 
@@ -36,7 +36,7 @@ No test suite yet.
 - Tasks: `get_task_lists`, `get_tasks`, `create_task_list`, `rename_task_list`, `create_task`, `update_task`, `delete_task` → `/tasks/*`
 - Email: `list_emails`, `search_emails`, `get_email`, `draft_email` → `/email/*`
 - Notifications: `send_notification` → `/notify`
-- Knowledge Base: `search_knowledge_base`, `list_kb_sources`, `delete_kb_source`, `sync_kb` → `/kb/*`
+- Knowledge Base: `search_knowledge_base`, `get_kb_index`, `read_kb_source`, `list_kb_sources`, `delete_kb_source`, `sync_kb`, `ingest_text`, `ingest_url` → `/kb/*`
 - Web Search: `web_search`, `fetch_url` → `/search/web*`
 - Storage (Drive): `list_files`, `list_folders`, `create_folder`, `get_file_info`, `read_file`, `create_file`, `update_file`, `append_to_file`, `delete_file`, `move_file`, `copy_file`, `copy_file_from_github` → `/storage/*`
 - GitHub: `list_repos`, `get_repo`, `list_issues`, `get_issue`, `create_issue`, `update_issue`, `add_issue_comment`, `list_prs`, `get_pr`, `add_pr_comment`, `create_pr`, `search_issues`, `get_github_file`, `search_code` → `/github/*`
@@ -50,7 +50,7 @@ No test suite yet.
 
 **Context window:** When a session exceeds `session_window_size` (default 15) messages, overflow is compressed into a rolling summary via Haiku and stored in the session row. The agent sees `[summary_pair] + recent_messages`.
 
-**Session processing (`session.py`):** After each turn, `process_session` runs in parallel: fact extraction (Haiku → upsert to `agent_memory`), optional summary, optional structured KB entry written to Drive then synced. Controlled by `conversations_folder_id` and `session_summarization` settings.
+**Session processing (`session.py`):** After each turn, `process_session` runs in parallel: fact extraction (Haiku → upsert to `agent_memory`), optional summary, optional structured KB entry ingested directly via the KB service's `/kb/ingest/text` (no Drive round-trip). Controlled by `session_kb_ingest_enabled` and `session_summarization` settings.
 
 ## Module Layout
 

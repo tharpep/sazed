@@ -345,40 +345,28 @@ Return [] if nothing genuinely generalizable happened. Return only the JSON arra
 
 
 async def _ingest_session_to_kb(summary: str, session_dt: datetime) -> tuple[bool, str]:
-    """Write session summary to Drive and trigger KB sync. Returns (success, error_message)."""
-    if not settings.conversations_folder_id:
-        msg = "conversations_folder_id not configured — skipping KB ingestion"
-        logger.warning(msg)
-        return False, msg
+    """Directly ingest the session summary into the KB. Returns (success, error_message).
 
-    filename = f"session-{session_dt.strftime('%Y-%m-%d-%H%M%S')}.md"
+    Replaces the old Drive-write-then-sync round-trip (#101) — no synthetic
+    Drive file, no full-corpus sync trigger, embeds immediately via the KB
+    service's direct-ingest endpoint added in #100.
+    """
+    title = f"session-{session_dt.strftime('%Y-%m-%d-%H%M%S')}"
     base = settings.gateway_url.rstrip("/")
     headers = {"X-API-Key": settings.gateway_api_key} if settings.gateway_api_key else {}
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        write_resp = await client.post(
-            f"{base}/storage/files",
-            json={
-                "name": filename,
-                "content": summary,
-                "folder_id": settings.conversations_folder_id,
-                "mime_type": "text/plain",
-            },
+        resp = await client.post(
+            f"{base}/kb/ingest/text",
+            json={"title": title, "content": summary},
             headers=headers,
         )
-        if not write_resp.is_success:
-            msg = f"Drive upload failed ({write_resp.status_code}): {write_resp.text}"
-            logger.error(f"Failed to write session summary to Drive: {msg}")
-            return False, msg
+    if not resp.is_success:
+        msg = f"KB ingest failed ({resp.status_code}): {resp.text}"
+        logger.error(f"Failed to ingest session summary into KB: {msg}")
+        return False, msg
 
-        logger.debug(f"Session summary written to Drive: {filename}")
-
-        sync_resp = await client.post(f"{base}/kb/sync", headers=headers)
-        if not sync_resp.is_success:
-            logger.warning(f"KB sync trigger failed after session ingestion: {sync_resp.status_code}")
-        else:
-            logger.debug("KB sync triggered after session ingestion")
-
+    logger.debug(f"Session summary ingested into KB: {title}")
     return True, ""
 
 
@@ -391,8 +379,8 @@ async def process_session(
     """
     Run fact extraction, summarization, and KB ingestion in parallel where enabled.
     Upserts extracted facts to agent_memory.
-    When kb_ingest_enabled, writes a structured session summary to Drive and triggers KB sync.
-    session_dt: last_activity timestamp used for the Drive filename; defaults to now if not provided.
+    When session_kb_ingest_enabled, writes a structured session summary directly into the KB.
+    session_dt: last_activity timestamp used for the KB entry title; defaults to now if not provided.
     session_start: created_at timestamp used to compute session duration; omitted if unavailable.
     """
     if not messages:
@@ -435,7 +423,7 @@ async def process_session(
     }
     if settings.session_summarization:
         coros["summary"] = _summarize(messages, session_id=session_id)
-    if settings.conversations_folder_id:
+    if settings.session_kb_ingest_enabled:
         coros["kb_summary"] = _generate_kb_summary(
             messages, session_dt, message_count=message_count, session_start=session_start,
             session_id=session_id,

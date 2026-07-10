@@ -33,7 +33,7 @@ _CACHEABLE_TOOLS: frozenset[str] = frozenset({
     "get_events", "check_availability", "search_events",
     "get_task_lists", "get_tasks",
     "list_emails", "search_emails", "get_email",
-    "search_knowledge_base", "get_kb_index", "list_kb_sources",
+    "search_knowledge_base", "get_kb_index", "read_kb_source", "list_kb_sources",
     "list_files", "list_folders", "get_file_info", "read_file",
     "web_search", "fetch_url",
     "list_repos", "get_repo", "list_issues", "get_issue",
@@ -448,18 +448,11 @@ TOOLS: list[ToolDef] = [
                 "query": {"type": "string", "description": "Search query."},
                 "categories": {
                     "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": [
-                            "general",
-                            "projects",
-                            "purdue",
-                            "career",
-                            "reference",
-                            "conversations",
-                        ],
-                    },
-                    "description": "Limit search to specific KB subfolder categories. Omit to search all.",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Limit search to specific KB categories, matched case-insensitively "
+                        "against Drive subfolder names under \"Knowledge Base\". Omit to search all."
+                    ),
                 },
                 "top_k": {
                     "type": "integer",
@@ -482,6 +475,29 @@ TOOLS: list[ToolDef] = [
         input_schema={"type": "object", "properties": {}},
         method="GET",
         endpoint="/kb/index",
+    ),
+    ToolDef(
+        name="read_kb_source",
+        description=(
+            "Read a knowledge base document's full original text by its source ID. "
+            "Call get_kb_index first to find the right file_id, then call this to read it in "
+            "full — this is the primary way to answer questions from a known document. "
+            "Fall back to search_knowledge_base only for broad or uncertain queries where you "
+            "don't know which document holds the answer."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "source_id": {
+                    "type": "string",
+                    "description": "The file_id from get_kb_index or list_kb_sources.",
+                },
+            },
+            "required": ["source_id"],
+        },
+        method="GET",
+        endpoint="/kb/sources/{source_id}/content",
+        path_params=["source_id"],
     ),
     ToolDef(
         name="list_kb_sources",
@@ -525,6 +541,45 @@ TOOLS: list[ToolDef] = [
         input_schema={"type": "object", "properties": {}},
         method="POST",
         endpoint="/kb/sync",
+    ),
+    ToolDef(
+        name="ingest_text",
+        description=(
+            "Directly add arbitrary text content to the knowledge base — no Drive file "
+            "required. Use this to save something durable (notes, a decision, research "
+            "findings) without creating a Drive doc first."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "A short title for this content."},
+                "content": {"type": "string", "description": "The text to ingest."},
+                "category": {
+                    "type": "string",
+                    "description": "Optional category to file this under.",
+                },
+            },
+            "required": ["title", "content"],
+        },
+        method="POST",
+        endpoint="/kb/ingest/text",
+    ),
+    ToolDef(
+        name="ingest_url",
+        description="Fetch a URL and add its extracted text content to the knowledge base.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "The URL to fetch and ingest."},
+                "category": {
+                    "type": "string",
+                    "description": "Optional category to file this under.",
+                },
+            },
+            "required": ["url"],
+        },
+        method="POST",
+        endpoint="/kb/ingest/url",
     ),
 
     # -------------------------------------------------------------------------
@@ -2095,7 +2150,8 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
                  "create_task", "update_task", "delete_task"],
     "email":    ["list_emails", "search_emails", "get_email", "draft_email"],
     "notify":   ["send_notification"],
-    "kb":       ["search_knowledge_base", "get_kb_index", "list_kb_sources", "delete_kb_source", "sync_kb"],
+    "kb":       ["search_knowledge_base", "get_kb_index", "read_kb_source", "list_kb_sources",
+                 "delete_kb_source", "sync_kb", "ingest_text", "ingest_url"],
     "web":      ["web_search", "fetch_url", "aggregate_search"],
     "drive":    ["list_files", "list_folders", "create_folder", "get_file_info", "read_file",
                  "create_file", "update_file", "append_to_file", "delete_file", "move_file",

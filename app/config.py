@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     database_url: str = ""
 
     # KB ingestion
+    # DEPRECATED: no longer read anywhere. Session-summary KB ingestion now goes
+    # through a direct /kb/ingest/text call (see session_kb_ingest_enabled below),
+    # not a Drive-write-then-sync round-trip — kept here, not deleted, since it's
+    # still a real Drive folder ID that may be referenced by other tooling.
     conversations_folder_id: str = "109Nh8yA11PpQ4iWbJ6LHGIL-2roCn5Ok"  # Drive folder ID for Knowledge Base/Conversations/
     # KB/Journal/Career/ — used by /journal/sync-kb when category=career
     journal_folder_id: str = "1mZrbPlHW0TsP7oNDpzSSi38Hjt-PfAVU"
@@ -33,6 +37,7 @@ class Settings(BaseSettings):
 
     # Feature flags
     session_summarization: bool = True  # Generate agent_memory summary after each session
+    session_kb_ingest_enabled: bool = True  # Ingest each session's structured summary into the KB
 
     # Context window
     session_window_size: int = 15  # Recent messages to keep verbatim; older messages are compressed
@@ -72,7 +77,7 @@ class Settings(BaseSettings):
     untrusted_content_tools: list[str] = [
         "get_email", "list_emails", "search_emails", "read_file", "fetch_url",
         "web_search", "aggregate_search", "search_knowledge_base", "get_kb_index",
-        "get_github_file", "search_code", "search_places",
+        "read_kb_source", "get_github_file", "search_code", "search_places",
     ]
     email_recipient_allowlist: list[str] = []  # empty = allow all
 
