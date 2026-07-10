@@ -54,6 +54,45 @@ def _format_existing_facts(facts: list[dict[str, Any]]) -> str:
     return "\n".join(f"- [{f['fact_type']}] {f['key']}: {f['value']}" for f in facts)
 
 
+def _notable_action_logs(action_logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rows worth reflecting on: real failures, plus any row belonging to a
+    (tool_name, input) pair that was actually executed 2+ times this session.
+
+    The latter is the strongest available proxy for a stuck loop: loop.py's
+    stuck-loop detector breaks *before* logging the 3rd (blocking) call with an
+    identical signature, so the persisted evidence of thrash is two prior
+    successful executions of the same call, not a 3rd failed one.
+    """
+    sig_counts: dict[tuple[str, str], int] = {}
+    for r in action_logs:
+        raw_input = r["input"]
+        sig = (r["tool_name"], raw_input if isinstance(raw_input, str) else json.dumps(raw_input))
+        sig_counts[sig] = sig_counts.get(sig, 0) + 1
+
+    notable = []
+    for r in action_logs:
+        raw_input = r["input"]
+        sig = (r["tool_name"], raw_input if isinstance(raw_input, str) else json.dumps(raw_input))
+        if r["status"] == "error" or sig_counts[sig] >= 2:
+            notable.append(r)
+    return notable
+
+
+def _format_notable_action_logs(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "(none)"
+    lines = []
+    for r in rows:
+        raw_input = r["input"]
+        try:
+            args = json.loads(raw_input) if isinstance(raw_input, str) else raw_input
+        except (json.JSONDecodeError, TypeError):
+            args = raw_input
+        err = f" — {r['error_message']}" if r.get("error_message") else ""
+        lines.append(f"- {r['tool_name']}({args}) → {r['status']}{err}")
+    return "\n".join(lines)
+
+
 def _parse_json_list(text: str) -> list[dict[str, Any]]:
     """Parse a JSON array from LLM output, handling markdown code fences."""
     try:
@@ -220,6 +259,91 @@ Conversation:
     return f"# Session — {date_str}\n*{meta}*\n\n{body}"
 
 
+_MAX_ACTION_LOGS_IN_PROMPT = 20  # cap prompt size for unusually chatty/failing sessions
+
+
+async def _reflect(
+    session_id: str,
+    conversation_text: str,
+    notable_logs: list[dict[str, Any]],
+    existing_instructions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Haiku call: turn a session's failures/thrash into 0-N behavioral lessons.
+
+    Only ever writes lessons about Sazed's OWN tool-calling behavior — never
+    about the user (that's fact-extraction's job). Caller guarantees
+    notable_logs is non-empty (checked before this coroutine is scheduled) so
+    every invocation of this function makes exactly one Haiku call.
+    """
+    existing = _format_existing_facts(existing_instructions)
+    # notable_logs is chronological (ORDER BY timestamp) — keep the most recent
+    # ones, since what Sazed should do differently "next time" is best judged
+    # from what just happened, not the earliest failures in a long session.
+    logs_preview = _format_notable_action_logs(notable_logs[-_MAX_ACTION_LOGS_IN_PROMPT:])
+
+    prompt = f"""You are reviewing a session where Sazed (a personal AI assistant) hit tool
+failures or got stuck repeating the same tool call. Extract generalizable lessons about
+Sazed's OWN tool-calling behavior — never about the user, and never fabricated from a
+single isolated failure that looks like a transient error (e.g. one unexplained 5xx with
+no retry). Only propose a lesson if the pattern suggests something Sazed should genuinely
+do differently next time: wrong tool order, a missing prerequisite call, malformed args,
+or retrying the same broken approach without adapting.
+
+Do not duplicate an existing instruction — if a lesson already covers this, skip it.
+Existing instructions:
+{existing}
+
+Failed/repeated tool calls this session, in order:
+{logs_preview}
+
+Conversation:
+{conversation_text}
+
+Return a JSON array of 0 to {settings.max_lessons_per_session} objects, each:
+  scope: "instruction" (a behavioral rule) or "procedure" (a better tool ordering/recipe)
+  key: short snake_case identifier — reuse an existing instruction's key if this refines it
+  lesson: one concise sentence Sazed should follow next time
+
+Return [] if nothing genuinely generalizable happened. Return only the JSON array, no other text."""
+
+    response = await get_client().messages.create(
+        model=settings.haiku_model,
+        max_tokens=512,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    if settings.llm_cost_tracking:
+        schedule_llm_log(session_id, None, settings.haiku_model, "reflection", response)
+
+    raw_lessons = _parse_json_list(response.content[0].text)[: settings.max_lessons_per_session]
+
+    applied: list[dict[str, Any]] = []
+    for item in raw_lessons:
+        try:
+            scope = item.get("scope", "instruction")
+            key = item["key"]
+            lesson = item["lesson"]
+        except (KeyError, AttributeError):
+            continue
+
+        # v1: procedure-scope lessons fall back to an instruction fact too — there's
+        # no way to patch an existing procedure's steps yet (app/agent/procedures.py
+        # only supports proposing a brand-new one), so there's nowhere else to send
+        # a procedure-scope correction. `scope` is kept in the prompt/output as a
+        # forward-looking hook for whenever that patch capability gets built.
+        await upsert_fact(
+            fact_type="instruction",
+            key=key,
+            value=lesson,
+            confidence=0.8,
+            source=f"reflection:{session_id}",
+        )
+        applied.append({"scope": scope, "key": key, "lesson": lesson})
+
+    if applied:
+        logger.info(f"process_session {session_id}: reflection produced {len(applied)} lesson(s)")
+    return applied
+
+
 async def _ingest_session_to_kb(summary: str, session_dt: datetime) -> tuple[bool, str]:
     """Write session summary to Drive and trigger KB sync. Returns (success, error_message)."""
     if not settings.conversations_folder_id:
@@ -281,21 +405,29 @@ async def process_session(
 
     action_logs: list[dict[str, Any]] = []
     propose_procedure = False
-    if settings.procedural_memory_enabled:
+    run_reflection = False
+    notable_logs: list[dict[str, Any]] = []
+    if settings.procedural_memory_enabled or settings.reflection_enabled:
         pool = get_pool()
         rows = await pool.fetch(
-            "SELECT tool_name, input, status FROM action_logs "
+            "SELECT tool_name, input, status, error_message FROM action_logs "
             "WHERE session_id = $1 ORDER BY timestamp",
             uuid.UUID(session_id),
         )
         action_logs = [dict(row) for row in rows]
-        write_tool_calls = sum(
-            1 for r in action_logs if r["tool_name"] in settings.sonnet_write_tools
-        )
-        session_failed = any(r["status"] == "error" for r in action_logs)
-        propose_procedure = (
-            not session_failed and write_tool_calls >= settings.procedure_min_write_tools
-        )
+
+        if settings.procedural_memory_enabled:
+            write_tool_calls = sum(
+                1 for r in action_logs if r["tool_name"] in settings.sonnet_write_tools
+            )
+            session_failed = any(r["status"] == "error" for r in action_logs)
+            propose_procedure = (
+                not session_failed and write_tool_calls >= settings.procedure_min_write_tools
+            )
+
+        if settings.reflection_enabled and action_logs:
+            notable_logs = _notable_action_logs(action_logs)
+            run_reflection = bool(notable_logs)
 
     # Build coroutine map so all active tasks run in parallel
     coros: dict[str, Any] = {
@@ -313,6 +445,11 @@ async def process_session(
         coros["procedure"] = propose_procedure_from_session(
             session_id, _format_messages(messages), action_logs, existing_names
         )
+    if run_reflection:
+        instruction_facts = [f for f in existing_facts if f["fact_type"] == "instruction"]
+        coros["reflection"] = _reflect(
+            session_id, _format_messages(messages), notable_logs, instruction_facts
+        )
 
     results = dict(zip(coros.keys(), await asyncio.gather(*coros.values())))
 
@@ -320,6 +457,7 @@ async def process_session(
     summary = results.get("summary", "")
     kb_summary = results.get("kb_summary", "")
     proposed_procedure = results.get("procedure")
+    lessons_learned = results.get("reflection", [])
 
     logger.debug(
         f"process_session {session_id}: extracted {len(raw_facts)} raw fact(s), "
@@ -357,4 +495,5 @@ async def process_session(
         "kb_ingested": kb_ok,
         "kb_error": kb_error,
         "procedure_proposed": proposed_procedure["name"] if proposed_procedure else None,
+        "lessons_learned": lessons_learned,
     }
