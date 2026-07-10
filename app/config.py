@@ -81,5 +81,9 @@ class Settings(BaseSettings):
     procedure_min_write_tools: int = 2   # min write tools in a session to propose a procedure
     max_procedures_in_prompt: int = 3
 
+    # Observability — LLM cost/token tracking
+    llm_cost_tracking: bool = True
+    eval_enabled: bool = False
+
 
 settings = Settings()

@@ -130,6 +130,22 @@ CREATE TABLE IF NOT EXISTS procedures (
     last_used_at    TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS procedures_status_idx ON procedures (status);
+
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id         UUID REFERENCES sessions(id) ON DELETE CASCADE,
+    timestamp          TIMESTAMPTZ DEFAULT NOW(),
+    turn               INT,
+    model              TEXT NOT NULL,
+    purpose            TEXT,
+    input_tokens       INT,
+    output_tokens      INT,
+    cache_read_tokens  INT,
+    cache_write_tokens INT,
+    duration_ms        INT
+);
+CREATE INDEX IF NOT EXISTS llm_calls_session_idx ON llm_calls (session_id);
+CREATE INDEX IF NOT EXISTS llm_calls_timestamp_idx ON llm_calls (timestamp DESC);
 """
 
 

@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app.agent.client import get_client, tool_sig as _tool_sig
+from app.agent.client import get_client, schedule_llm_log, tool_sig as _tool_sig
 from app.agent.memory import format_for_prompt, load_memory
 from app.agent.session import compress_context
 from app.agent.tools import execute_tool, get_think_tool_schemas
@@ -119,7 +119,7 @@ async def _apply_context_window(
     summarized_through = row["summarized_through"] if row else 0
 
     if len(overflow) > summarized_through:
-        summary = await compress_context(overflow, existing_summary)
+        summary = await compress_context(overflow, existing_summary, session_id=session_id)
         await pool.execute(
             "UPDATE sessions SET context_summary = $1, summarized_through = $2 WHERE id = $3",
             summary, len(overflow), session_id,
@@ -231,6 +231,9 @@ async def run_think(
             tools=tools,
             max_tokens=2048,
         )
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+        if settings.llm_cost_tracking:
+            schedule_llm_log(sid, turn, settings.haiku_model, "think", response, duration_ms)
         logger.debug(
             f"  think turn {turn}: stop_reason={response.stop_reason} "
             f"in {time.perf_counter() - t0:.3f}s"
