@@ -78,7 +78,7 @@ class Settings(BaseSettings):
 
     # Procedural memory
     procedural_memory_enabled: bool = True
-    procedure_min_write_tools: int = 2   # min write/action tools in a session to propose a procedure
+    procedure_min_write_tools: int = 2   # min write tools in a session to propose a procedure
     max_procedures_in_prompt: int = 3
 
 

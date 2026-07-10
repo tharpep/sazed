@@ -132,7 +132,8 @@ Do NOT duplicate an existing procedure. Existing procedure names: {existing}
 If this session IS a good candidate, return a JSON object exactly in this shape:
 {{"name": "short_snake_case_name", "trigger_desc": "one sentence: when to use this",
   "trigger_keywords": ["keyword1", "keyword2"],
-  "steps": [{{"tool": "exact_tool_name", "purpose": "why this step", "param_hints": "optional notes"}}]}}
+  "steps": [{{"tool": "exact_tool_name", "purpose": "why this step",
+              "param_hints": "optional notes"}}]}}
 
 If this session is NOT a good candidate, return exactly: null
 
