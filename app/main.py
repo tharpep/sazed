@@ -18,6 +18,7 @@ from app.routers import (
     journal,
     kb,
     memory,
+    procedures,
     think,
     tools,
 )
@@ -87,4 +88,10 @@ app.include_router(
 )
 app.include_router(
     think.router, prefix="/think", tags=["think"], dependencies=[Depends(verify_api_key)]
+)
+app.include_router(
+    procedures.router,
+    prefix="/procedures",
+    tags=["procedures"],
+    dependencies=[Depends(verify_api_key)],
 )
