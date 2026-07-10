@@ -1,11 +1,12 @@
 """Procedural memory — situation-to-tool-sequence recipes."""
 
+import asyncio
 import json
 import logging
 import uuid
 from typing import Any
 
-from app.agent.client import get_client
+from app.agent.client import get_client, log_llm_call
 from app.agent.json_utils import strip_json_fence
 from app.agent.tools import known_tool_names
 from app.config import settings
@@ -147,6 +148,10 @@ Conversation:
         max_tokens=768,
         messages=[{"role": "user", "content": prompt}],
     )
+    if settings.llm_cost_tracking:
+        asyncio.create_task(
+            log_llm_call(session_id, None, settings.haiku_model, "procedure", response)
+        )
     proposal = _parse_json_object(response.content[0].text)
     if not proposal:
         return None
