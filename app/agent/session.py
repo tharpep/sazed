@@ -7,14 +7,13 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-import httpx
-
 from app.agent.client import get_client, schedule_llm_log
 from app.agent.json_utils import strip_json_fence
 from app.agent.memory import load_memory, upsert_fact
 from app.agent.procedures import list_procedures, propose_procedure_from_session
 from app.config import settings
 from app.db import get_pool
+from app.http_client import get_client as get_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -355,12 +354,12 @@ async def _ingest_session_to_kb(summary: str, session_dt: datetime) -> tuple[boo
     base = settings.gateway_url.rstrip("/")
     headers = {"X-API-Key": settings.gateway_api_key} if settings.gateway_api_key else {}
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            f"{base}/kb/ingest/text",
-            json={"title": title, "content": summary},
-            headers=headers,
-        )
+    resp = await get_http_client().post(
+        f"{base}/kb/ingest/text",
+        json={"title": title, "content": summary},
+        headers=headers,
+        timeout=30.0,
+    )
     if not resp.is_success:
         msg = f"KB ingest failed ({resp.status_code}): {resp.text}"
         logger.error(f"Failed to ingest session summary into KB: {msg}")
