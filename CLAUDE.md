@@ -44,13 +44,13 @@ No test suite yet.
 - Journal: `list_journal_entries`, `get_journal_entry`, `create_journal_entry`, `update_journal_entry`, `delete_journal_entry`, `list_journal_subcategories`, `get_journal_summary`, `export_journal`, `sync_journal_to_kb` → `/journal/*`. All take `category` (`career` | `personal`, default `career`) and `subcategory` (free-form). `sync_journal_to_kb` picks the Drive folder per category.
 - Memory (internal): `memory_update`
 
-**Routers:** `health.py` (GET /health), `chat.py` (POST /chat, GET /chat/stream), `conversations.py` (GET /conversations, GET /conversations/{id}, POST /conversations/{id}/process), `memory.py` (GET /memory, PUT /memory, DELETE /memory/{id}), `kb.py` (GET /kb/stats, /kb/sources, /kb/files, POST /kb/search, /kb/sync, DELETE /kb/files/{id}, DELETE /kb), `journal.py` (`/journal/*` proxy to api-gateway + `POST /journal/sync-kb` which exports to the per-category Drive folder and triggers KB ingestion), `tools.py` (GET /tools).
+**Routers:** `health.py` (GET /health), `chat.py` (POST /chat, GET /chat/stream), `conversations.py` (GET /conversations — accepts `?type=` filter, defaults to `chat`, pass `all` for every type; GET /conversations/{id}, POST /conversations/{id}/process, POST /conversations/archive), `memory.py` (GET /memory, PUT /memory, DELETE /memory/{id}), `kb.py` (GET /kb/stats, /kb/sources, /kb/files, POST /kb/search, /kb/sync, DELETE /kb/files/{id}, DELETE /kb), `journal.py` (`/journal/*` proxy to api-gateway + `POST /journal/sync-kb` which exports to the per-category Drive folder and triggers KB ingestion), `tools.py` (GET /tools).
 
-**Database:** `app/db.py` — asyncpg pool for sessions and agent_memory. Sessions store `context_summary` and `summarized_through` for context window management.
+**Database:** `app/db.py` — asyncpg pool for sessions and agent_memory. Sessions store `context_summary` and `summarized_through` for context window management, and `session_type` (`chat` default; `think`, `automation`, `claude` for other callers) for listing/archival/process_session gating.
 
 **Context window:** When a session exceeds `session_window_size` (default 15) messages, overflow is compressed into a rolling summary via Haiku and stored in the session row. The agent sees `[summary_pair] + recent_messages`.
 
-**Session processing (`session.py`):** After each turn, `process_session` runs in parallel: fact extraction (Haiku → upsert to `agent_memory`), optional summary, optional structured KB entry ingested directly via the KB service's `/kb/ingest/text` (no Drive round-trip). Controlled by `session_kb_ingest_enabled` and `session_summarization` settings.
+**Session processing (`session.py`):** After each turn, `process_session` runs in parallel: fact extraction (Haiku → upsert to `agent_memory`), optional summary, optional structured KB entry ingested directly via the KB service's `/kb/ingest/text` (no Drive round-trip). Controlled by `session_kb_ingest_enabled` and `session_summarization` settings. Fact extraction and KB ingestion only run when `session_type == "chat"` — other session types are compress-only, so think/automation traffic doesn't pollute memory or the KB.
 
 ## Module Layout
 

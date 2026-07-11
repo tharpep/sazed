@@ -2,6 +2,7 @@
 
 import json
 import logging
+import uuid
 from datetime import timezone
 
 from fastapi import APIRouter, HTTPException, Query
@@ -20,8 +21,14 @@ def _to_utc(ts):
 
 
 @router.get("")
-async def list_conversations():
-    return {"conversations": await list_sessions()}
+async def list_conversations(
+    type: str | None = Query(
+        default="chat",
+        description="Filter by session_type. Pass 'all' to return every type.",
+    ),
+):
+    session_type = None if type == "all" else type
+    return {"conversations": await list_sessions(session_type=session_type)}
 
 
 @router.get("/{session_id}")
@@ -39,7 +46,13 @@ async def trigger_process_session(session_id: str):
         raise HTTPException(404, "Session not found")
     if not messages:
         raise HTTPException(400, "Session has no messages to process")
-    return await process_session(session_id, messages)
+
+    row = await get_pool().fetchrow(
+        "SELECT session_type FROM sessions WHERE id = $1", uuid.UUID(session_id)
+    )
+    session_type = (row["session_type"] if row else None) or "chat"
+
+    return await process_session(session_id, messages, session_type=session_type)
 
 
 @router.post("/archive")
@@ -47,6 +60,9 @@ async def archive_sessions(
     older_than_days: int = Query(default=30, ge=1, description="Archive sessions with no activity in this many days"),
 ):
     """Move old sessions and their messages to archive tables in a single transaction.
+
+    Only chat-type sessions are archived here — think/automation sessions have their
+    own lifecycle and are excluded so this job doesn't sweep them up.
 
     Deleting from sessions cascades to messages automatically, so the live
     tables stay lean while all data is preserved in archived_sessions and
@@ -61,6 +77,7 @@ async def archive_sessions(
                 """
                 SELECT id, created_at, last_activity FROM sessions
                 WHERE last_activity < NOW() - ($1 || ' days')::INTERVAL
+                AND session_type = 'chat'
                 """,
                 str(older_than_days),
             )
@@ -77,9 +94,9 @@ async def archive_sessions(
                 """
                 INSERT INTO archived_sessions
                     (id, created_at, last_activity, message_count, processed_at,
-                     summary_kb_id, context_summary, summarized_through)
+                     summary_kb_id, context_summary, summarized_through, session_type)
                 SELECT id, created_at, last_activity, message_count, processed_at,
-                       summary_kb_id, context_summary, summarized_through
+                       summary_kb_id, context_summary, summarized_through, session_type
                 FROM sessions
                 WHERE id = ANY($1)
                 ON CONFLICT (id) DO NOTHING
@@ -127,7 +144,10 @@ async def archive_sessions(
         created_at = session_created.get(sid)
         session_start = _to_utc(created_at) if created_at else None
         try:
-            result = await process_session(sid, messages, session_dt=session_dt, session_start=session_start)
+            result = await process_session(
+                sid, messages, session_dt=session_dt, session_start=session_start,
+                session_type="chat",
+            )
             if result.get("kb_ingested"):
                 kb_succeeded += 1
             elif result.get("kb_error"):

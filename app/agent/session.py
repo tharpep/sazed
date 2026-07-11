@@ -374,6 +374,7 @@ async def process_session(
     messages: list[dict[str, Any]],
     session_dt: datetime | None = None,
     session_start: datetime | None = None,
+    session_type: str = "chat",
 ) -> dict[str, Any]:
     """
     Run fact extraction, summarization, and KB ingestion in parallel where enabled.
@@ -381,6 +382,9 @@ async def process_session(
     When session_kb_ingest_enabled, writes a structured session summary directly into the KB.
     session_dt: last_activity timestamp used for the KB entry title; defaults to now if not provided.
     session_start: created_at timestamp used to compute session duration; omitted if unavailable.
+    session_type: only "chat" sessions run fact extraction and KB ingestion — other session
+    types are compress-only (summarization still runs if enabled) to avoid polluting memory
+    and the KB with non-conversational traffic.
     """
     if not messages:
         return {"session_id": session_id, "facts_extracted": 0, "summary": ""}
@@ -416,13 +420,15 @@ async def process_session(
             notable_logs = _notable_action_logs(action_logs)
             run_reflection = bool(notable_logs)
 
-    # Build coroutine map so all active tasks run in parallel
-    coros: dict[str, Any] = {
-        "facts": _extract_facts(messages, existing_facts, session_id=session_id)
-    }
+    # Build coroutine map so all active tasks run in parallel.
+    # Fact extraction and KB ingestion only run for chat sessions — think/automation
+    # traffic is compress-only, so it doesn't pollute memory or the KB.
+    coros: dict[str, Any] = {}
+    if session_type == "chat":
+        coros["facts"] = _extract_facts(messages, existing_facts, session_id=session_id)
     if settings.session_summarization:
         coros["summary"] = _summarize(messages, session_id=session_id)
-    if settings.session_kb_ingest_enabled:
+    if session_type == "chat" and settings.session_kb_ingest_enabled:
         coros["kb_summary"] = _generate_kb_summary(
             messages, session_dt, message_count=message_count, session_start=session_start,
             session_id=session_id,
@@ -440,7 +446,7 @@ async def process_session(
 
     results = dict(zip(coros.keys(), await asyncio.gather(*coros.values())))
 
-    raw_facts = results["facts"]
+    raw_facts = results.get("facts", [])
     summary = results.get("summary", "")
     kb_summary = results.get("kb_summary", "")
     proposed_procedure = results.get("procedure")

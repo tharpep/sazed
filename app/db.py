@@ -48,8 +48,11 @@ CREATE TABLE IF NOT EXISTS archived_sessions (
     summary_kb_id      UUID,
     context_summary    TEXT,
     summarized_through INT,
+    session_type       TEXT DEFAULT 'chat',
     archived_at        TIMESTAMPTZ DEFAULT NOW()
 );
+
+ALTER TABLE archived_sessions ADD COLUMN IF NOT EXISTS session_type TEXT DEFAULT 'chat';
 
 CREATE TABLE IF NOT EXISTS archived_messages (
     id         UUID PRIMARY KEY,
