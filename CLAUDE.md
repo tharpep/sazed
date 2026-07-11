@@ -78,7 +78,7 @@ chat.py                — CLI for testing (calls local /chat)
 ## Key Conventions
 
 - **Ruff** for linting/formatting: line length 100, Python 3.11.
-- All gateway calls via httpx in `tools.py`; single timeout (30s) per request.
+- All gateway calls via httpx, through one pooled `httpx.AsyncClient` (`app/http_client.py`, opened/closed by the FastAPI lifespan) — call `get_client()` rather than constructing a new client per request; single timeout (30s) per request.
 - Config: `from app.config import settings`.
 - Session and memory persistence: asyncpg when `DATABASE_URL` is set.
 - Streaming uses SSE via `StreamingResponse` in `routers/chat.py`; events: `session`, `tool_start`, `tool_done`, `text_delta`, `done`.

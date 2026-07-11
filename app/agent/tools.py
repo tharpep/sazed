@@ -13,6 +13,7 @@ import httpx
 
 from app.agent.memory import upsert_fact
 from app.config import settings
+from app.http_client import get_client
 
 
 @dataclass
@@ -2452,22 +2453,22 @@ async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
     headers = {"X-API-Key": settings.gateway_api_key}
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            if tool.method == "GET":
-                params = {k: v for k, v in remaining.items() if v is not None}
-                resp = await client.get(url, params=params, headers=headers)
-            elif tool.method == "POST":
-                resp = await client.post(url, json=remaining, headers=headers)
-            elif tool.method == "PATCH":
-                resp = await client.patch(url, json=remaining, headers=headers)
-            elif tool.method == "PUT":
-                resp = await client.put(url, json=remaining, headers=headers)
-            elif tool.method == "DELETE":
-                resp = await client.delete(url, headers=headers)
-                if resp.status_code == 204:
-                    return _ok("Deleted successfully.")
-            else:
-                return _err(f"Unsupported method: {tool.method}")
+        client = get_client()
+        if tool.method == "GET":
+            params = {k: v for k, v in remaining.items() if v is not None}
+            resp = await client.get(url, params=params, headers=headers, timeout=30.0)
+        elif tool.method == "POST":
+            resp = await client.post(url, json=remaining, headers=headers, timeout=30.0)
+        elif tool.method == "PATCH":
+            resp = await client.patch(url, json=remaining, headers=headers, timeout=30.0)
+        elif tool.method == "PUT":
+            resp = await client.put(url, json=remaining, headers=headers, timeout=30.0)
+        elif tool.method == "DELETE":
+            resp = await client.delete(url, headers=headers, timeout=30.0)
+            if resp.status_code == 204:
+                return _ok("Deleted successfully.")
+        else:
+            return _err(f"Unsupported method: {tool.method}")
     except httpx.TimeoutException:
         return _err("Request timed out.")
     except httpx.RequestError as e:

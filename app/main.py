@@ -9,6 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.db import close_pool, init_pool
 from app.dependencies import verify_api_key
+from app.http_client import shutdown as http_client_shutdown
+from app.http_client import startup as http_client_startup
 from app.routers import (
     audit,
     chat,
@@ -38,7 +40,9 @@ def _configure_logging() -> None:
 async def lifespan(app: FastAPI):
     _configure_logging()
     await init_pool()
+    await http_client_startup()
     yield
+    await http_client_shutdown()
     await close_pool()
 
 

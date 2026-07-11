@@ -4,6 +4,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from app.config import settings
+from app.http_client import get_client
 
 router = APIRouter(tags=["kb"])
 
@@ -23,10 +24,9 @@ async def _proxy(method: str, path: str, **kwargs) -> Response:
     if not settings.gateway_url:
         raise HTTPException(503, "Gateway URL not configured")
     try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            resp = await client.request(
-                method, _gateway_url(path), headers=_headers(), **kwargs
-            )
+        resp = await get_client().request(
+            method, _gateway_url(path), headers=_headers(), timeout=_TIMEOUT, **kwargs
+        )
     except httpx.TimeoutException:
         raise HTTPException(504, "Gateway timed out")
     except httpx.RequestError as e:

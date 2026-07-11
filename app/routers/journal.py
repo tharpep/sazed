@@ -10,6 +10,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from app.config import settings
+from app.http_client import get_client
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +31,9 @@ async def _proxy(method: str, path: str, **kwargs) -> Response:
     if not settings.gateway_url:
         raise HTTPException(503, "Gateway URL not configured")
     try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            resp = await client.request(
-                method, _gateway_url(path), headers=_headers(), **kwargs
-            )
+        resp = await get_client().request(
+            method, _gateway_url(path), headers=_headers(), timeout=_TIMEOUT, **kwargs
+        )
     except httpx.TimeoutException:
         raise HTTPException(504, "Gateway timed out")
     except httpx.RequestError as e:
@@ -184,68 +184,69 @@ async def sync_journal_to_kb(
     sub = subcategory or project
     base = settings.gateway_url.rstrip("/")
     headers = _headers()
+    client = get_client()
 
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        # 1. Fetch the markdown export from the gateway
-        export_params: dict = {
-            "category": category,
-            "period": period,
-            "format": "markdown",
-        }
-        if sub:
-            export_params["subcategory"] = sub
-        export_resp = await client.get(
-            f"{base}/journal/export", params=export_params, headers=headers,
-        )
-        if not export_resp.is_success:
-            raise HTTPException(502, f"Export fetch failed: {export_resp.text}")
+    # 1. Fetch the markdown export from the gateway
+    export_params: dict = {
+        "category": category,
+        "period": period,
+        "format": "markdown",
+    }
+    if sub:
+        export_params["subcategory"] = sub
+    export_resp = await client.get(
+        f"{base}/journal/export", params=export_params, headers=headers, timeout=_TIMEOUT,
+    )
+    if not export_resp.is_success:
+        raise HTTPException(502, f"Export fetch failed: {export_resp.text}")
 
-        content = export_resp.text
-        if not content or content == "No journal entries found for the given range.":
-            return {"synced": False, "reason": "No entries for the given period."}
+    content = export_resp.text
+    if not content or content == "No journal entries found for the given range.":
+        return {"synced": False, "reason": "No entries for the given period."}
 
-        # 2. Fetch summary to get the date range for the filename
-        summary_params: dict = {"category": category, "period": period}
-        if sub:
-            summary_params["subcategory"] = sub
-        summary_resp = await client.get(
-            f"{base}/journal/summary", params=summary_params, headers=headers,
-        )
-        start = period
-        end = ""
-        if summary_resp.is_success:
-            s = summary_resp.json()
-            start = s.get("start_date", period)
-            end = s.get("end_date", "")
+    # 2. Fetch summary to get the date range for the filename
+    summary_params: dict = {"category": category, "period": period}
+    if sub:
+        summary_params["subcategory"] = sub
+    summary_resp = await client.get(
+        f"{base}/journal/summary", params=summary_params, headers=headers, timeout=_TIMEOUT,
+    )
+    start = period
+    end = ""
+    if summary_resp.is_success:
+        s = summary_resp.json()
+        start = s.get("start_date", period)
+        end = s.get("end_date", "")
 
-        slug_bits = [category]
-        if sub:
-            slug_bits.append(sub)
-        slug = "-".join(slug_bits)
-        filename = f"journal-{slug}-{start}-to-{end}.md"
+    slug_bits = [category]
+    if sub:
+        slug_bits.append(sub)
+    slug = "-".join(slug_bits)
+    filename = f"journal-{slug}-{start}-to-{end}.md"
 
-        # 3. Write to Drive
-        write_resp = await client.post(
-            f"{base}/storage/files",
-            json={
-                "name": filename,
-                "content": content,
-                "folder_id": folder_id,
-                "mime_type": "text/plain",
-            },
-            headers=headers,
-        )
-        if not write_resp.is_success:
-            msg = f"Drive upload failed ({write_resp.status_code}): {write_resp.text}"
-            logger.error(msg)
-            raise HTTPException(502, msg)
+    # 3. Write to Drive
+    write_resp = await client.post(
+        f"{base}/storage/files",
+        json={
+            "name": filename,
+            "content": content,
+            "folder_id": folder_id,
+            "mime_type": "text/plain",
+        },
+        headers=headers,
+        timeout=_TIMEOUT,
+    )
+    if not write_resp.is_success:
+        msg = f"Drive upload failed ({write_resp.status_code}): {write_resp.text}"
+        logger.error(msg)
+        raise HTTPException(502, msg)
 
-        logger.info(f"Journal exported to Drive: {filename}")
+    logger.info(f"Journal exported to Drive: {filename}")
 
-        # 4. Trigger KB sync
-        sync_resp = await client.post(f"{base}/kb/sync", headers=headers)
-        if not sync_resp.is_success:
-            logger.warning(f"KB sync trigger failed: {sync_resp.status_code}")
+    # 4. Trigger KB sync
+    sync_resp = await client.post(f"{base}/kb/sync", headers=headers, timeout=_TIMEOUT)
+    if not sync_resp.is_success:
+        logger.warning(f"KB sync trigger failed: {sync_resp.status_code}")
 
     return {
         "synced": True,
