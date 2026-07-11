@@ -424,17 +424,24 @@ async def run_turn(
     timezone: str | None = None,
     location=None,
     interactive: bool = True,
+    session_type: str = "chat",
 ) -> tuple[str, str]:
     """Run one user turn through the agent loop. Returns (session_id, response_text).
 
     interactive=False disables the confirmation gate (used by autonomous think mode).
+    session_type classifies the session for listing/archival/process_session gating
+    (e.g. "chat", "automation", "claude") — distinct from `mode`, which only affects
+    system prompt selection.
     """
     if not session_id:
         session_id = str(uuid.uuid4())
 
     pool = get_pool()
     sid = uuid.UUID(session_id)
-    await pool.execute("INSERT INTO sessions (id) VALUES ($1) ON CONFLICT DO NOTHING", sid)
+    await pool.execute(
+        "INSERT INTO sessions (id, session_type) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        sid, session_type,
+    )
 
     messages, system, tools = await _setup_turn(pool, sid, user_message, mode, timezone, location)
 
@@ -597,11 +604,14 @@ async def run_turn_stream(
     timezone: str | None = None,
     location=None,
     interactive: bool = True,
+    session_type: str = "chat",
 ) -> AsyncIterator[str]:
     """
     Run one user turn through the agent loop, yielding SSE-formatted strings.
 
     interactive=False disables the confirmation gate (used by autonomous think mode).
+    session_type classifies the session for listing/archival/process_session gating —
+    distinct from `mode`, which only affects system prompt selection.
 
     Events yielded:
         event: session    data: {"session_id": "..."}                              — before first LLM call
@@ -615,7 +625,10 @@ async def run_turn_stream(
 
     pool = get_pool()
     sid = uuid.UUID(session_id)
-    await pool.execute("INSERT INTO sessions (id) VALUES ($1) ON CONFLICT DO NOTHING", sid)
+    await pool.execute(
+        "INSERT INTO sessions (id, session_type) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        sid, session_type,
+    )
 
     messages, system, tools = await _setup_turn(pool, sid, user_message, mode, timezone, location)
 
@@ -814,12 +827,23 @@ async def get_session(session_id: str) -> list[dict[str, Any]] | None:
     ]
 
 
-async def list_sessions() -> list[dict[str, Any]]:
-    """Return all sessions ordered by most recent activity."""
+async def list_sessions(session_type: str | None = "chat") -> list[dict[str, Any]]:
+    """Return sessions ordered by most recent activity.
+
+    Defaults to chat-type sessions only. Pass session_type=None to return all types.
+    """
     pool = get_pool()
-    rows = await pool.fetch(
-        "SELECT id, message_count, last_activity, created_at, session_type, title FROM sessions ORDER BY last_activity DESC"
-    )
+    if session_type is None:
+        rows = await pool.fetch(
+            "SELECT id, message_count, last_activity, created_at, session_type, title "
+            "FROM sessions ORDER BY last_activity DESC"
+        )
+    else:
+        rows = await pool.fetch(
+            "SELECT id, message_count, last_activity, created_at, session_type, title "
+            "FROM sessions WHERE session_type = $1 ORDER BY last_activity DESC",
+            session_type,
+        )
     return [
         {
             "session_id": str(r["id"]),
