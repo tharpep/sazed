@@ -11,6 +11,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Any, AsyncIterator
 
+from fastapi import Request
+
 from app.agent.client import get_client, schedule_llm_log, tool_sig
 from app.agent.memory import format_for_prompt, load_memory, load_relevant_memory
 from app.agent.procedures import format_procedures_for_prompt, load_relevant_procedures
@@ -605,6 +607,7 @@ async def run_turn_stream(
     location=None,
     interactive: bool = True,
     session_type: str = "chat",
+    request: Request | None = None,
 ) -> AsyncIterator[str]:
     """
     Run one user turn through the agent loop, yielding SSE-formatted strings.
@@ -612,6 +615,10 @@ async def run_turn_stream(
     interactive=False disables the confirmation gate (used by autonomous think mode).
     session_type classifies the session for listing/archival/process_session gating —
     distinct from `mode`, which only affects system prompt selection.
+    request, if provided, is polled between turns so a client that cancelled/disconnected
+    stops the loop before the next (costly) LLM call instead of running to completion
+    for nobody. ASGI already cancels this generator on disconnect regardless — this check
+    just avoids burning an extra LLM/tool round-trip in the window before that happens.
 
     Events yielded:
         event: session    data: {"session_id": "..."}                              — before first LLM call
@@ -654,6 +661,10 @@ async def run_turn_stream(
     user_message_long = len(user_message) >= settings.sonnet_message_len_threshold
 
     for turn in range(settings.agent_max_turns):
+        if request is not None and await request.is_disconnected():
+            logger.info(f"session {sid}: client disconnected — stopping before turn {turn}")
+            return
+
         model, model_reason = _select_model(turn, user_message_long, tools_used, force_sonnet)
         t0 = time.perf_counter()
         logger.debug(f"  stream turn {turn}: calling {model} ({model_reason}) with {len(messages)} messages")
@@ -804,6 +815,49 @@ async def run_turn_stream(
     await _finalize_turn(pool, sid)
     logger.debug(f"stream session {session_id}: done")
     yield f"event: done\ndata: {{}}\n\n"
+
+
+async def truncate_session_from_user_message(session_id: str, message_index: int) -> None:
+    """Delete a user message and everything after it — used when editing a past message.
+
+    message_index is 0-based, counting only real user-authored text messages. Tool-result
+    rows are also stored with role='user' but as a JSON list rather than a string (see
+    _save_message call sites above), so they're excluded from the count.
+
+    Resets the rolling context summary since it may have folded in messages that no longer
+    exist; the next turn rebuilds it from the (now-shorter) remaining history.
+
+    Raises ValueError if the session has fewer than message_index+1 user text messages.
+    """
+    pool = get_pool()
+    sid = uuid.UUID(session_id)
+    rows = await pool.fetch(
+        "SELECT role, content, timestamp FROM messages WHERE session_id = $1 ORDER BY timestamp",
+        sid,
+    )
+
+    cutoff = None
+    seen = -1
+    for row in rows:
+        if row["role"] != "user":
+            continue
+        content = json.loads(row["content"])
+        if not isinstance(content, str):
+            continue
+        seen += 1
+        if seen == message_index:
+            cutoff = row["timestamp"]
+            break
+
+    if cutoff is None:
+        raise ValueError(f"No user message at index {message_index} in session {session_id}")
+
+    await pool.execute(
+        "DELETE FROM messages WHERE session_id = $1 AND timestamp >= $2", sid, cutoff
+    )
+    await pool.execute(
+        "UPDATE sessions SET context_summary = NULL, summarized_through = 0 WHERE id = $1", sid
+    )
 
 
 async def get_session(session_id: str) -> list[dict[str, Any]] | None:

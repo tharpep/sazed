@@ -67,7 +67,7 @@ app/
     session.py         — load/save messages, context compression, post-session fact extraction + summary + KB ingestion
   routers/
     health.py          — GET /health
-    chat.py            — POST /chat, GET /chat/stream (SSE)
+    chat.py            — POST /chat, POST /chat/stream (SSE), POST /chat/edit, POST /chat/edit/stream (truncate a past user message + everything after it, then resubmit)
     conversations.py   — GET /conversations, GET /conversations/{id}, POST /conversations/{id}/process
     memory.py          — GET /memory, PUT /memory, DELETE /memory/{id}
     kb.py              — KB proxy: stats, sources, search, sync, delete
@@ -81,6 +81,6 @@ chat.py                — CLI for testing (calls local /chat)
 - All gateway calls via httpx, through one pooled `httpx.AsyncClient` (`app/http_client.py`, opened/closed by the FastAPI lifespan) — call `get_client()` rather than constructing a new client per request; single timeout (30s) per request.
 - Config: `from app.config import settings`.
 - Session and memory persistence: asyncpg when `DATABASE_URL` is set.
-- Streaming uses SSE via `StreamingResponse` in `routers/chat.py`; events: `session`, `tool_start`, `tool_done`, `text_delta`, `done`.
+- Streaming uses SSE via `StreamingResponse` in `routers/chat.py`; events: `session`, `tool_start`, `tool_done`, `text_delta`, `done`. `run_turn_stream` accepts an optional `request` and polls `is_disconnected()` between turns so a cancelled client stops the loop before the next LLM call.
 - Model selection: Haiku for turns 0–2, Sonnet from turn 3 onward (`_select_model` in `loop.py`).
 - Prompt caching: system blocks and the last tool schema use `cache_control: ephemeral`.
