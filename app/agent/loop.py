@@ -1,6 +1,7 @@
 """Agent loop — core reasoning cycle."""
 
 import asyncio
+import base64
 import json
 import logging
 import re
@@ -884,24 +885,65 @@ async def get_session(session_id: str) -> list[dict[str, Any]] | None:
     ]
 
 
-async def list_sessions(session_type: str | None = "chat") -> list[dict[str, Any]]:
-    """Return sessions ordered by most recent activity.
+def _encode_sessions_cursor(last_activity: datetime, session_id: uuid.UUID) -> str:
+    raw = json.dumps([last_activity.isoformat(), str(session_id)]).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
-    Defaults to chat-type sessions only. Pass session_type=None to return all types.
+
+def _decode_sessions_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
+    padding = "=" * (-len(cursor) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(cursor + padding)
+        activity_s, id_s = json.loads(raw)
+        return datetime.fromisoformat(activity_s), uuid.UUID(id_s)
+    except Exception as e:
+        raise ValueError(f"Invalid cursor: {e}") from e
+
+
+async def list_sessions(
+    session_type: str | None = "chat",
+    limit: int = 50,
+    cursor: str | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Return (sessions, next_cursor), ordered by most recent activity.
+
+    Defaults to chat-type sessions only. Pass session_type=None to return all
+    types. Cursor is keyed on (last_activity DESC, id DESC) so it stays
+    well-defined even when several sessions share a last_activity timestamp —
+    without this, the sidebar/history list grows unbounded between archive
+    runs and gets fully fetched on every open.
     """
     pool = get_pool()
-    if session_type is None:
-        rows = await pool.fetch(
-            "SELECT id, message_count, last_activity, created_at, session_type, title "
-            "FROM sessions ORDER BY last_activity DESC"
-        )
-    else:
-        rows = await pool.fetch(
-            "SELECT id, message_count, last_activity, created_at, session_type, title "
-            "FROM sessions WHERE session_type = $1 ORDER BY last_activity DESC",
-            session_type,
-        )
-    return [
+
+    where = ["session_type = $1"] if session_type is not None else []
+    params: list[Any] = [session_type] if session_type is not None else []
+
+    if cursor:
+        c_activity, c_id = _decode_sessions_cursor(cursor)
+        params.extend([c_activity, c_id])
+        where.append(f"(last_activity, id) < (${len(params) - 1}, ${len(params)})")
+
+    where_clause = f"WHERE {' AND '.join(where)}" if where else ""
+    params.append(limit + 1)  # fetch one extra row to detect a next page
+
+    rows = await pool.fetch(
+        f"""
+        SELECT id, message_count, last_activity, created_at, session_type, title
+        FROM sessions
+        {where_clause}
+        ORDER BY last_activity DESC, id DESC
+        LIMIT ${len(params)}
+        """,
+        *params,
+    )
+
+    next_cursor = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        last = rows[-1]
+        next_cursor = _encode_sessions_cursor(last["last_activity"], last["id"])
+
+    sessions = [
         {
             "session_id": str(r["id"]),
             "message_count": r["message_count"],
@@ -911,3 +953,4 @@ async def list_sessions(session_type: str | None = "chat") -> list[dict[str, Any
         }
         for r in rows
     ]
+    return sessions, next_cursor
