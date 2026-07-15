@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     # Context window
     session_window_size: int = 15  # Recent messages to keep verbatim; older messages are compressed
 
+    # Memory
+    memory_facts_per_type_limit: int = 15  # Max facts per fact_type injected into the prompt
+
     # Agent loop
     agent_max_turns: int = 20  # Maximum tool-call turns per request (AGENT_MAX_TURNS in .env)
     turn_timeout_seconds: int = 300  # Max seconds per LLM call before timing out (TURN_TIMEOUT_SECONDS in .env)
