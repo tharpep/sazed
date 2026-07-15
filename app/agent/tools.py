@@ -2478,6 +2478,36 @@ def _format_gateway_error(status_code: int, text: str) -> str:
     return f"Error {status_code}: {message}"
 
 
+_RETRYABLE_GET_STATUSES = frozenset({502, 503, 504})
+_GATEWAY_RETRY_DELAY_SECONDS = 0.5
+
+
+async def _send_gateway_request(
+    client: httpx.AsyncClient, method: str, url: str, **kwargs: Any
+) -> httpx.Response:
+    """Send one gateway request, retrying once (short backoff) on a transient failure.
+
+    GET is idempotent — retries on a connection-level error/timeout AND on a
+    502/503/504 response. Writes (POST/PATCH/PUT/DELETE) only retry when no
+    response was received at all (connection error/timeout); a response —
+    even a 5xx one — means the gateway processed the request to some point,
+    so retrying it risks double-submitting a side effect.
+    """
+    for attempt in range(2):
+        try:
+            resp = await client.request(method, url, **kwargs)
+        except (httpx.TimeoutException, httpx.RequestError):
+            if attempt == 0:
+                await asyncio.sleep(_GATEWAY_RETRY_DELAY_SECONDS)
+                continue
+            raise
+        if method == "GET" and resp.status_code in _RETRYABLE_GET_STATUSES and attempt == 0:
+            await asyncio.sleep(_GATEWAY_RETRY_DELAY_SECONDS)
+            continue
+        return resp
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
     """Dispatch a tool call and return a ToolResult for the LLM and audit log."""
     t0 = time.perf_counter()
@@ -2537,15 +2567,23 @@ async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
         client = get_client()
         if tool.method == "GET":
             params = {k: v for k, v in remaining.items() if v is not None}
-            resp = await client.get(url, params=params, headers=headers, timeout=30.0)
+            resp = await _send_gateway_request(
+                client, "GET", url, params=params, headers=headers, timeout=30.0
+            )
         elif tool.method == "POST":
-            resp = await client.post(url, json=remaining, headers=headers, timeout=30.0)
+            resp = await _send_gateway_request(
+                client, "POST", url, json=remaining, headers=headers, timeout=30.0
+            )
         elif tool.method == "PATCH":
-            resp = await client.patch(url, json=remaining, headers=headers, timeout=30.0)
+            resp = await _send_gateway_request(
+                client, "PATCH", url, json=remaining, headers=headers, timeout=30.0
+            )
         elif tool.method == "PUT":
-            resp = await client.put(url, json=remaining, headers=headers, timeout=30.0)
+            resp = await _send_gateway_request(
+                client, "PUT", url, json=remaining, headers=headers, timeout=30.0
+            )
         elif tool.method == "DELETE":
-            resp = await client.delete(url, headers=headers, timeout=30.0)
+            resp = await _send_gateway_request(client, "DELETE", url, headers=headers, timeout=30.0)
             if resp.status_code == 204:
                 return _ok("Deleted successfully.")
         else:
