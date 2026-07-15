@@ -50,7 +50,10 @@ async def _classify_affirmative(msg: str, session_id: uuid.UUID | None = None) -
             schedule_llm_log(session_id, None, settings.haiku_model, "confirm", resp)
         return resp.content[0].text.strip().upper().startswith("YES")
     except Exception:
-        logger.warning("_classify_affirmative: Haiku call failed, defaulting to non-affirmative")
+        logger.warning(
+            "_classify_affirmative: Haiku call failed, defaulting to non-affirmative",
+            exc_info=True,
+        )
         return False
 
 
@@ -130,8 +133,8 @@ async def _generate_session_title(pool, sid: uuid.UUID, user_message: str) -> No
             schedule_llm_log(sid, None, settings.haiku_model, "title", resp)
         title = resp.content[0].text.strip()[:100]
         await pool.execute("UPDATE sessions SET title = $1 WHERE id = $2", title, sid)
-    except Exception as e:
-        logger.warning(f"Failed to generate session title for {sid}: {e}")
+    except Exception:
+        logger.warning(f"Failed to generate session title for {sid}", exc_info=True)
 
 
 def _select_model(

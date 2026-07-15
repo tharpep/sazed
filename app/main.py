@@ -3,8 +3,11 @@
 import logging
 from contextlib import asynccontextmanager
 
+import sentry_sdk
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.logging import LoggingIntegration
 
 from app.config import settings
 from app.db import close_pool, init_pool
@@ -36,9 +39,28 @@ def _configure_logging() -> None:
         logger.debug("DEBUG logging enabled — full agent flow output active")
 
 
+def _configure_sentry() -> None:
+    """No-op unless SENTRY_DSN is set — nothing to configure until a Sentry
+    project exists. logger.error/exception calls are captured automatically
+    via the logging integration once it is."""
+    if not settings.sentry_dsn:
+        return
+    sentry_sdk.init(
+        dsn=settings.sentry_dsn,
+        integrations=[
+            FastApiIntegration(),
+            LoggingIntegration(level=logging.INFO, event_level=logging.ERROR),
+        ],
+        traces_sample_rate=settings.sentry_traces_sample_rate,
+        send_default_pii=False,
+    )
+    logger.info("Sentry error tracking enabled")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _configure_logging()
+    _configure_sentry()
     await init_pool()
     await http_client_startup()
     yield

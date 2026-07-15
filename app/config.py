@@ -89,6 +89,11 @@ class Settings(BaseSettings):
     # Observability — LLM cost/token tracking
     llm_cost_tracking: bool = True
 
+    # Observability — error tracking (Sentry). Empty DSN = fully disabled, no-op;
+    # nothing to configure unless/until a Sentry project exists.
+    sentry_dsn: str = ""
+    sentry_traces_sample_rate: float = 0.1
+
     # Reflection loop
     reflection_enabled: bool = True
     max_lessons_per_session: int = 2

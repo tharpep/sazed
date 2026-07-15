@@ -3,6 +3,7 @@
 import asyncio
 import ipaddress
 import json
+import logging
 import re
 import socket
 import time
@@ -16,6 +17,8 @@ import httpx
 from app.agent.memory import upsert_fact
 from app.config import settings
 from app.http_client import get_client
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -2539,6 +2542,7 @@ async def _execute_internal(name: str, args: dict[str, Any], t0: float) -> ToolR
             content = f"Remembered: [{fact['fact_type']}] {fact['key']} = {fact['value']}"
             return ToolResult(content=content, status="success", error=None, duration_ms=_ms())
         except Exception as e:
+            logger.exception("memory_update failed")
             msg = f"Memory update failed: {e}"
             return ToolResult(content=msg, status="error", error=msg, duration_ms=_ms())
 

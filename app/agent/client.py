@@ -65,8 +65,8 @@ async def log_llm_call(
             getattr(usage, "cache_creation_input_tokens", None),
             duration_ms,
         )
-    except Exception as e:
-        logger.warning(f"log_llm_call failed (purpose={purpose}, model={model}): {e}")
+    except Exception:
+        logger.warning(f"log_llm_call failed (purpose={purpose}, model={model})", exc_info=True)
 
 
 # asyncio only holds a weak reference to a task — with nothing else referencing it,
