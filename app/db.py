@@ -28,6 +28,13 @@ ALTER TABLE sessions ADD COLUMN IF NOT EXISTS summarized_through INT DEFAULT 0;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS session_type TEXT DEFAULT 'chat';
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title TEXT;
 
+-- Serves list_sessions() (WHERE session_type = $1 ORDER BY last_activity DESC,
+-- called on every conversation-history open) and the archival job's
+-- WHERE last_activity < ... AND session_type = 'chat'. Previously sessions
+-- had no index beyond its primary key, so both were full-table scans.
+CREATE INDEX IF NOT EXISTS sessions_type_last_activity_idx
+    ON sessions (session_type, last_activity DESC);
+
 CREATE TABLE IF NOT EXISTS messages (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
