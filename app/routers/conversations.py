@@ -26,9 +26,19 @@ async def list_conversations(
         default="chat",
         description="Filter by session_type. Pass 'all' to return every type.",
     ),
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: str | None = Query(
+        default=None, description="Opaque cursor from a previous response's next_cursor."
+    ),
 ):
     session_type = None if type == "all" else type
-    return {"conversations": await list_sessions(session_type=session_type)}
+    try:
+        sessions, next_cursor = await list_sessions(
+            session_type=session_type, limit=limit, cursor=cursor
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"conversations": sessions, "next_cursor": next_cursor}
 
 
 @router.get("/{session_id}")
