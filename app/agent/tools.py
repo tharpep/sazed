@@ -2425,6 +2425,34 @@ async def _check_ssrf(url: str) -> str | None:
     return None
 
 
+_MAX_GATEWAY_ERROR_LEN = 500
+
+
+def _format_gateway_error(status_code: int, text: str) -> str:
+    """Build a concise error message from a gateway response body.
+
+    Gateway errors are normally FastAPI HTTPException JSON ({"detail": ...}),
+    but an HTML error page, a stack trace, or an oversized validation error is
+    also possible — forwarding that raw and unbounded into the LLM's tool
+    result wastes tokens and buries the actually-useful part under noise.
+    """
+    detail: str | None = None
+    try:
+        body = json.loads(text)
+        if isinstance(body, dict):
+            for field in ("detail", "message", "error"):
+                if isinstance(body.get(field), str):
+                    detail = body[field]
+                    break
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    message = detail if detail is not None else text
+    if len(message) > _MAX_GATEWAY_ERROR_LEN:
+        message = message[:_MAX_GATEWAY_ERROR_LEN] + "…"
+    return f"Error {status_code}: {message}"
+
+
 async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
     """Dispatch a tool call and return a ToolResult for the LLM and audit log."""
     t0 = time.perf_counter()
@@ -2503,7 +2531,7 @@ async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
         return _err(f"Request error: {e}")
 
     if not resp.is_success:
-        return _err(f"Error {resp.status_code}: {resp.text}")
+        return _err(_format_gateway_error(resp.status_code, resp.text))
 
     try:
         result = _ok(json.dumps(resp.json()))
