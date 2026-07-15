@@ -2294,13 +2294,12 @@ _CO_SELECT: dict[str, frozenset[str]] = {
 }
 
 
-def select_tools(user_message: str) -> list[dict]:
-    """Return tool schemas for categories matching the user message.
+def select_categories(user_message: str) -> list[str]:
+    """Return the category keys a user message matches (sticky + co-select applied).
 
-    Falls back to _DEFAULT_CATEGORIES if no patterns match.
-    Co-selection rules in _CO_SELECT are applied after initial matching.
-    memory_update is always included regardless.
-    Preserves original TOOLS ordering. cache_control applied to last schema.
+    Falls back to _DEFAULT_CATEGORIES if no patterns match. Shared by select_tools
+    (initial per-session selection) and _setup_turn's session-tool growth path
+    (expand_tools) so both use identical matching logic.
     """
     matched = {cat for cat, pat in _CATEGORY_PATTERNS.items() if pat.search(user_message)}
     categories = matched if matched else _DEFAULT_CATEGORIES
@@ -2310,8 +2309,17 @@ def select_tools(user_message: str) -> list[dict]:
     for cat in list(categories):
         categories = categories | _CO_SELECT.get(cat, frozenset())
 
+    return list(categories)
+
+
+def select_tools(user_message: str) -> list[dict]:
+    """Return tool schemas for categories matching the user message.
+
+    memory_update is always included regardless. Preserves original TOOLS
+    ordering. cache_control applied to last schema.
+    """
     selected_names: set[str] = set(_ALWAYS_INCLUDED)
-    for cat in categories:
+    for cat in select_categories(user_message):
         selected_names.update(TOOL_CATEGORIES.get(cat, []))
 
     schemas = [
@@ -2319,6 +2327,23 @@ def select_tools(user_message: str) -> list[dict]:
         for t in TOOLS
         if t.name in selected_names
     ]
+    if schemas:
+        schemas[-1]["cache_control"] = {"type": "ephemeral"}
+    return schemas
+
+
+def tools_from_names(names: list[str]) -> list[dict]:
+    """Rebuild tool schemas in the given order — used to restore a session's
+    previously-persisted tool set so its prefix stays byte-stable across turns
+    (see _setup_turn in loop.py). cache_control applied to last schema.
+    """
+    schemas = []
+    for name in names:
+        td = _tool_index.get(name)
+        if td:
+            schemas.append(
+                {"name": td.name, "description": td.description, "input_schema": td.input_schema}
+            )
     if schemas:
         schemas[-1]["cache_control"] = {"type": "ephemeral"}
     return schemas

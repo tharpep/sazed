@@ -17,7 +17,15 @@ from app.agent.client import get_client, schedule_llm_log, tool_sig
 from app.agent.memory import format_for_prompt, load_memory, load_relevant_memory
 from app.agent.procedures import format_procedures_for_prompt, load_relevant_procedures
 from app.agent.session import compress_context
-from app.agent.tools import execute_tool, expand_tools, get_tool_schemas, is_sensitive, select_tools
+from app.agent.tools import (
+    execute_tool,
+    expand_tools,
+    get_tool_schemas,
+    is_sensitive,
+    select_categories,
+    select_tools,
+    tools_from_names,
+)
 from app.config import settings
 from app.db import get_pool
 
@@ -354,7 +362,26 @@ async def _setup_turn(
     logger.debug(f"session {sid}: user message='{user_message[:120]}'")
 
     system = await _build_system_prompt(mode, user_message, location)
-    tools = select_tools(user_message)
+
+    session_row = await pool.fetchrow("SELECT selected_tools FROM sessions WHERE id = $1", sid)
+    persisted_names: list[str] | None = session_row["selected_tools"] if session_row else None
+
+    if persisted_names:
+        # Reuse the session's previously-persisted tool set and only grow it
+        # (append-only, via expand_tools) so the serialized tools array stays
+        # byte-stable across turns — required for Anthropic's tools->system->
+        # messages prompt cache prefix to actually hit past the first turn.
+        tools = tools_from_names(persisted_names)
+        tools, _ = expand_tools(tools, select_categories(user_message))
+    else:
+        tools = select_tools(user_message)
+
+    new_names = [t["name"] for t in tools]
+    if new_names != (persisted_names or []):
+        await pool.execute(
+            "UPDATE sessions SET selected_tools = $1 WHERE id = $2", new_names, sid
+        )
+
     logger.debug(f"  selected {len(tools)} tools for: '{user_message[:80]}'")
 
     return messages, system, tools
@@ -513,7 +540,13 @@ async def run_turn(
             for block in tool_blocks:
                 if block.name == "request_tools":
                     categories = block.input.get("categories", [])
+                    prev_names = [t["name"] for t in tools]
                     tools, msg = expand_tools(tools, categories)
+                    new_names = [t["name"] for t in tools]
+                    if new_names != prev_names:
+                        await pool.execute(
+                            "UPDATE sessions SET selected_tools = $1 WHERE id = $2", new_names, sid
+                        )
                     expand_results[block.id] = msg
                     logger.debug(f"  turn {turn}: request_tools {categories} → {msg[:80]}")
                 elif block.name == "request_escalation":
@@ -717,7 +750,13 @@ async def run_turn_stream(
             for block in tool_blocks:
                 if block.name == "request_tools":
                     categories = block.input.get("categories", [])
+                    prev_names = [t["name"] for t in tools]
                     tools, msg = expand_tools(tools, categories)
+                    new_names = [t["name"] for t in tools]
+                    if new_names != prev_names:
+                        await pool.execute(
+                            "UPDATE sessions SET selected_tools = $1 WHERE id = $2", new_names, sid
+                        )
                     expand_results[block.id] = msg
                     logger.debug(f"  stream turn {turn}: request_tools {categories} → {msg[:80]}")
                 elif block.name == "request_escalation":
