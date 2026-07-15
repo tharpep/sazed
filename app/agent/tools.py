@@ -2508,6 +2508,25 @@ async def _send_gateway_request(
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+_DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
+_TOOL_TIMEOUT_OVERRIDES: dict[str, float] = {
+    "aggregate_search": 90.0,  # fans out to Reddit/HN/Bluesky/news concurrently
+    "sync_kb": 90.0,  # triggers a full Drive -> KB sync pass
+    "ingest_url": 60.0,  # fetches + parses an external page before ingesting
+    "web_search": 45.0,  # search_depth="advanced" can run long
+}
+
+
+def _tool_timeout(name: str) -> float:
+    """Per-tool HTTP timeout override, falling back to the 30s default.
+
+    A flat timeout for every tool meant slow multi-source calls (search
+    fan-out, KB sync, URL ingest) risked spurious timeouts while fast calls
+    waited the same generous window before failing on a genuinely hung call.
+    """
+    return _TOOL_TIMEOUT_OVERRIDES.get(name, _DEFAULT_TOOL_TIMEOUT_SECONDS)
+
+
 async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
     """Dispatch a tool call and return a ToolResult for the LLM and audit log."""
     t0 = time.perf_counter()
@@ -2563,27 +2582,31 @@ async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
     url = f"{settings.gateway_url}{endpoint}"
     headers = {"X-API-Key": settings.gateway_api_key}
 
+    timeout = _tool_timeout(name)
+
     try:
         client = get_client()
         if tool.method == "GET":
             params = {k: v for k, v in remaining.items() if v is not None}
             resp = await _send_gateway_request(
-                client, "GET", url, params=params, headers=headers, timeout=30.0
+                client, "GET", url, params=params, headers=headers, timeout=timeout
             )
         elif tool.method == "POST":
             resp = await _send_gateway_request(
-                client, "POST", url, json=remaining, headers=headers, timeout=30.0
+                client, "POST", url, json=remaining, headers=headers, timeout=timeout
             )
         elif tool.method == "PATCH":
             resp = await _send_gateway_request(
-                client, "PATCH", url, json=remaining, headers=headers, timeout=30.0
+                client, "PATCH", url, json=remaining, headers=headers, timeout=timeout
             )
         elif tool.method == "PUT":
             resp = await _send_gateway_request(
-                client, "PUT", url, json=remaining, headers=headers, timeout=30.0
+                client, "PUT", url, json=remaining, headers=headers, timeout=timeout
             )
         elif tool.method == "DELETE":
-            resp = await _send_gateway_request(client, "DELETE", url, headers=headers, timeout=30.0)
+            resp = await _send_gateway_request(
+                client, "DELETE", url, headers=headers, timeout=timeout
+            )
             if resp.status_code == 204:
                 return _ok("Deleted successfully.")
         else:
