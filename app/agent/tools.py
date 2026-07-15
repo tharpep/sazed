@@ -413,6 +413,46 @@ TOOLS: list[ToolDef] = [
         method="POST",
         endpoint="/email/draft",
     ),
+    ToolDef(
+        name="send_email",
+        description="Send an email immediately — actually delivers it, unlike draft_email.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "to": {"type": "string", "description": "Recipient email address."},
+                "subject": {"type": "string", "description": "Email subject."},
+                "body": {"type": "string", "description": "Email body text."},
+                "cc": {"type": "string", "description": "CC email address."},
+            },
+            "required": ["to", "subject", "body"],
+        },
+        method="POST",
+        endpoint="/email/send",
+    ),
+    ToolDef(
+        name="reply_to_email",
+        description=(
+            "Reply to an existing email by message_id, keeping it in the same Gmail thread. "
+            "Replies to the original sender; set reply_all to also CC everyone the original "
+            "was CC'd to. Actually sends — get the message_id from list_emails/search_emails/"
+            "get_email first."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string", "description": "The original email's message ID."},
+                "body": {"type": "string", "description": "Reply body text."},
+                "reply_all": {
+                    "type": "boolean",
+                    "description": "Also CC everyone the original was CC'd to. Defaults to false.",
+                },
+            },
+            "required": ["message_id", "body"],
+        },
+        method="POST",
+        endpoint="/email/reply/{message_id}",
+        path_params=["message_id"],
+    ),
 
     # -------------------------------------------------------------------------
     # Notifications
@@ -2154,7 +2194,8 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
                  "delete_event", "search_events"],
     "tasks":    ["get_task_lists", "get_tasks", "create_task_list", "rename_task_list",
                  "create_task", "update_task", "delete_task"],
-    "email":    ["list_emails", "search_emails", "get_email", "draft_email"],
+    "email":    ["list_emails", "search_emails", "get_email", "draft_email",
+                 "send_email", "reply_to_email"],
     "notify":   ["send_notification"],
     "kb":       ["search_knowledge_base", "get_kb_index", "read_kb_source", "list_kb_sources",
                  "delete_kb_source", "sync_kb", "ingest_text", "ingest_url"],
@@ -2564,8 +2605,11 @@ async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
         if ssrf_err:
             return _err(ssrf_err)
 
-    # Layer C: email egress allowlist
-    if name == "draft_email" and settings.email_recipient_allowlist:
+    # Layer C: email egress allowlist. reply_to_email isn't covered here —
+    # its recipient is resolved server-side from the original message's
+    # sender, not passed as an argument — so it relies on the sensitive-tool
+    # confirmation gate (Layer A) instead.
+    if name in ("draft_email", "send_email") and settings.email_recipient_allowlist:
         to = args.get("to", "")
         if not _in_allowlist(to, settings.email_recipient_allowlist):
             return _err("Recipient not in allowlist — blocked for safety.")
