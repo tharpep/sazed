@@ -1,8 +1,10 @@
 """Tool registry — Anthropic tool schemas and executor for all gateway endpoints."""
 
+import asyncio
 import ipaddress
 import json
 import re
+import socket
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -2372,8 +2374,22 @@ def _in_allowlist(to: str, allowlist: list[str]) -> bool:
 _SSRF_BLOCKED_HOSTS = {"localhost", "metadata.google.internal"}
 
 
-def _check_ssrf(url: str) -> str | None:
-    """Return an error string if the URL targets an internal/private resource, else None."""
+def _is_blocked_ip(host: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any([addr.is_private, addr.is_loopback, addr.is_link_local, addr.is_reserved])
+
+
+async def _check_ssrf(url: str) -> str | None:
+    """Return an error string if the URL targets an internal/private resource, else None.
+
+    Checking the literal hostname alone doesn't catch DNS rebinding — a
+    domain name (which the LLM can be steered toward via untrusted fetched
+    content) that resolves to an internal/private IP at request time. Resolve
+    the hostname and check every returned address, not just literal-IP URLs.
+    """
     try:
         parsed = urlparse(url)
     except Exception:
@@ -2387,12 +2403,21 @@ def _check_ssrf(url: str) -> str | None:
     if host in _SSRF_BLOCKED_HOSTS:
         return f"Blocked: '{host}' is not an allowed host."
 
+    if _is_blocked_ip(host):
+        return "Blocked: private and internal IP addresses are not allowed."
+
     try:
-        addr = ipaddress.ip_address(host)
-        if any([addr.is_private, addr.is_loopback, addr.is_link_local, addr.is_reserved]):
-            return "Blocked: private and internal IP addresses are not allowed."
-    except ValueError:
-        pass  # Hostname, not a literal IP — allowed
+        infos = await asyncio.to_thread(socket.getaddrinfo, host, None)
+    except socket.gaierror:
+        # DNS resolution failed — let it proceed. This guard only rejects
+        # reachable internal targets; an unresolvable host will fail the
+        # same way at request time regardless.
+        return None
+
+    for info in infos:
+        resolved_ip = info[4][0]
+        if _is_blocked_ip(resolved_ip):
+            return "Blocked: host resolves to a private or internal IP address."
 
     return None
 
@@ -2430,7 +2455,7 @@ async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
 
     # SSRF guard — validate any URL argument before forwarding to the gateway
     if "url" in args:
-        ssrf_err = _check_ssrf(str(args["url"]))
+        ssrf_err = await _check_ssrf(str(args["url"]))
         if ssrf_err:
             return _err(ssrf_err)
 
