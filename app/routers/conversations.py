@@ -156,7 +156,7 @@ async def archive_sessions(
         except Exception as e:
             kb_failed += 1
             kb_errors.append(f"{sid}: {e}")
-            logger.error(f"process_session failed for archived session {sid}: {e}")
+            logger.exception(f"process_session failed for archived session {sid}")
 
     response: dict = {
         "sessions_archived": len(session_ids),

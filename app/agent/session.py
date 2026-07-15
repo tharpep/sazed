@@ -479,7 +479,7 @@ async def process_session(
             kb_ok, kb_error = await _ingest_session_to_kb(kb_summary, session_dt)
         except Exception as e:
             kb_error = str(e)
-            logger.error(f"KB ingestion failed for session {session_id}: {e}")
+            logger.exception(f"KB ingestion failed for session {session_id}")
 
     return {
         "session_id": session_id,
