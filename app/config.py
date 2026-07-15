@@ -88,7 +88,6 @@ class Settings(BaseSettings):
 
     # Observability — LLM cost/token tracking
     llm_cost_tracking: bool = True
-    eval_enabled: bool = False
 
     # Reflection loop
     reflection_enabled: bool = True
