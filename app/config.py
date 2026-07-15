@@ -70,7 +70,8 @@ class Settings(BaseSettings):
     # Security: prompt-injection hardening
     confirmation_required: bool = True
     sensitive_tools: list[str] = [
-        "draft_email", "delete_event", "delete_task", "delete_file",
+        "draft_email", "send_email", "reply_to_email",
+        "delete_event", "delete_task", "delete_file",
         "delete_kb_source", "delete_journal_entry", "delete_subscription",
         "delete_income", "delete_budget",
     ]

@@ -34,7 +34,7 @@ No test suite yet.
 **Tool categories and gateway paths:**
 - Calendar: `get_events`, `check_availability`, `create_event`, `update_event`, `delete_event`, `search_events` → `/calendar/*`
 - Tasks: `get_task_lists`, `get_tasks`, `create_task_list`, `rename_task_list`, `create_task`, `update_task`, `delete_task` → `/tasks/*`
-- Email: `list_emails`, `search_emails`, `get_email`, `draft_email` → `/email/*`
+- Email: `list_emails`, `search_emails`, `get_email`, `draft_email`, `send_email`, `reply_to_email` → `/email/*`
 - Notifications: `send_notification` → `/notify`
 - Knowledge Base: `search_knowledge_base`, `get_kb_index`, `read_kb_source`, `list_kb_sources`, `delete_kb_source`, `sync_kb`, `ingest_text`, `ingest_url` → `/kb/*`
 - Web Search: `web_search`, `fetch_url` → `/search/web*`
