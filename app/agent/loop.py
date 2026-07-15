@@ -409,6 +409,73 @@ async def _execute_regular_tools(
     return results, stuck_msg
 
 
+async def _execute_regular_tools_streaming(
+    pool,
+    sid: uuid.UUID,
+    regular_blocks: list,
+    tool_call_counts: Counter,
+    turn: int,
+) -> AsyncIterator[tuple[Any, Any, str | None]]:
+    """Like _execute_regular_tools, but yields (block, tool_result, stuck_msg) as each
+    call resolves instead of only after the whole batch completes.
+
+    _execute_regular_tools runs tool calls concurrently but only reports results
+    after asyncio.gather returns everything — so with 2+ tools in flight, a
+    streaming caller's tool_done events all fire together, only once the slowest
+    call finishes, even though a sub-second call may have resolved much earlier.
+    This yields each result the moment its own call resolves.
+
+    stuck_msg is None on every item except the one that triggers stuck-loop
+    detection, after which iteration stops — any still-in-flight calls are
+    drained (awaited, not logged/yielded), matching _execute_regular_tools'
+    existing truncation behavior for calls after the stuck point.
+    """
+    if not regular_blocks:
+        return
+
+    tasks = {asyncio.create_task(execute_tool(b.name, b.input)): b for b in regular_blocks}
+    pending = set(tasks)
+    stuck = False
+
+    while pending:
+        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            if stuck:
+                continue
+            block = tasks[task]
+            tool_result = task.result()
+
+            sig = tool_sig(block.name, block.input)
+            tool_call_counts[sig] += 1
+            if tool_call_counts[sig] >= 3:
+                logger.warning(f"  stuck loop detected: {block.name} called 3x with same args")
+                stuck_msg = (
+                    f"I seem to be stuck — I've called `{block.name}` three times with the "
+                    f"same arguments without making progress. Please try rephrasing your "
+                    f"request or providing more specific details."
+                )
+                yield block, tool_result, stuck_msg
+                stuck = True
+                continue
+
+            logger.debug(
+                f"  turn {turn}: {block.name} {tool_result.status} in "
+                f"{tool_result.duration_ms}ms, {len(tool_result.content)} chars"
+            )
+            await pool.execute(
+                """INSERT INTO action_logs
+                       (session_id, tool_name, input, output, status, error_message, duration_ms)
+                   VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7)""",
+                sid, block.name, json.dumps(block.input), tool_result.content,
+                tool_result.status, tool_result.error, tool_result.duration_ms,
+            )
+            yield block, tool_result, None
+
+        if stuck and pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+            pending = set()
+
+
 async def _finalize_turn(pool, sid: uuid.UUID) -> None:
     """Update session last_activity and message_count."""
     await pool.execute(
@@ -658,7 +725,6 @@ async def run_turn_stream(
 
     client = get_client()
     tool_call_counts: Counter = Counter()
-    stuck = False
     force_sonnet = False
     tools_used: list[str] = []
     user_message_long = len(user_message) >= settings.sonnet_message_len_threshold
@@ -758,16 +824,14 @@ async def run_turn_stream(
                     "content": _CONFIRMATION_PROMPT,
                 })
 
-            results, stuck_msg = await _execute_regular_tools(
+            tool_result_by_id: dict[str, dict[str, Any]] = {}
+            stuck_msg = None
+            async for block, tool_result, maybe_stuck_msg in _execute_regular_tools_streaming(
                 pool, sid, regular_blocks, tool_call_counts, turn
-            )
-            if stuck_msg:
-                await _save_message(pool, sid, "assistant", [{"type": "text", "text": stuck_msg}])
-                yield f"event: text_delta\ndata: {json.dumps({'text': stuck_msg})}\n\n"
-                stuck = True
-                break
-
-            for block, tool_result in results:
+            ):
+                if maybe_stuck_msg:
+                    stuck_msg = maybe_stuck_msg
+                    break
                 yield f"event: tool_done\ndata: {json.dumps({'name': block.name, 'status': tool_result.status, 'error': tool_result.error})}\n\n"
                 tr: dict[str, Any] = {
                     "type": "tool_result",
@@ -776,10 +840,18 @@ async def run_turn_stream(
                 }
                 if tool_result.status == "error":
                     tr["is_error"] = True
-                tool_results.append(tr)
+                tool_result_by_id[block.id] = tr
 
-            if stuck:
+            if stuck_msg:
+                await _save_message(pool, sid, "assistant", [{"type": "text", "text": stuck_msg}])
+                yield f"event: text_delta\ndata: {json.dumps({'text': stuck_msg})}\n\n"
                 break
+
+            # tool_done events above stream in actual completion order; the message
+            # sent back to the model preserves the original tool_use block order.
+            tool_results.extend(
+                tool_result_by_id[b.id] for b in regular_blocks if b.id in tool_result_by_id
+            )
 
             messages.append({"role": "user", "content": tool_results})
             await _save_message(pool, sid, "user", tool_results)
