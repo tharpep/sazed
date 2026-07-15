@@ -64,10 +64,19 @@ class Settings(BaseSettings):
         "draft_email",
         # Drive
         "create_file", "update_file", "delete_file", "create_folder",
+        "append_to_file", "move_file", "copy_file", "copy_file_from_github",
         # Sheets
-        "create_spreadsheet", "write_sheet",
+        "create_spreadsheet", "write_sheet", "append_sheet_rows", "clear_sheet_range",
         # GitHub
-        "create_issue", "update_issue", "create_pr",
+        "create_issue", "update_issue", "create_pr", "add_issue_comment", "add_pr_comment",
+        # Knowledge base — mutates the index the agent itself retrieves from
+        "delete_kb_source", "sync_kb", "ingest_text", "ingest_url",
+        # Finance — precision matters for figures/dates
+        "add_subscription", "update_subscription", "delete_subscription",
+        "set_budget_limit", "delete_budget", "add_income_source", "delete_income",
+        # Journal — precision matters for dates/contributions
+        "create_journal_entry", "update_journal_entry", "delete_journal_entry",
+        "sync_journal_to_kb",
     ]
 
     # Security: prompt-injection hardening
