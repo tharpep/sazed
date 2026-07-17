@@ -736,200 +736,247 @@ async def run_turn_stream(
 
     pool = get_pool()
     sid = uuid.UUID(session_id)
-    await pool.execute(
-        "INSERT INTO sessions (id, session_type) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-        sid, session_type,
-    )
-
-    messages, system, tools = await _setup_turn(pool, sid, user_message, mode, timezone, location)
-
-    yield f"event: session\ndata: {json.dumps({'session_id': session_id})}\n\n"
-
-    # Layer A: resolve any pending confirmation before running the agent loop
-    if interactive and settings.confirmation_required:
-        pending_response = await _handle_pending_actions(pool, sid, user_message)
-        if pending_response is not None:
-            await _save_message(
-                pool, sid, "assistant", [{"type": "text", "text": pending_response}]
-            )
-            await _finalize_turn(pool, sid)
-            yield f"event: text_delta\ndata: {json.dumps({'text': pending_response})}\n\n"
-            yield f"event: done\ndata: {{}}\n\n"
-            return
-
-    client = get_client()
-    tool_call_counts: Counter = Counter()
-    force_sonnet = False
-    tools_used: list[str] = []
-    user_message_long = len(user_message) >= settings.sonnet_message_len_threshold
-
-    for turn in range(settings.agent_max_turns):
-        if request is not None and await request.is_disconnected():
-            logger.info(f"session {sid}: client disconnected — stopping before turn {turn}")
-            return
-
-        model, model_reason = _select_model(turn, user_message_long, tools_used, force_sonnet)
-        t0 = time.perf_counter()
-        logger.debug(f"  stream turn {turn}: calling {model} ({model_reason}) with {len(messages)} messages")
-
-        try:
-            async with asyncio.timeout(settings.turn_timeout_seconds):
-                async with client.messages.stream(
-                    model=model,
-                    system=system,
-                    messages=messages,
-                    tools=tools,
-                    max_tokens=4096,
-                ) as stream:
-                    async for text in stream.text_stream:
-                        yield f"event: text_delta\ndata: {json.dumps({'text': text})}\n\n"
-                    response = await stream.get_final_message()
-        except asyncio.TimeoutError:
-            logger.warning(f"  stream turn {turn}: timed out after {settings.turn_timeout_seconds}s")
-            timeout_msg = "Request timed out — please try again."
-            yield f"event: text_delta\ndata: {json.dumps({'text': timeout_msg})}\n\n"
-            await _finalize_turn(pool, sid)
-            yield f"event: done\ndata: {{}}\n\n"
-            return
-
-        duration_ms = int((time.perf_counter() - t0) * 1000)
-        if settings.llm_cost_tracking:
-            schedule_llm_log(sid, turn, model, "chat", response, duration_ms)
-        logger.debug(
-            f"  stream turn {turn}: stop_reason={response.stop_reason} "
-            f"in {time.perf_counter() - t0:.3f}s"
+    try:
+        await pool.execute(
+            "INSERT INTO sessions (id, session_type) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            sid, session_type,
         )
 
-        content_dicts = _content_to_dicts(response.content)
-        messages.append({"role": "assistant", "content": content_dicts})
-        await _save_message(pool, sid, "assistant", content_dicts)
+        messages, system, tools = await _setup_turn(
+            pool, sid, user_message, mode, timezone, location
+        )
 
-        if response.stop_reason == "end_turn":
-            break
+        yield f"event: session\ndata: {json.dumps({'session_id': session_id})}\n\n"
 
-        if response.stop_reason == "tool_use":
-            tool_blocks = [b for b in response.content if b.type == "tool_use"]
-            logger.debug(f"  stream turn {turn}: tool calls → {[b.name for b in tool_blocks]}")
-
-            expand_results: dict[str, str] = {}
-            pending_blocks = []
-            regular_blocks = []
-            for block in tool_blocks:
-                if block.name == "request_tools":
-                    categories = block.input.get("categories", [])
-                    prev_names = [t["name"] for t in tools]
-                    tools, msg = expand_tools(tools, categories)
-                    new_names = [t["name"] for t in tools]
-                    if new_names != prev_names:
-                        await pool.execute(
-                            "UPDATE sessions SET selected_tools = $1 WHERE id = $2", new_names, sid
-                        )
-                    expand_results[block.id] = msg
-                    logger.debug(f"  stream turn {turn}: request_tools {categories} → {msg[:80]}")
-                elif block.name == "request_escalation":
-                    force_sonnet = True
-                    expand_results[block.id] = "Switching to enhanced reasoning mode."
-                    logger.debug(f"  stream turn {turn}: request_escalation → escalating to Sonnet")
-                elif interactive and settings.confirmation_required and is_sensitive(block.name):
-                    pending_blocks.append(block)
-                else:
-                    regular_blocks.append(block)
-
-            tools_used.extend(b.name for b in regular_blocks)
-
-            for block in regular_blocks:
-                yield f"event: tool_start\ndata: {json.dumps({'name': block.name})}\n\n"
-
-            tool_results: list[dict[str, Any]] = [
-                {"type": "tool_result", "tool_use_id": bid, "content": msg}
-                for bid, msg in expand_results.items()
-            ]
-
-            # Layer A: gate sensitive tools — emit awaiting_confirmation events
-            for block in pending_blocks:
-                yield f"event: tool_start\ndata: {json.dumps({'name': block.name})}\n\n"
-                await pool.execute(
-                    "INSERT INTO pending_actions (session_id, tool_name, tool_input)"
-                    " VALUES ($1, $2, $3)",
-                    sid, block.name, json.dumps(block.input),
+        # Layer A: resolve any pending confirmation before running the agent loop
+        if interactive and settings.confirmation_required:
+            pending_response = await _handle_pending_actions(pool, sid, user_message)
+            if pending_response is not None:
+                await _save_message(
+                    pool, sid, "assistant", [{"type": "text", "text": pending_response}]
                 )
-                logger.info(f"  stream turn {turn}: gated '{block.name}' — awaiting confirmation")
-                evt = json.dumps({
-                    "name": block.name, "status": "awaiting_confirmation", "error": None,
-                })
-                yield f"event: tool_done\ndata: {evt}\n\n"
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": _CONFIRMATION_PROMPT,
-                })
+                await _finalize_turn(pool, sid)
+                yield f"event: text_delta\ndata: {json.dumps({'text': pending_response})}\n\n"
+                yield f"event: done\ndata: {{}}\n\n"
+                return
 
-            tool_result_by_id: dict[str, dict[str, Any]] = {}
-            stuck_msg = None
-            async for block, tool_result, maybe_stuck_msg in _execute_regular_tools_streaming(
-                pool, sid, regular_blocks, tool_call_counts, turn
-            ):
-                if maybe_stuck_msg:
-                    stuck_msg = maybe_stuck_msg
-                    break
-                yield f"event: tool_done\ndata: {json.dumps({'name': block.name, 'status': tool_result.status, 'error': tool_result.error})}\n\n"
-                tr: dict[str, Any] = {
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": tool_result.content,
-                }
-                if tool_result.status == "error":
-                    tr["is_error"] = True
-                tool_result_by_id[block.id] = tr
+        client = get_client()
+        tool_call_counts: Counter = Counter()
+        force_sonnet = False
+        tools_used: list[str] = []
+        user_message_long = len(user_message) >= settings.sonnet_message_len_threshold
 
-            if stuck_msg:
-                await _save_message(pool, sid, "assistant", [{"type": "text", "text": stuck_msg}])
-                yield f"event: text_delta\ndata: {json.dumps({'text': stuck_msg})}\n\n"
-                break
+        for turn in range(settings.agent_max_turns):
+            if request is not None and await request.is_disconnected():
+                logger.info(f"session {sid}: client disconnected — stopping before turn {turn}")
+                return
 
-            # tool_done events above stream in actual completion order; the message
-            # sent back to the model preserves the original tool_use block order.
-            tool_results.extend(
-                tool_result_by_id[b.id] for b in regular_blocks if b.id in tool_result_by_id
+            model, model_reason = _select_model(turn, user_message_long, tools_used, force_sonnet)
+            t0 = time.perf_counter()
+            logger.debug(
+                f"  stream turn {turn}: calling {model} ({model_reason}) "
+                f"with {len(messages)} messages"
             )
 
-            messages.append({"role": "user", "content": tool_results})
-            await _save_message(pool, sid, "user", tool_results)
-        else:
-            logger.debug(f"  stream turn {turn}: unexpected stop_reason, bailing")
-            break
+            try:
+                async with asyncio.timeout(settings.turn_timeout_seconds):
+                    async with client.messages.stream(
+                        model=model,
+                        system=system,
+                        messages=messages,
+                        tools=tools,
+                        max_tokens=4096,
+                    ) as stream:
+                        async for text in stream.text_stream:
+                            yield f"event: text_delta\ndata: {json.dumps({'text': text})}\n\n"
+                        response = await stream.get_final_message()
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"  stream turn {turn}: timed out after {settings.turn_timeout_seconds}s"
+                )
+                timeout_msg = "Request timed out — please try again."
+                yield f"event: text_delta\ndata: {json.dumps({'text': timeout_msg})}\n\n"
+                await _finalize_turn(pool, sid)
+                yield f"event: done\ndata: {{}}\n\n"
+                return
 
-    # If the loop exhausted turns mid-tool-use, no text was streamed.
-    # Do one synthesis call (no tools) and stream its output.
-    if messages and messages[-1]["role"] == "user" and isinstance(messages[-1]["content"], list) and any(
-        b.get("type") == "tool_result" for b in messages[-1]["content"]
-    ):
-        logger.debug(f"  stream synthesis: loop ended on tool_use, upgrading to {settings.sonnet_model}")
-        synth_t0 = time.perf_counter()
-        try:
-            async with asyncio.timeout(settings.turn_timeout_seconds):
-                async with client.messages.stream(
-                    model=settings.sonnet_model,
-                    system=system,
-                    messages=messages,
-                    max_tokens=1024,
-                ) as stream:
-                    async for text in stream.text_stream:
-                        yield f"event: text_delta\ndata: {json.dumps({'text': text})}\n\n"
-                    synth = await stream.get_final_message()
-        except asyncio.TimeoutError:
-            logger.warning(f"  stream synthesis: timed out after {settings.turn_timeout_seconds}s")
-            yield f"event: text_delta\ndata: {json.dumps({'text': 'Request timed out during synthesis.'})}\n\n"
-        else:
+            duration_ms = int((time.perf_counter() - t0) * 1000)
             if settings.llm_cost_tracking:
-                synth_ms = int((time.perf_counter() - synth_t0) * 1000)
-                schedule_llm_log(sid, None, settings.sonnet_model, "synthesis", synth, synth_ms)
-            content_dicts = _content_to_dicts(synth.content)
+                schedule_llm_log(sid, turn, model, "chat", response, duration_ms)
+            logger.debug(
+                f"  stream turn {turn}: stop_reason={response.stop_reason} "
+                f"in {time.perf_counter() - t0:.3f}s"
+            )
+
+            content_dicts = _content_to_dicts(response.content)
+            messages.append({"role": "assistant", "content": content_dicts})
             await _save_message(pool, sid, "assistant", content_dicts)
 
-    await _finalize_turn(pool, sid)
-    logger.debug(f"stream session {session_id}: done")
-    yield f"event: done\ndata: {{}}\n\n"
+            if response.stop_reason == "end_turn":
+                break
+
+            if response.stop_reason == "tool_use":
+                tool_blocks = [b for b in response.content if b.type == "tool_use"]
+                logger.debug(f"  stream turn {turn}: tool calls → {[b.name for b in tool_blocks]}")
+
+                expand_results: dict[str, str] = {}
+                pending_blocks = []
+                regular_blocks = []
+                for block in tool_blocks:
+                    if block.name == "request_tools":
+                        categories = block.input.get("categories", [])
+                        prev_names = [t["name"] for t in tools]
+                        tools, msg = expand_tools(tools, categories)
+                        new_names = [t["name"] for t in tools]
+                        if new_names != prev_names:
+                            await pool.execute(
+                                "UPDATE sessions SET selected_tools = $1 WHERE id = $2",
+                                new_names, sid,
+                            )
+                        expand_results[block.id] = msg
+                        logger.debug(
+                            f"  stream turn {turn}: request_tools {categories} → {msg[:80]}"
+                        )
+                    elif block.name == "request_escalation":
+                        force_sonnet = True
+                        expand_results[block.id] = "Switching to enhanced reasoning mode."
+                        logger.debug(
+                            f"  stream turn {turn}: request_escalation → escalating to Sonnet"
+                        )
+                    elif (
+                        interactive
+                        and settings.confirmation_required
+                        and is_sensitive(block.name)
+                    ):
+                        pending_blocks.append(block)
+                    else:
+                        regular_blocks.append(block)
+
+                tools_used.extend(b.name for b in regular_blocks)
+
+                for block in regular_blocks:
+                    yield f"event: tool_start\ndata: {json.dumps({'name': block.name})}\n\n"
+
+                tool_results: list[dict[str, Any]] = [
+                    {"type": "tool_result", "tool_use_id": bid, "content": msg}
+                    for bid, msg in expand_results.items()
+                ]
+
+                # Layer A: gate sensitive tools — emit awaiting_confirmation events
+                for block in pending_blocks:
+                    yield f"event: tool_start\ndata: {json.dumps({'name': block.name})}\n\n"
+                    await pool.execute(
+                        "INSERT INTO pending_actions (session_id, tool_name, tool_input)"
+                        " VALUES ($1, $2, $3)",
+                        sid, block.name, json.dumps(block.input),
+                    )
+                    logger.info(
+                        f"  stream turn {turn}: gated '{block.name}' — awaiting confirmation"
+                    )
+                    evt = json.dumps({
+                        "name": block.name, "status": "awaiting_confirmation", "error": None,
+                    })
+                    yield f"event: tool_done\ndata: {evt}\n\n"
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": _CONFIRMATION_PROMPT,
+                    })
+
+                tool_result_by_id: dict[str, dict[str, Any]] = {}
+                stuck_msg = None
+                async for block, tool_result, maybe_stuck_msg in _execute_regular_tools_streaming(
+                    pool, sid, regular_blocks, tool_call_counts, turn
+                ):
+                    if maybe_stuck_msg:
+                        stuck_msg = maybe_stuck_msg
+                        break
+                    tool_done_evt = {
+                        "name": block.name,
+                        "status": tool_result.status,
+                        "error": tool_result.error,
+                    }
+                    yield f"event: tool_done\ndata: {json.dumps(tool_done_evt)}\n\n"
+                    tr: dict[str, Any] = {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": tool_result.content,
+                    }
+                    if tool_result.status == "error":
+                        tr["is_error"] = True
+                    tool_result_by_id[block.id] = tr
+
+                if stuck_msg:
+                    await _save_message(
+                        pool, sid, "assistant", [{"type": "text", "text": stuck_msg}]
+                    )
+                    yield f"event: text_delta\ndata: {json.dumps({'text': stuck_msg})}\n\n"
+                    break
+
+                # tool_done events above stream in actual completion order; the message
+                # sent back to the model preserves the original tool_use block order.
+                tool_results.extend(
+                    tool_result_by_id[b.id] for b in regular_blocks if b.id in tool_result_by_id
+                )
+
+                messages.append({"role": "user", "content": tool_results})
+                await _save_message(pool, sid, "user", tool_results)
+            else:
+                logger.debug(f"  stream turn {turn}: unexpected stop_reason, bailing")
+                break
+
+        # If the loop exhausted turns mid-tool-use, no text was streamed.
+        # Do one synthesis call (no tools) and stream its output.
+        last_msg = messages[-1] if messages else None
+        last_content = last_msg["content"] if last_msg else None
+        if (
+            last_msg
+            and last_msg["role"] == "user"
+            and isinstance(last_content, list)
+            and any(b.get("type") == "tool_result" for b in last_content)
+        ):
+            logger.debug(
+                f"  stream synthesis: loop ended on tool_use, upgrading to {settings.sonnet_model}"
+            )
+            synth_t0 = time.perf_counter()
+            try:
+                async with asyncio.timeout(settings.turn_timeout_seconds):
+                    async with client.messages.stream(
+                        model=settings.sonnet_model,
+                        system=system,
+                        messages=messages,
+                        max_tokens=1024,
+                    ) as stream:
+                        async for text in stream.text_stream:
+                            yield f"event: text_delta\ndata: {json.dumps({'text': text})}\n\n"
+                        synth = await stream.get_final_message()
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"  stream synthesis: timed out after {settings.turn_timeout_seconds}s"
+                )
+                timeout_text = json.dumps({"text": "Request timed out during synthesis."})
+                yield f"event: text_delta\ndata: {timeout_text}\n\n"
+            else:
+                if settings.llm_cost_tracking:
+                    synth_ms = int((time.perf_counter() - synth_t0) * 1000)
+                    schedule_llm_log(sid, None, settings.sonnet_model, "synthesis", synth, synth_ms)
+                content_dicts = _content_to_dicts(synth.content)
+                await _save_message(pool, sid, "assistant", content_dicts)
+
+        await _finalize_turn(pool, sid)
+        logger.debug(f"stream session {session_id}: done")
+        yield f"event: done\ndata: {{}}\n\n"
+    except Exception:
+        logger.exception(f"stream session {session_id}: unhandled error")
+        try:
+            await _finalize_turn(pool, sid)
+        except Exception:
+            logger.exception(f"stream session {session_id}: finalize-on-error also failed")
+        yield (
+            "event: error\ndata: "
+            + json.dumps({"message": "Something went wrong — please try again."})
+            + "\n\n"
+        )
 
 
 async def truncate_session_from_user_message(session_id: str, message_index: int) -> None:
