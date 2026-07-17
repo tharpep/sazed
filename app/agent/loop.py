@@ -966,15 +966,20 @@ async def run_turn_stream(
         await _finalize_turn(pool, sid)
         logger.debug(f"stream session {session_id}: done")
         yield f"event: done\ndata: {{}}\n\n"
-    except Exception:
+    except Exception as e:
         logger.exception(f"stream session {session_id}: unhandled error")
         try:
             await _finalize_turn(pool, sid)
         except Exception:
             logger.exception(f"stream session {session_id}: finalize-on-error also failed")
+        # No Sentry DSN configured and no external log access for this deployment —
+        # surfacing the real exception type/message directly to the client is the
+        # only diagnostic trail available. Single-user personal app, so no
+        # multi-tenant exposure concern; capped to keep the chat bubble readable.
+        detail = f"{type(e).__name__}: {e}"[:300]
         yield (
             "event: error\ndata: "
-            + json.dumps({"message": "Something went wrong — please try again."})
+            + json.dumps({"message": f"Something went wrong — please try again. ({detail})"})
             + "\n\n"
         )
 
