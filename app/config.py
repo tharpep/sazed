@@ -18,8 +18,8 @@ class Settings(BaseSettings):
 
     # Anthropic
     anthropic_api_key: str = ""
-    haiku_model: str = "claude-haiku-4-5-20251001"
-    sonnet_model: str = "claude-sonnet-4-6"
+    haiku_model: str = "claude-haiku-4-5-20251001"  # Haiku 4.5 — already latest
+    sonnet_model: str = "claude-sonnet-5"
 
     # Postgres (Cloud SQL or local)
     database_url: str = ""
