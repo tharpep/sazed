@@ -12,6 +12,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Any, AsyncIterator
 
+import asyncpg
 from fastapi import Request
 
 from app.agent.client import get_client, schedule_llm_log, tool_sig
@@ -363,29 +364,54 @@ async def _setup_turn(
     logger.debug(f"session {sid}: user message='{user_message[:120]}'")
 
     system = await _build_system_prompt(mode, user_message, location)
-
-    session_row = await pool.fetchrow("SELECT selected_tools FROM sessions WHERE id = $1", sid)
-    persisted_names: list[str] | None = session_row["selected_tools"] if session_row else None
-
-    if persisted_names:
-        # Reuse the session's previously-persisted tool set and only grow it
-        # (append-only, via expand_tools) so the serialized tools array stays
-        # byte-stable across turns — required for Anthropic's tools->system->
-        # messages prompt cache prefix to actually hit past the first turn.
-        tools = tools_from_names(persisted_names)
-        tools, _ = expand_tools(tools, select_categories(user_message))
-    else:
-        tools = select_tools(user_message)
-
-    new_names = [t["name"] for t in tools]
-    if new_names != (persisted_names or []):
-        await pool.execute(
-            "UPDATE sessions SET selected_tools = $1 WHERE id = $2", new_names, sid
-        )
+    tools = await _select_tools_resilient(pool, sid, user_message)
 
     logger.debug(f"  selected {len(tools)} tools for: '{user_message[:80]}'")
 
     return messages, system, tools
+
+
+async def _select_tools_resilient(pool, sid: uuid.UUID, user_message: str) -> list[dict]:
+    """Tool selection with cache-stability persistence (see select_tools/expand_tools),
+    degrading to a plain per-message select_tools() if the persistence layer itself
+    fails for any reason (e.g. a schema drift like a missing/misapplied column).
+
+    This is a pure performance optimization (keeps the prompt cache prefix stable
+    across turns) — it must never be able to take down the chat turn it's supposed
+    to be speeding up. A prior incident hit exactly this: a production database
+    missing the sessions.selected_tools column crashed every single chat message
+    with UndefinedColumnError, because this query wasn't guarded.
+    """
+    try:
+        session_row = await pool.fetchrow(
+            "SELECT selected_tools FROM sessions WHERE id = $1", sid
+        )
+        persisted_names: list[str] | None = (
+            session_row["selected_tools"] if session_row else None
+        )
+
+        if persisted_names:
+            # Reuse the session's previously-persisted tool set and only grow it
+            # (append-only, via expand_tools) so the serialized tools array stays
+            # byte-stable across turns — required for Anthropic's tools->system->
+            # messages prompt cache prefix to actually hit past the first turn.
+            tools = tools_from_names(persisted_names)
+            tools, _ = expand_tools(tools, select_categories(user_message))
+        else:
+            tools = select_tools(user_message)
+
+        new_names = [t["name"] for t in tools]
+        if new_names != (persisted_names or []):
+            await pool.execute(
+                "UPDATE sessions SET selected_tools = $1 WHERE id = $2", new_names, sid
+            )
+        return tools
+    except asyncpg.PostgresError:
+        logger.exception(
+            f"session {sid}: tool-selection persistence failed — "
+            "falling back to a fresh per-message selection this turn"
+        )
+        return select_tools(user_message)
 
 
 async def _execute_regular_tools(
