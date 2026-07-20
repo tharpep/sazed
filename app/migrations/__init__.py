@@ -28,6 +28,16 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 
 _FILENAME_RE = re.compile(r"^(\d{3})_([\w_]+)\.sql$")
 
+# Arbitrary fixed key for a session-level advisory lock scoped to migrations —
+# serializes concurrent run_migrations() calls (e.g. two deploys landing close
+# together, or Cloud Run starting multiple instances at once) so a later
+# instance waits for an earlier one to finish instead of racing it. Without
+# this, two instances could both see the same migration as "pending" and one's
+# INSERT INTO schema_migrations would hit a duplicate-key error mid-transaction
+# and crash startup for no real reason — the schema change itself is idempotent,
+# only the bookkeeping row is not.
+_MIGRATION_LOCK_KEY = 472819335
+
 
 def _discover() -> list[tuple[int, str, Path]]:
     out: list[tuple[int, str, Path]] = []
@@ -48,25 +58,30 @@ async def run_migrations(dsn: str) -> None:
     """
     conn = await asyncpg.connect(dsn)
     try:
-        await conn.execute(_BOOTSTRAP_SQL)
-        applied: set[int] = {
-            r["version"]
-            for r in await conn.fetch("SELECT version FROM schema_migrations")
-        }
-        pending = [m for m in _discover() if m[0] not in applied]
-        if not pending:
-            logger.info("Migrations up to date (%d applied)", len(applied))
-            return
-        for version, name, path in pending:
-            sql = path.read_text()
-            logger.info("Applying migration %03d: %s", version, name)
-            async with conn.transaction():
-                await conn.execute(sql)
-                await conn.execute(
-                    "INSERT INTO schema_migrations (version, name) VALUES ($1, $2)",
-                    version,
-                    name,
-                )
-        logger.info("Migrations complete (%d applied)", len(applied) + len(pending))
+        await conn.execute("SELECT pg_advisory_lock($1)", _MIGRATION_LOCK_KEY)
+        try:
+            await conn.execute(_BOOTSTRAP_SQL)
+            applied: set[int] = {
+                r["version"]
+                for r in await conn.fetch("SELECT version FROM schema_migrations")
+            }
+            pending = [m for m in _discover() if m[0] not in applied]
+            if not pending:
+                logger.info("Migrations up to date (%d applied)", len(applied))
+                return
+            for version, name, path in pending:
+                sql = path.read_text()
+                logger.info("Applying migration %03d: %s", version, name)
+                async with conn.transaction():
+                    await conn.execute(sql)
+                    await conn.execute(
+                        "INSERT INTO schema_migrations (version, name) VALUES ($1, $2) "
+                        "ON CONFLICT (version) DO NOTHING",
+                        version,
+                        name,
+                    )
+            logger.info("Migrations complete (%d applied)", len(applied) + len(pending))
+        finally:
+            await conn.execute("SELECT pg_advisory_unlock($1)", _MIGRATION_LOCK_KEY)
     finally:
         await conn.close()

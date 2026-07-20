@@ -24,6 +24,17 @@ env:
   SERVICE: sazed
   REPOSITORY: sazed
 
+# Runs to completion one at a time, in the order they were queued — never
+# cancels an in-progress deploy. Several merges landing within minutes of each
+# other previously let their deploys' startup migrations race: two containers
+# starting around the same time could both see the same migration as pending
+# and collide inserting the same schema_migrations row (the migration runner
+# now also tolerates this via an advisory lock, but serializing the deploys
+# themselves avoids the wasted concurrent work in the first place).
+concurrency:
+  group: deploy-sazed
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
