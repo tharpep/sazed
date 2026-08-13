@@ -1,0 +1,22 @@
+name: Deploy to Homelab
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, sazed]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Install dependencies
+        run: |
+          source $HOME/.local/bin/env
+          poetry env use 3.11
+          poetry install --no-interaction --no-ansi --only main --no-root
+
+      - name: Restart service
+        run: sudo systemctl restart sazed
