@@ -61,6 +61,8 @@ class ToolDef:
     method: str                     # GET | POST | PATCH | DELETE | INTERNAL
     endpoint: str                   # gateway path, e.g. "/calendar/events/{event_id}"
     path_params: list[str] = field(default_factory=list)
+    # Fixed GET query params. Not in `endpoint`: httpx replaces a URL's query with `params`.
+    query: dict[str, str] = field(default_factory=dict)
 
 
 TOOLS: list[ToolDef] = [
@@ -2097,6 +2099,130 @@ TOOLS: list[ToolDef] = [
         endpoint="/places/{place_id}",
         path_params=["place_id"],
     ),
+    # ── Homelab (Proxmox + service registry, via the gateway) ────────────────
+    ToolDef(
+        name="homelab_status",
+        description=(
+            "Health of everything running in Pryce's homelab: the Sazed system (Sazed, gateway, "
+            "knowledge base, automations, console), apps (Jellyfin, *arr stack, qBittorrent, "
+            "Kavita, Suwayomi, SillyTavern) and infra (Proxmox host, Postgres). Returns an "
+            "up/down summary and, per service, up, detail, since when, container VMID, and "
+            "maintenance/mute state. Checked every 60 seconds. Start here for 'is everything "
+            "up?', 'is Jellyfin down?', or before suggesting a restart."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "group": {
+                    "type": "string",
+                    "enum": ["sazed", "apps", "infra"],
+                    "description": "Only one group. Omit for everything.",
+                },
+            },
+        },
+        method="GET",
+        endpoint="/homelab/services",
+        query={"compact": "true"},
+    ),
+    ToolDef(
+        name="homelab_service",
+        description=(
+            "One homelab service in full: its definition (container, URL, dependencies, repo), "
+            "live health, notes, and recent up/down history (outages). Use the id from "
+            "homelab_status, e.g. 'jellyfin', 'sazed', 'postgres'."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "service_id": {"type": "string", "description": "Service id from homelab_status."},
+            },
+            "required": ["service_id"],
+        },
+        method="GET",
+        endpoint="/homelab/services/{service_id}",
+        path_params=["service_id"],
+    ),
+    ToolDef(
+        name="homelab_host",
+        description=(
+            "Proxmox host usage: CPU, memory, root disk, uptime, and storage pool usage. Use "
+            "for 'how is the server doing?' or when space or memory might be the problem."
+        ),
+        input_schema={"type": "object", "properties": {}},
+        method="GET",
+        endpoint="/homelab/host",
+    ),
+    ToolDef(
+        name="homelab_containers",
+        description=(
+            "Every Proxmox container (VMID, name, running/stopped, CPU %, memory and disk "
+            "use). Use when the question is about resources per container rather than "
+            "whether a service answers."
+        ),
+        input_schema={"type": "object", "properties": {}},
+        method="GET",
+        endpoint="/homelab/containers",
+    ),
+    ToolDef(
+        name="restart_container",
+        description=(
+            "Reboot a running homelab container by VMID (from homelab_status). Every service "
+            "in it goes down for roughly 10-30 seconds. Restarting 106 (Sazed) or 104 (the "
+            "gateway) briefly takes you offline too. Proxmox refuses some containers (108 "
+            "always). Only suggest this after checking homelab_status shows a problem."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "vmid": {"type": "integer", "description": "Container VMID, e.g. 100."},
+            },
+            "required": ["vmid"],
+        },
+        method="POST",
+        endpoint="/homelab/containers/{vmid}/restart",
+        path_params=["vmid"],
+    ),
+    ToolDef(
+        name="start_container",
+        description=(
+            "Start a stopped homelab container by VMID (from homelab_status or "
+            "homelab_containers). Proxmox refuses some containers (108 always)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "vmid": {"type": "integer", "description": "Container VMID, e.g. 100."},
+            },
+            "required": ["vmid"],
+        },
+        method="POST",
+        endpoint="/homelab/containers/{vmid}/start",
+        path_params=["vmid"],
+    ),
+    ToolDef(
+        name="set_service_maintenance",
+        description=(
+            "Put a homelab service in maintenance (its downtime is marked as planned, not an "
+            "outage), end maintenance, mute it, or set a note. Use when Pryce says he's "
+            "working on something, e.g. 'I'm updating Jellyfin for 20 minutes'."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "service_id": {"type": "string", "description": "Service id from homelab_status."},
+                "maintenance_minutes": {
+                    "type": "integer",
+                    "description": "Minutes of maintenance from now; 0 ends maintenance.",
+                },
+                "muted": {"type": "boolean", "description": "Mute (or unmute) this service."},
+                "notes": {"type": "string", "description": "Note shown on the service."},
+            },
+            "required": ["service_id"],
+        },
+        method="PATCH",
+        endpoint="/homelab/services/{service_id}/state",
+        path_params=["service_id"],
+    ),
     # ── Model escalation ─────────────────────────────────────────────────────
     ToolDef(
         name="request_escalation",
@@ -2115,7 +2241,8 @@ TOOLS: list[ToolDef] = [
         description=(
             "Expand your available tools when you need a capability not currently shown. "
             "Call this before telling the user you lack a capability. "
-            "Valid categories: calendar, tasks, email, notify, kb, web, drive, github, sheets, finance, places."
+            "Valid categories: calendar, tasks, email, notify, kb, web, drive, github, sheets, "
+            "finance, places, journal, homelab."
         ),
         input_schema={
             "type": "object",
@@ -2219,6 +2346,8 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
     "journal":  ["list_journal_entries", "get_journal_entry", "create_journal_entry",
                  "update_journal_entry", "delete_journal_entry", "list_journal_subcategories",
                  "get_journal_summary", "export_journal", "sync_journal_to_kb"],
+    "homelab":  ["homelab_status", "homelab_service", "homelab_host", "homelab_containers",
+                 "restart_container", "start_container", "set_service_maintenance"],
 }
 
 # ---------------------------------------------------------------------------
@@ -2325,6 +2454,12 @@ _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
         r'\b(restaurant|cafe|coffee|bar|gym|store|shop|nearby|near me|places?|food|eat|drink'
         r'|hotel|directions?|open.*(now|today)|hours|visit|dine|dining|takeout|delivery'
         r'|find (a |the |me )?(place|spot|restaurant|cafe|bar)|where (can|should) (i|we))\b', re.I),
+    "homelab":  re.compile(
+        r'\b(homelab|home lab|proxmox|server|container|lxc|vmid|uptime|outage'
+        r'|jellyfin|jellyseerr|radarr|sonarr|prowlarr|qbittorrent|torrent|kavita|suwayomi'
+        r'|sillytavern|postgres|gateway|restart|reboot|maintenance'
+        r'|(is|are) (it|everything|anything|things|the \w+) (up|down|running|working|broken)'
+        r'|what.s (down|broken)|services? (down|status|health))\b', re.I),
 }
 
 _ALWAYS_INCLUDED: frozenset[str] = frozenset({"memory_update", "request_tools", "request_escalation"})
@@ -2631,7 +2766,7 @@ async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
     try:
         client = get_client()
         if tool.method == "GET":
-            params = {k: v for k, v in remaining.items() if v is not None}
+            params = {**tool.query, **{k: v for k, v in remaining.items() if v is not None}}
             resp = await _send_gateway_request(
                 client, "GET", url, params=params, headers=headers, timeout=timeout
             )

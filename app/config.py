@@ -87,6 +87,8 @@ class Settings(BaseSettings):
         "delete_event", "delete_task", "delete_file",
         "delete_kb_source", "delete_journal_entry", "delete_subscription",
         "delete_income", "delete_budget",
+        # Homelab power actions: confirmed via pending_actions before Proxmox ever sees them
+        "restart_container", "start_container",
     ]
     untrusted_content_tools: list[str] = [
         "get_email", "list_emails", "search_emails", "read_file", "fetch_url",
