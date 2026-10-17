@@ -15,7 +15,7 @@ from typing import Any, AsyncIterator
 import asyncpg
 from fastapi import Request
 
-from app.agent.client import get_client, schedule_llm_log, tool_sig
+from app.agent.client import get_client, model_params, schedule_llm_log, tool_sig
 from app.agent.memory import format_for_prompt, load_memory, load_relevant_memory
 from app.agent.procedures import format_procedures_for_prompt, load_relevant_procedures
 from app.agent.session import compress_context
@@ -46,6 +46,7 @@ async def _classify_affirmative(msg: str, session_id: uuid.UUID | None = None) -
     try:
         resp = await get_client().messages.create(
             model=settings.haiku_model,
+            **model_params(settings.haiku_model),
             max_tokens=5,
             messages=[{
                 "role": "user",
@@ -129,6 +130,7 @@ async def _generate_session_title(pool, sid: uuid.UUID, user_message: str) -> No
     try:
         resp = await get_client().messages.create(
             model=settings.haiku_model,
+            **model_params(settings.haiku_model),
             max_tokens=20,
             messages=[{
                 "role": "user",
@@ -252,7 +254,11 @@ async def _build_system_prompt(mode: str = "chat", user_message: str = "", locat
 
 
 def _content_to_dicts(content: list) -> list[dict[str, Any]]:
-    """Convert SDK content blocks to plain dicts for the messages array."""
+    """Convert SDK content blocks to plain dicts for the messages array.
+
+    Thinking blocks (Sonnet 5.5) are kept verbatim, signature included: they must be passed
+    back unchanged on the next turn of the same tool loop.
+    """
     result = []
     for block in content:
         if block.type == "text":
@@ -264,7 +270,36 @@ def _content_to_dicts(content: list) -> list[dict[str, Any]]:
                 "name": block.name,
                 "input": block.input,
             })
+        elif block.type in _THINKING_TYPES:
+            result.append(block.model_dump(exclude_none=True))
     return result
+
+
+_THINKING_TYPES = ("thinking", "redacted_thinking")
+
+_REFUSAL_MESSAGE = (
+    "I can't help with that one — the model declined the request. "
+    "Try rephrasing, or ask in a different way."
+)
+
+
+async def _save_assistant(pool, session_id: uuid.UUID, content: list[dict[str, Any]]) -> None:
+    """Persist an assistant turn without its thinking blocks.
+
+    Thinking is only valid inside the request that produced it; later requests rebuild history
+    from storage (and compress or edit it), so replaying old blocks would only get them dropped
+    or rejected. Skips turns left empty, since an empty assistant message breaks the next call.
+    """
+    storable = [b for b in content if b.get("type") not in _THINKING_TYPES]
+    if storable:
+        await _save_message(pool, session_id, "assistant", storable)
+
+
+def _refusal_category(response: Any) -> str:
+    details = getattr(response, "stop_details", None)
+    if isinstance(details, dict):
+        return str(details.get("category"))
+    return str(getattr(details, "category", None))
 
 
 def _extract_text(content: list[dict[str, Any]]) -> str:
@@ -596,10 +631,11 @@ async def run_turn(
             response = await asyncio.wait_for(
                 client.messages.create(
                     model=model,
+                    **model_params(model),
                     system=system,
                     messages=messages,
                     tools=tools,
-                    max_tokens=4096,
+                    max_tokens=16000,  # Sonnet thinks; thinking counts toward max_tokens
                 ),
                 timeout=settings.turn_timeout_seconds,
             )
@@ -616,9 +652,15 @@ async def run_turn(
             f"in {time.perf_counter() - t0:.3f}s"
         )
 
+        if response.stop_reason == "refusal":
+            logger.info(f"  turn {turn}: model declined (category={_refusal_category(response)})")
+            final_content = [{"type": "text", "text": _REFUSAL_MESSAGE}]
+            await _save_assistant(pool, sid, final_content)
+            break
+
         content_dicts = _content_to_dicts(response.content)
         messages.append({"role": "assistant", "content": content_dicts})
-        await _save_message(pool, sid, "assistant", content_dicts)
+        await _save_assistant(pool, sid, content_dicts)
         final_content = content_dicts
 
         if response.stop_reason == "end_turn":
@@ -706,9 +748,10 @@ async def run_turn(
             synth = await asyncio.wait_for(
                 client.messages.create(
                     model=settings.sonnet_model,
+                    **model_params(settings.sonnet_model),
                     system=system,
                     messages=messages,
-                    max_tokens=1024,
+                    max_tokens=16000,  # Sonnet thinks; thinking counts toward max_tokens
                 ),
                 timeout=settings.turn_timeout_seconds,
             )
@@ -720,7 +763,7 @@ async def run_turn(
             synth_ms = int((time.perf_counter() - synth_t0) * 1000)
             schedule_llm_log(sid, None, settings.sonnet_model, "synthesis", synth, synth_ms)
         content_dicts = _content_to_dicts(synth.content)
-        await _save_message(pool, sid, "assistant", content_dicts)
+        await _save_assistant(pool, sid, content_dicts)
         final_content = content_dicts
 
     await _finalize_turn(pool, sid)
@@ -808,10 +851,11 @@ async def run_turn_stream(
                 async with asyncio.timeout(settings.turn_timeout_seconds):
                     async with client.messages.stream(
                         model=model,
+                        **model_params(model),
                         system=system,
                         messages=messages,
                         tools=tools,
-                        max_tokens=4096,
+                        max_tokens=16000,  # Sonnet thinks; thinking counts toward max_tokens
                     ) as stream:
                         async for text in stream.text_stream:
                             yield f"event: text_delta\ndata: {json.dumps({'text': text})}\n\n"
@@ -834,9 +878,22 @@ async def run_turn_stream(
                 f"in {time.perf_counter() - t0:.3f}s"
             )
 
+            if response.stop_reason == "refusal":
+                logger.info(
+                    f"  stream turn {turn}: model declined "
+                    f"(category={_refusal_category(response)})"
+                )
+                refusal_content = [{"type": "text", "text": _REFUSAL_MESSAGE}]
+                # Recorded in `messages` too, so the synthesis check below sees an assistant
+                # turn last and doesn't retry the declined request.
+                messages.append({"role": "assistant", "content": refusal_content})
+                await _save_assistant(pool, sid, refusal_content)
+                yield f"event: text_delta\ndata: {json.dumps({'text': _REFUSAL_MESSAGE})}\n\n"
+                break
+
             content_dicts = _content_to_dicts(response.content)
             messages.append({"role": "assistant", "content": content_dicts})
-            await _save_message(pool, sid, "assistant", content_dicts)
+            await _save_assistant(pool, sid, content_dicts)
 
             if response.stop_reason == "end_turn":
                 break
@@ -969,9 +1026,10 @@ async def run_turn_stream(
                 async with asyncio.timeout(settings.turn_timeout_seconds):
                     async with client.messages.stream(
                         model=settings.sonnet_model,
+                        **model_params(settings.sonnet_model),
                         system=system,
                         messages=messages,
-                        max_tokens=1024,
+                        max_tokens=16000,  # Sonnet thinks; thinking counts toward max_tokens
                     ) as stream:
                         async for text in stream.text_stream:
                             yield f"event: text_delta\ndata: {json.dumps({'text': text})}\n\n"
@@ -987,7 +1045,7 @@ async def run_turn_stream(
                     synth_ms = int((time.perf_counter() - synth_t0) * 1000)
                     schedule_llm_log(sid, None, settings.sonnet_model, "synthesis", synth, synth_ms)
                 content_dicts = _content_to_dicts(synth.content)
-                await _save_message(pool, sid, "assistant", content_dicts)
+                await _save_assistant(pool, sid, content_dicts)
 
         await _finalize_turn(pool, sid)
         logger.debug(f"stream session {session_id}: done")

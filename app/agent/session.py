@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from app.agent.client import get_client, schedule_llm_log
+from app.agent.client import get_client, model_params, schedule_llm_log
 from app.agent.json_utils import strip_json_fence
 from app.agent.memory import load_memory, upsert_fact
 from app.agent.procedures import list_procedures, propose_procedure_from_session
@@ -129,6 +129,7 @@ Conversation:
 
     response = await get_client().messages.create(
         model=settings.haiku_model,
+        **model_params(settings.haiku_model),
         max_tokens=768,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -180,6 +181,7 @@ Conversation:
 
     response = await get_client().messages.create(
         model=settings.haiku_model,
+        **model_params(settings.haiku_model),
         max_tokens=1024,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -201,6 +203,7 @@ Conversation:
 
     response = await get_client().messages.create(
         model=settings.haiku_model,
+        **model_params(settings.haiku_model),
         max_tokens=512,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -237,6 +240,7 @@ Conversation:
 
     response = await get_client().messages.create(
         model=settings.haiku_model,
+        **model_params(settings.haiku_model),
         max_tokens=768,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -307,6 +311,7 @@ Return [] if nothing genuinely generalizable happened. Return only the JSON arra
 
     response = await get_client().messages.create(
         model=settings.haiku_model,
+        **model_params(settings.haiku_model),
         max_tokens=512,
         messages=[{"role": "user", "content": prompt}],
     )

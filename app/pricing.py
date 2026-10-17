@@ -1,16 +1,20 @@
 """Static per-model pricing for LLM cost estimation.
 
 Prices are USD per 1,000,000 tokens, pulled from Anthropic's published pricing
-as of 2026-06-24. This table WILL drift as pricing changes — update the
+as of 2026-10-17. This table WILL drift as pricing changes — update the
 entries and this date comment together when it does.
 """
 
 MODEL_PRICING: dict[str, tuple[float, float]] = {
     # model_id -> (input $/Mtok, output $/Mtok)
+    # Haiku 5.5 rate shown is for prompts <= 100K tokens ($0.50 / $2.50 above that);
+    # Sazed's prompts stay well under, so the lower card is used.
+    "claude-haiku-5-5": (0.10, 0.50),
+    "claude-sonnet-5-5": (2.00, 10.00),
     "claude-haiku-4-5-20251001": (1.00, 5.00),
     "claude-haiku-4-5": (1.00, 5.00),
     "claude-sonnet-4-6": (3.00, 15.00),
-    "claude-sonnet-5": (3.00, 15.00),
+    "claude-sonnet-5": (2.00, 10.00),
     "claude-opus-4-8": (5.00, 25.00),
 }
 

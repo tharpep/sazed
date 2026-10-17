@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app.agent.client import get_client, schedule_llm_log, tool_sig as _tool_sig
+from app.agent.client import get_client, model_params, schedule_llm_log, tool_sig as _tool_sig
 from app.agent.memory import format_for_prompt, load_memory
 from app.agent.session import compress_context
 from app.agent.tools import execute_tool, get_think_tool_schemas
@@ -226,6 +226,7 @@ async def run_think(
         logger.debug(f"  think turn {turn}: calling {settings.haiku_model}")
         response = await client.messages.create(
             model=settings.haiku_model,
+            **model_params(settings.haiku_model),
             system=system,
             messages=messages,
             tools=tools,
