@@ -420,6 +420,8 @@ async def open_pull_request(job: dict[str, Any], changes: dict[str, str | None])
     params = job.get("params") or {}
     instruction = params.get("instruction") or job["title"]
     title = _title(instruction, 70)
+    # A follow-up's commit describes the follow-up; the PR keeps the original title.
+    commit_title = _title(job["prompt"], 70) if job.get("parent_id") else title
     body = (
         f"{job.get('result') or ''}\n\n---\n"
         f"Opened by Sazed's worker (Claude Code, `{job['model']}`) for job `{job['id']}`.\n"
@@ -432,7 +434,7 @@ async def open_pull_request(job: dict[str, Any], changes: dict[str, str | None])
             "branch": await _pr_branch(job),
             "title": title,
             "body": body[:60_000],
-            "commit_message": f"{title}\n\nSazed job {job['id']}",
+            "commit_message": f"{commit_title}\n\nSazed job {job['id']}",
             "files": changes,
         },
         headers={"X-API-Key": settings.gateway_api_key},
