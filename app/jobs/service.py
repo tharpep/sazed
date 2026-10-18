@@ -19,11 +19,13 @@ logger = logging.getLogger(__name__)
 
 # depth -> (model, effort, timeout seconds, max tool calls, answer shape)
 RESEARCH_DEPTHS: dict[str, tuple[str, str | None, int, int, str]] = {
-    # Pryce's call (2026-10-18): Gemini 3.8 Flash at the highest effort suits research best.
-    "quick": ("gemini-3.8-flash-high", "high", 300, 30, "a direct answer in 2-6 sentences"),
+    # Pryce's call (2026-10-18): Gemini 3.8 Flash at its highest effort suits research best.
+    # The effort is part of the model id ("-high" is Flash's top level); agy rejects
+    # --effort values that conflict with it, so no separate effort is passed.
+    "quick": ("gemini-3.8-flash-high", None, 300, 30, "a direct answer in 2-6 sentences"),
     "deep": (
         "gemini-3.8-flash-high",
-        "max",
+        None,
         600,
         80,
         "a thorough report: a short summary first, then sections covering the important details, "
