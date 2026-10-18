@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 POLL_SECONDS = 90
 MAX_FIX_ATTEMPTS = 2
 NO_CI_AFTER = timedelta(minutes=15)
+PR_SYNC_EVERY = 7  # ticks: about every 10 minutes
 _task: asyncio.Task | None = None
 
 
@@ -109,12 +110,22 @@ async def _check(job: dict[str, Any]) -> None:
 
 
 async def _loop() -> None:
+    from app.backlog import service as backlog  # lazy: backlog imports the jobs service
+
+    tick = 0
     while True:
         try:
             for job in await store.awaiting_ci():
                 await _check(job)
         except Exception:
             logger.exception("CI watcher tick failed")
+        # Merged or closed PRs move their backlog items along; minutes of lag are fine.
+        if tick % PR_SYNC_EVERY == 0:
+            try:
+                await backlog.sync_pr_states()
+            except Exception:
+                logger.exception("Backlog PR sync failed")
+        tick += 1
         await asyncio.sleep(POLL_SECONDS)
 
 

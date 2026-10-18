@@ -238,7 +238,11 @@ async def scout(run_id: uuid.UUID, max_ideas: int) -> tuple[str, str, str | None
                      f"{item.get('impact') or '?'} impact): {item['summary'][:300]}")
     noun = "idea" if len(added) == 1 else "ideas"
     gist = f"{len(added)} new {noun}: " + "; ".join(i["title"] for i in added)
-    return "success", "\n".join(lines), gist, settings.console_url
+    # One idea opens straight to it; several open the Backlog list.
+    link = f"{settings.console_url}/?page=backlog"
+    if len(added) == 1:
+        link += f"&item={added[0]['id']}"
+    return "success", "\n".join(lines), gist, link
 
 
 async def triage(run_id: uuid.UUID) -> tuple[str, str, str | None, str | None]:
@@ -289,7 +293,7 @@ async def triage(run_id: uuid.UUID) -> tuple[str, str, str | None, str | None]:
     lines.append(f"\nOpen ideas: {len(ideas)}. Went stale this week: {went_stale}.")
     gist = "Top: " + "; ".join(by_id[str(r["id"])]["title"] for r in order[:2])
     gist += f". {len(ideas)} open."
-    return "success", "\n".join(lines), gist, settings.console_url
+    return "success", "\n".join(lines), gist, f"{settings.console_url}/?page=backlog"
 
 
 async def run(action: dict[str, Any], run_id: uuid.UUID) -> tuple[str, str, str | None, str | None]:

@@ -42,11 +42,13 @@ def _row(rec) -> dict[str, Any]:
         d["sources"] = json.loads(d["sources"])
     if isinstance(d.get("job_meta"), str):
         d["job_meta"] = json.loads(d["job_meta"])
+    if isinstance(d.get("job_params"), str):
+        d["job_params"] = json.loads(d["job_params"])
     return d
 
 
 _SELECT = """
-    SELECT b.*, j.status AS job_status, j.meta AS job_meta
+    SELECT b.*, j.status AS job_status, j.meta AS job_meta, j.params AS job_params
     FROM backlog_items b LEFT JOIN jobs j ON j.id = b.job_id
 """
 

@@ -1,10 +1,17 @@
 """Backlog rules: dedupe on add, and approval turning an item into a change job."""
 
+import logging
 import uuid
 from typing import Any
 
+import httpx
+
 from app.backlog import store
+from app.config import settings
+from app.http_client import get_client
 from app.jobs import service as jobs
+
+logger = logging.getLogger(__name__)
 
 
 class BacklogError(ValueError):
@@ -53,3 +60,40 @@ async def approve(
     return await store.update_item(
         item_id, status="approved", job_id=job["id"], note=note.strip() or None
     )
+
+
+async def _pr_state(repo: str, number: int) -> dict[str, Any] | None:
+    owner, name = repo.split("/", 1)
+    try:
+        resp = await get_client().get(
+            f"{settings.gateway_url}/github/repos/{owner}/{name}/pulls/{number}",
+            headers={"X-API-Key": settings.gateway_api_key},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.HTTPError:
+        logger.warning("PR state check failed for %s#%s", repo, number, exc_info=True)
+        return None
+
+
+async def sync_pr_states() -> None:
+    """Approved items follow their PR: merged -> done; closed unmerged -> back to new (with a note
+    saying so), so it shows up in Open again for Pryce to retry or dismiss."""
+    for item in await store.list_items(view="done"):
+        meta = item.get("job_meta") or {}
+        repo = (item.get("job_params") or {}).get("repo")
+        if item["status"] != "approved" or not meta.get("pr_number") or not repo:
+            continue
+        pr = await _pr_state(repo, int(meta["pr_number"]))
+        if pr is None or pr.get("state") != "closed":
+            continue
+        if pr.get("merged"):
+            await store.update_item(item["id"], status="done")
+            logger.info("Backlog item %s done: PR #%s merged", item["id"], meta["pr_number"])
+        else:
+            note = f"PR #{meta['pr_number']} was closed without merging."
+            if item.get("note"):
+                note = f"{item['note']}\n{note}"
+            await store.update_item(item["id"], status="new", note=note)
+            logger.info("Backlog item %s reopened: PR #%s closed", item["id"], meta["pr_number"])

@@ -188,6 +188,10 @@ def _plain(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+def _link_title(url: str) -> str:
+    return "Open on GitHub" if "github.com" in url else "Open in Sazed"
+
+
 async def _notify(title: str, message: str, priority: int, url: str | None = None) -> bool:
     try:
         resp = await get_http_client().post(
@@ -196,7 +200,7 @@ async def _notify(title: str, message: str, priority: int, url: str | None = Non
                 "title": title[:250],
                 "message": message[:1024] or "(empty)",
                 "priority": priority,
-                **({"url": url, "url_title": "Open on GitHub"} if url else {}),
+                **({"url": url, "url_title": _link_title(url)} if url else {}),
             },
             headers={"X-API-Key": settings.gateway_api_key},
             timeout=30.0,
