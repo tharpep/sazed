@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.logging import LoggingIntegration
 
+from app.automations import runner as automation_runner
 from app.config import settings
 from app.db import close_pool, init_pool
 from app.dependencies import verify_api_key
@@ -16,6 +17,7 @@ from app.http_client import shutdown as http_client_shutdown
 from app.http_client import startup as http_client_startup
 from app.routers import (
     audit,
+    automations,
     chat,
     conversations,
     finance,
@@ -63,7 +65,9 @@ async def lifespan(app: FastAPI):
     _configure_sentry()
     await init_pool()
     await http_client_startup()
+    await automation_runner.start()
     yield
+    await automation_runner.stop()
     await http_client_shutdown()
     await close_pool()
 
@@ -114,6 +118,12 @@ app.include_router(
 )
 app.include_router(
     think.router, prefix="/think", tags=["think"], dependencies=[Depends(verify_api_key)]
+)
+app.include_router(
+    automations.router,
+    prefix="/automations",
+    tags=["automations"],
+    dependencies=[Depends(verify_api_key)],
 )
 app.include_router(
     procedures.router,

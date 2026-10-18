@@ -18,6 +18,9 @@ class Settings(BaseSettings):
 
     # Anthropic
     anthropic_api_key: str = ""
+    # Automations v2 scheduler (app/automations/runner.py); off = rows stay but nothing fires
+    automations_scheduler: bool = True
+
     # Per-model request settings (thinking, effort) live in agent/client.py:model_params
     haiku_model: str = "claude-haiku-5-5"
     sonnet_model: str = "claude-sonnet-5-5"
@@ -89,6 +92,7 @@ class Settings(BaseSettings):
         "delete_income", "delete_budget",
         # Homelab power actions: confirmed via pending_actions before Proxmox ever sees them
         "restart_container", "start_container",
+        "delete_automation",
     ]
     untrusted_content_tools: list[str] = [
         "get_email", "list_emails", "search_emails", "read_file", "fetch_url",

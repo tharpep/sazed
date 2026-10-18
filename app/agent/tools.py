@@ -15,6 +15,8 @@ import cachetools
 import httpx
 
 from app.agent.memory import upsert_fact
+from app.automations import tools as automation_tools
+from app.automations.tools import AUTOMATION_TOOL_NAMES
 from app.config import settings
 from app.http_client import get_client
 
@@ -2223,6 +2225,112 @@ TOOLS: list[ToolDef] = [
         endpoint="/homelab/services/{service_id}/state",
         path_params=["service_id"],
     ),
+    # ── Automations (internal: app/automations/tools.py) ─────────────────────
+    ToolDef(
+        name="list_automations",
+        description=(
+            "List Pryce's scheduled automations: id, name, enabled, cron schedule, next run "
+            "times, prompt, outputs (notify/journal), and last run status."
+        ),
+        input_schema={"type": "object", "properties": {}},
+        method="INTERNAL",
+        endpoint="",
+    ),
+    ToolDef(
+        name="create_automation",
+        description=(
+            "Create a scheduled automation: at the scheduled times, Sazed runs `prompt` in a "
+            "fresh session and sends the answer to Pushover (and optionally the journal). "
+            "Convert the user's wording into a 5-field cron expression in their timezone "
+            "(minute hour day-of-month month day-of-week; e.g. weekdays at 8am = '0 8 * * 1-5', "
+            "every Sunday at 6pm = '0 18 * * 0'). Write the prompt as a complete instruction "
+            "for a future run with no conversation context, including the format wanted "
+            "(e.g. 'two plain sentences'). After creating, tell the user the next run times "
+            "the tool returns so they can confirm the schedule is right. Anything sensitive the "
+            "prompt asks for at run time waits for Pryce's approval rather than running."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Short name, e.g. 'Morning brief'."},
+                "prompt": {"type": "string", "description": "What Sazed does on each run."},
+                "cron": {"type": "string", "description": "5-field cron, e.g. '0 8 * * 1-5'."},
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA timezone. Defaults to America/New_York.",
+                },
+                "notify": {
+                    "type": "boolean",
+                    "description": "Send the result to Pushover. Default true.",
+                },
+                "journal": {
+                    "type": "boolean",
+                    "description": "Also save the result as a journal entry. Default false.",
+                },
+                "skip_if_nothing": {
+                    "type": "boolean",
+                    "description": (
+                        "Don't notify when there's nothing worth saying (good for checks/alerts). "
+                        "Default false."
+                    ),
+                },
+                "enabled": {"type": "boolean", "description": "Default true."},
+            },
+            "required": ["name", "prompt", "cron"],
+        },
+        method="INTERNAL",
+        endpoint="",
+    ),
+    ToolDef(
+        name="update_automation",
+        description=(
+            "Change an automation: rename, pause/resume (enabled), new schedule (cron/timezone), "
+            "new prompt, or notify/journal/skip_if_nothing. Only pass the fields that change. "
+            "Get the id from list_automations."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "automation_id": {"type": "string"},
+                "name": {"type": "string"},
+                "enabled": {"type": "boolean"},
+                "cron": {"type": "string"},
+                "timezone": {"type": "string"},
+                "prompt": {"type": "string"},
+                "notify": {"type": "boolean"},
+                "journal": {"type": "boolean"},
+                "skip_if_nothing": {"type": "boolean"},
+            },
+            "required": ["automation_id"],
+        },
+        method="INTERNAL",
+        endpoint="",
+    ),
+    ToolDef(
+        name="delete_automation",
+        description="Permanently delete an automation and its run history.",
+        input_schema={
+            "type": "object",
+            "properties": {"automation_id": {"type": "string"}},
+            "required": ["automation_id"],
+        },
+        method="INTERNAL",
+        endpoint="",
+    ),
+    ToolDef(
+        name="run_automation",
+        description=(
+            "Run an automation once right now (in the background), e.g. to test it. Its result "
+            "is delivered through its usual outputs."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"automation_id": {"type": "string"}},
+            "required": ["automation_id"],
+        },
+        method="INTERNAL",
+        endpoint="",
+    ),
     # ── Model escalation ─────────────────────────────────────────────────────
     ToolDef(
         name="request_escalation",
@@ -2242,7 +2350,7 @@ TOOLS: list[ToolDef] = [
             "Expand your available tools when you need a capability not currently shown. "
             "Call this before telling the user you lack a capability. "
             "Valid categories: calendar, tasks, email, notify, kb, web, drive, github, sheets, "
-            "finance, places, journal, homelab."
+            "finance, places, journal, homelab, automations."
         ),
         input_schema={
             "type": "object",
@@ -2348,6 +2456,8 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
                  "get_journal_summary", "export_journal", "sync_journal_to_kb"],
     "homelab":  ["homelab_status", "homelab_service", "homelab_host", "homelab_containers",
                  "restart_container", "start_container", "set_service_maintenance"],
+    "automations": ["list_automations", "create_automation", "update_automation",
+                    "delete_automation", "run_automation"],
 }
 
 # ---------------------------------------------------------------------------
@@ -2460,6 +2570,12 @@ _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
         r'|sillytavern|postgres|gateway|restart|reboot|maintenance'
         r'|(is|are) (it|everything|anything|things|the \w+) (up|down|running|working|broken)'
         r'|what.s (down|broken)|services? (down|status|health))\b', re.I),
+    "automations": re.compile(
+        r'\b(automations?|automate|scheduled?|recurring|cron'
+        r'|every (day|morning|evening|night|week|weekday|monday|tuesday|wednesday|thursday'
+        r'|friday|saturday|sunday|hour|\d+ (minutes?|hours?))'
+        r'|each (morning|day|week)|daily (brief|briefing|summary|digest)'
+        r'|weekly (summary|digest))\b', re.I),
 }
 
 _ALWAYS_INCLUDED: frozenset[str] = frozenset({"memory_update", "request_tools", "request_escalation"})
@@ -2838,6 +2954,16 @@ async def _execute_internal(name: str, args: dict[str, Any], t0: float) -> ToolR
             logger.exception("memory_update failed")
             msg = f"Memory update failed: {e}"
             return ToolResult(content=msg, status="error", error=msg, duration_ms=_ms())
+
+    if name in AUTOMATION_TOOL_NAMES:
+        content = await automation_tools.handle(name, args)
+        is_error = content.startswith("Error")
+        return ToolResult(
+            content=content,
+            status="error" if is_error else "success",
+            error=content if is_error else None,
+            duration_ms=_ms(),
+        )
 
     if name == "request_tools":
         # Normally handled inline by the agent loop; this is a safety fallback.
