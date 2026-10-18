@@ -32,6 +32,9 @@ class ItemUpdate(BaseModel):
     status: Literal["new", "shortlisted", "done", "dismissed"] | None = None
     type: ItemType | None = None
     note: str | None = Field(None, max_length=4000)
+    title: str | None = Field(None, min_length=3, max_length=200)
+    summary: str | None = Field(None, max_length=8000)
+    why: str | None = Field(None, max_length=4000)
 
 
 class ApproveRequest(BaseModel):

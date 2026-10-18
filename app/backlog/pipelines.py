@@ -42,18 +42,25 @@ self-hosted runners on push to main):
   egress allowlist.
 - sazed-mcp: exposes Sazed to Claude Desktop as one tool.
 Other homelab services: Jellyfin and the *arr stack, Kavita, Suwayomi, SillyTavern, Postgres.
-Solo developer, no test suites yet, CI is ruff on changed lines."""
+Solo developer, no test suites yet, CI is ruff on changed lines.
+Already in place (an idea that extends one of these must say what's new): prompt caching on the
+system prompt and tool schemas; context-window compression of old turns; Pushover alerts for
+outages, disk, failed deploys and automations; per-tool approval gates; daily job caps."""
 
 # The scout looks at one area a day so a week of runs covers the stack instead of repeating.
+# (short label for titles, what to tell the model)
 _FOCUS = [
-    "the agent itself: tools, memory, model use, prompts and cost",  # Monday
-    "homelab operations: reliability, monitoring, backups, deploys",
-    "the knowledge base and retrieval quality",
-    "the console UX on desktop and phone",
-    "automations and integrations with services Pryce already uses",
-    "security and privacy of the setup",
-    "new releases and features in the tools this stack is built on (FastAPI, Anthropic API, "
-    "Claude Code, Antigravity, Proxmox, Tailscale, Caddy, pgvector, React)",  # Sunday
+    ("agent", "the agent itself: tools, memory, model use, prompts and cost"),  # Monday
+    ("homelab ops", "homelab operations: reliability, monitoring, backups, deploys"),
+    ("knowledge base", "the knowledge base and retrieval quality"),
+    ("console UX", "the console UX on desktop and phone"),
+    ("automations", "automations and integrations with services Pryce already uses"),
+    ("security", "security and privacy of the setup"),
+    (
+        "upstream releases",
+        "new releases and features in the tools this stack is built on (FastAPI, Anthropic API, "
+        "Claude Code, Antigravity, Proxmox, Tailscale, Caddy, pgvector, React)",
+    ),  # Sunday
 ]
 
 _SCOUT_PROMPT = """You are scouting improvement ideas for Pryce's setup. Today's focus: {focus}.
@@ -172,7 +179,7 @@ def _clean(item: dict[str, Any]) -> dict[str, Any]:
 
 async def scout(run_id: uuid.UUID, max_ideas: int) -> tuple[str, str, str | None, str | None]:
     requested_by = f"automation-run:{run_id}"
-    focus = _FOCUS[datetime.now(UTC).weekday()]
+    label, focus = _FOCUS[datetime.now(UTC).weekday()]
     stack = _STACK
     if services := await _homelab_services():
         stack += f"\nRegistered homelab services right now: {services}."
@@ -181,7 +188,7 @@ async def scout(run_id: uuid.UUID, max_ideas: int) -> tuple[str, str, str | None
 
     research = await _run_agy(
         "research",
-        f"Scout: {focus.split(':')[0]}",
+        f"Scout: {label}",
         _SCOUT_PROMPT.format(
             focus=focus,
             stack=stack,
