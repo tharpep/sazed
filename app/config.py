@@ -47,6 +47,24 @@ class Settings(BaseSettings):
         "tharpep/gotenberg-fork",
     ]
 
+    # Backlog pipelines (app/backlog/pipelines.py, plans/07 section 9b)
+    console_url: str = "https://sazed.tail77c590.ts.net"  # link target in Pushover messages
+    # Repos the scout thinks about and approved ideas may target
+    scout_repos: list[str] = [
+        "tharpep/sazed",
+        "tharpep/api-gateway",
+        "tharpep/knowledge-base",
+        "tharpep/sazed-frontend",
+        "tharpep/sazed-worker",
+        "tharpep/sazed-mcp",
+    ]
+    # Generates on Gemini; filters and ranks on a different family so one model's blind spots
+    # don't decide both steps.
+    scout_research_model: str = "gemini-3.8-flash-high"
+    scout_judge_model: str = "claude-opus-4-6-thinking"
+    scout_max_ideas: int = 3
+    backlog_stale_days: int = 30
+
     # Per-model request settings (thinking, effort) live in agent/client.py:model_params
     haiku_model: str = "claude-haiku-5-5"
     sonnet_model: str = "claude-sonnet-5-5"

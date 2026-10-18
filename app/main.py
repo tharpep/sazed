@@ -19,6 +19,7 @@ from app.http_client import startup as http_client_startup
 from app.routers import (
     audit,
     automations,
+    backlog,
     chat,
     conversations,
     finance,
@@ -133,6 +134,9 @@ app.include_router(
     prefix="/automations",
     tags=["automations"],
     dependencies=[Depends(verify_api_key)],
+)
+app.include_router(
+    backlog.router, prefix="/backlog", tags=["backlog"], dependencies=[Depends(verify_api_key)]
 )
 app.include_router(
     jobs.router, prefix="/jobs", tags=["jobs"], dependencies=[Depends(verify_api_key)]

@@ -17,6 +17,8 @@ import httpx
 from app.agent.memory import upsert_fact
 from app.automations import tools as automation_tools
 from app.automations.tools import AUTOMATION_TOOL_NAMES
+from app.backlog import tools as backlog_tools
+from app.backlog.tools import BACKLOG_TOOL_NAMES
 from app.jobs import tools as job_tools
 from app.jobs.tools import JOB_TOOL_NAMES
 from app.config import settings
@@ -2363,6 +2365,59 @@ TOOLS: list[ToolDef] = [
         method="INTERNAL",
         endpoint="",
     ),
+    # ── Backlog (internal: app/backlog/tools.py) ─────────────────────────────
+    ToolDef(
+        name="list_backlog",
+        description=(
+            "List Pryce's backlog: ideas (from the daily scout), bugs, gaps, optimizations, "
+            "planned features and known issues, with status and any PR. view='open' (default: "
+            "new and shortlisted), 'done' (approved or done), 'dismissed' (dismissed or stale) "
+            "or 'all'. Pryce approves or dismisses items in the console (Backlog page); you "
+            "can't."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": ["idea", "bug", "gap", "optimization", "planned", "known_issue"],
+                },
+                "view": {"type": "string", "enum": ["open", "done", "dismissed", "all"]},
+            },
+        },
+        method="INTERNAL",
+        endpoint="",
+    ),
+    ToolDef(
+        name="add_backlog_item",
+        description=(
+            "File something in Pryce's backlog for later: a bug, a gap (missing feature that "
+            "makes sense), an optimization, an idea, a planned feature or a known issue. Use it "
+            "when Pryce says to note, park or backlog something, or when you hit a real bug or "
+            "gap in his own stack worth tracking. Duplicates of anything already recorded "
+            "(even dismissed) are refused."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": ["idea", "bug", "gap", "optimization", "planned", "known_issue"],
+                },
+                "title": {"type": "string", "description": "Short, specific title."},
+                "summary": {"type": "string", "description": "What it is (markdown)."},
+                "why": {"type": "string", "description": "Why it matters for his setup."},
+                "repos": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Affected repos as owner/name, if known.",
+                },
+            },
+            "required": ["type", "title"],
+        },
+        method="INTERNAL",
+        endpoint="",
+    ),
     # ── Automations (internal: app/automations/tools.py) ─────────────────────
     ToolDef(
         name="list_automations",
@@ -2598,6 +2653,7 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
                     "delete_automation", "run_automation"],
     "research": ["research", "second_opinion", "delegate_code_task", "continue_job",
                  "job_status"],
+    "backlog":  ["list_backlog", "add_backlog_item"],
 }
 
 # ---------------------------------------------------------------------------
@@ -2714,6 +2770,9 @@ _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
         r'\b(research|look into|dig into|deep dive|investigate|compare|comparison'
         r'|pros and cons|which is better|best (way|option|practice)|job status'
         r'|second opinion|sanity check|gut check|double.?check)\b', re.I),
+    "backlog":  re.compile(
+        r'\b(backlog|scout|known (bugs?|issues?)|planned features?|feature requests?'
+        r'|ideas? (list|page)|park (this|that|it))\b', re.I),
     "automations": re.compile(
         r'\b(automations?|automate|scheduled?|recurring|cron'
         r'|every (day|morning|evening|night|week|weekday|monday|tuesday|wednesday|thursday'
@@ -3118,6 +3177,16 @@ async def _execute_internal(name: str, args: dict[str, Any], t0: float) -> ToolR
 
     if name in JOB_TOOL_NAMES:
         content = await job_tools.handle(name, args)
+        is_error = content.startswith("Error")
+        return ToolResult(
+            content=content,
+            status="error" if is_error else "success",
+            error=content if is_error else None,
+            duration_ms=_ms(),
+        )
+
+    if name in BACKLOG_TOOL_NAMES:
+        content = await backlog_tools.handle(name, args)
         is_error = content.startswith("Error")
         return ToolResult(
             content=content,

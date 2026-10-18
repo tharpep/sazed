@@ -46,6 +46,8 @@ def _describe_action(action: dict[str, Any]) -> str:
     if action.get("type") == "job":
         where = f" on {action.get('repo')} ({action.get('mode')})" if action.get("repo") else ""
         return f"[{action.get('kind')} job{where}] {action.get('input', '')}"
+    if action.get("type") == "pipeline":
+        return f"[{action.get('name')} pipeline] built-in backlog pipeline (see plans/07 9b)"
     return action.get("prompt") or f"{action.get('method')} {action.get('path')}"
 
 

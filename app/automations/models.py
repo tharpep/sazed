@@ -138,7 +138,18 @@ class JobAction(BaseModel):
         return self
 
 
-Action = Annotated[PromptAction | GatewayAction | JobAction, Field(discriminator="type")]
+class PipelineAction(BaseModel):
+    """A built-in multi-step pipeline (app/backlog/pipelines.py): the daily scout that files new
+    ideas, or the weekly triage that ranks them. Code drives the steps; models only write text."""
+
+    type: Literal["pipeline"] = "pipeline"
+    name: Literal["scout", "triage"]
+    max_ideas: int = Field(3, ge=1, le=5)  # scout only
+
+
+Action = Annotated[
+    PromptAction | GatewayAction | JobAction | PipelineAction, Field(discriminator="type")
+]
 
 
 class PushoverOutput(BaseModel):

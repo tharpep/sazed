@@ -63,6 +63,13 @@ async def _execute(automation: dict[str, Any], run_id: uuid.UUID) -> None:
         elif automation["action"]["type"] == "job":
             status, text, notify_text, notify_url = await _run_job(automation["action"], run_id)
             session_id = None
+        elif automation["action"]["type"] == "pipeline":
+            from app.backlog import pipelines  # lazy, like the job import below
+
+            status, text, notify_text, notify_url = await pipelines.run(
+                automation["action"], run_id
+            )
+            session_id = None
         else:
             status, text = await _run_gateway_call(automation["action"])
             session_id = None
