@@ -1,6 +1,7 @@
 """Queries behind the Activity page: the feed, one event, a flow (linked traces), a summary."""
 
 import json
+import re
 from typing import Any
 
 from app.db import get_pool
@@ -19,6 +20,10 @@ CATEGORIES: dict[str, tuple[str, ...]] = {
     "notify": ("gw.notify",),
     "mcp": ("gw.mcp",),
 }
+
+
+# The agent loop stores user messages behind a clock line: "[Sunday, ... 06:56 PM UTC]\n".
+_CLOCK_PREFIX = re.compile(r"^\[[^\]\n]{10,80}\]\n")
 
 
 def _json(value: Any) -> Any:
@@ -50,6 +55,10 @@ def serialize(rec: Any, with_detail: bool = False) -> dict[str, Any]:
         "duration_ms": d.get("duration_ms"),
     }
     detail = _json(d.get("detail"))
+    if d["kind"] == "chat.user":
+        out["title"] = _CLOCK_PREFIX.sub("", out["title"])
+        if detail and isinstance(detail.get("text"), str):
+            detail["text"] = _CLOCK_PREFIX.sub("", detail["text"])
     if d["kind"] == "llm":
         out["cost_usd"] = cost_usd(detail)
         if detail:
