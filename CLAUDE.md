@@ -110,4 +110,4 @@ chat.py                — CLI for testing (calls local /chat)
 - Session and memory persistence: asyncpg when `DATABASE_URL` is set.
 - Streaming uses SSE via `StreamingResponse` in `routers/chat.py`; events: `session`, `tool_start`, `tool_done`, `text_delta`, `done`. `run_turn_stream` accepts an optional `request` and polls `is_disconnected()` between turns so a cancelled client stops the loop before the next LLM call.
 - Model selection: Haiku for turns 0–2, Sonnet from turn 3 onward (`_select_model` in `loop.py`).
-- Prompt caching: system blocks and the last tool schema use `cache_control: ephemeral`.
+- Prompt caching: base system block, procedures block, and the last tool schema use `cache_control: ephemeral`; each loop LLM call also puts one on the last block of the latest message (`with_message_cache` in client.py, applied to a copy). Max 4 breakpoints per request — that's why the memory-facts block has none. Think mode: 2 system + last tool + last message = 4.

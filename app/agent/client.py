@@ -59,6 +59,25 @@ def model_params(model: str) -> dict[str, Any]:
     return {}
 
 
+def with_message_cache(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return a copy of `messages` with a cache breakpoint on the last block of the last message.
+
+    Lets the tool loop cache the growing history. Only the copy is annotated — `messages`
+    itself (and what gets persisted) is left untouched. Callers must keep the request at
+    4 or fewer breakpoints in total (system blocks + last tool schema + this one).
+    """
+    if not messages:
+        return messages
+    last = messages[-1]
+    content = last["content"]
+    blocks = [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
+    # Thinking blocks can't carry cache_control; skip rather than risk a 400.
+    if not blocks or blocks[-1].get("type") in ("thinking", "redacted_thinking"):
+        return messages
+    blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
+    return messages[:-1] + [{"role": last["role"], "content": blocks}]
+
+
 def tool_sig(name: str, args: dict) -> tuple:
     """Stable hashable signature for a tool call — used for stuck loop detection."""
     return (name, tuple(sorted((k, str(v)) for k, v in args.items())))
