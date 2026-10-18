@@ -65,4 +65,5 @@ jobs:
             --region=${{ env.REGION }} \
             --platform=managed \
             --allow-unauthenticated \
+            --set-env-vars=AUTOMATIONS_SCHEDULER=false \
             --set-secrets=DATABASE_URL=database-url:latest,GATEWAY_URL=api-gateway-url:latest,GATEWAY_API_KEY=api-key:latest,API_KEY=api-key:latest,ANTHROPIC_API_KEY=anthropic-api-key:latest

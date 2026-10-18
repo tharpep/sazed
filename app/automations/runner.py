@@ -203,7 +203,13 @@ async def start() -> None:
     if not settings.automations_scheduler or not settings.database_url:
         logger.info("Automation scheduler disabled")
         return
-    await store.mark_stale_runs()
+    # Automations must never stop Sazed from booting: if the tables are missing (e.g. a database
+    # whose migration tracker skipped 003), log it and run without the scheduler.
+    try:
+        await store.mark_stale_runs()
+    except Exception:
+        logger.exception("Automation scheduler not started: automation tables unavailable")
+        return
     _task = asyncio.create_task(_loop())
     logger.info("Automation scheduler started (every %ss)", POLL_SECONDS)
 
