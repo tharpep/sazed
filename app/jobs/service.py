@@ -323,7 +323,8 @@ def _gist(text: str, limit: int = 220) -> str:
     lines = [
         _plain(line).strip(" -*>")
         for line in text.splitlines()  # filter before _plain, which strips the "#" of headings
-        if line.strip() and not line.lstrip().startswith(("#", "|", "```", "Sources", "http"))
+        if line.strip()
+        and not line.lstrip(" -*>").startswith(("#", "|", "```", "Sources", "http", "["))
     ]
     flat = " ".join(lines)
     sentences = re.split(r"(?<=[.!?])\s+", flat)
