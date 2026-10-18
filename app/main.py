@@ -9,14 +9,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.logging import LoggingIntegration
 
+from app.activity import gateway_feed as activity_feed
+from app.activity import live as activity_live
 from app.automations import runner as automation_runner
-from app.jobs import ci_watch
 from app.config import settings
 from app.db import close_pool, init_pool
 from app.dependencies import verify_api_key
 from app.http_client import shutdown as http_client_shutdown
 from app.http_client import startup as http_client_startup
+from app.jobs import ci_watch
 from app.routers import (
+    activity,
     audit,
     automations,
     backlog,
@@ -75,7 +78,11 @@ async def lifespan(app: FastAPI):
     await http_client_startup()
     await automation_runner.start()
     await ci_watch.start()
+    await activity_live.start()
+    await activity_feed.start()
     yield
+    await activity_feed.stop()
+    await activity_live.stop()
     await automation_runner.stop()
     await ci_watch.stop()
     await http_client_shutdown()
@@ -134,6 +141,9 @@ app.include_router(
     prefix="/automations",
     tags=["automations"],
     dependencies=[Depends(verify_api_key)],
+)
+app.include_router(
+    activity.router, prefix="/activity", tags=["activity"], dependencies=[Depends(verify_api_key)]
 )
 app.include_router(
     backlog.router, prefix="/backlog", tags=["backlog"], dependencies=[Depends(verify_api_key)]
