@@ -50,7 +50,9 @@ No test suite yet.
   - Change edits a copy, and the gateway's GitHub App bot opens a PR on `sazed/<job-id>`. Pryce merges.
   - Private repos clone with a bot read-only token added to the claim.
   - `CODE_TASK_EXCLUDED_REPOS` are refused.
-- `continue_job` resumes a finished job's agent session with a new instruction.
+- `continue_job` resumes a finished job's agent session with a new instruction. On a change job, the follow-up commits to the same PR branch.
+- **Caps** (`service.counts_toward_cap`) apply only to jobs Sazed starts on its own: requested_by `automation:`, `think:`, `ci-fix` or `sazed`. Pryce's own jobs (console, chat, MCP) are uncapped.
+- **CI watcher** (`app/jobs/ci_watch.py`, started in the lifespan when `WORKER_KEY` is set): it watches CI on bot PRs through the gateway, sends a Pushover on green, and on red auto-starts up to 2 `ci-fix` follow-ups with the log tails.
 - `create_issue`, `add_issue_comment` and `add_pr_comment` post as the bot (gateway `/github/app/...`).
 - Memory (internal): `memory_update`
 
