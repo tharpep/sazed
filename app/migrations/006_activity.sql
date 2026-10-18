@@ -146,19 +146,27 @@ SELECT a.timestamp, 'tool', a.tool_name,
 FROM action_logs a
 WHERE a.timestamp > NOW() - INTERVAL '14 days';
 
-INSERT INTO activity_events (at, kind, title, status, trace, refs, detail, duration_ms)
-SELECT coalesce(r.finished_at, r.started_at), 'automation', a.name || ': ' || r.status,
-       CASE r.status WHEN 'success' THEN 'ok' WHEN 'skipped' THEN 'info'
-                     WHEN 'needs_approval' THEN 'pending' WHEN 'running' THEN 'running'
-                     ELSE 'error' END,
-       'run:' || r.id,
-       jsonb_build_object('run', r.id, 'automation', r.automation_id, 'session', r.session_id,
-                          'triggered_by', r.triggered_by),
-       jsonb_build_object('output', left(r.output, 2000), 'error', r.error,
-                          'delivered', r.delivered),
-       (extract(epoch FROM (r.finished_at - r.started_at)) * 1000)::int
-FROM automation_runs r JOIN automations a ON a.id = r.automation_id
-WHERE r.started_at > NOW() - INTERVAL '14 days';
+-- Automation tables can be missing: on GCP, Sazed and the gateway share one migration counter,
+-- and the gateway's own 003 made Sazed skip its 003 there. Guard everything that touches them.
+DO $$
+BEGIN
+    IF to_regclass('automation_runs') IS NULL THEN
+        RETURN;
+    END IF;
+    INSERT INTO activity_events (at, kind, title, status, trace, refs, detail, duration_ms)
+    SELECT coalesce(r.finished_at, r.started_at), 'automation', a.name || ': ' || r.status,
+           CASE r.status WHEN 'success' THEN 'ok' WHEN 'skipped' THEN 'info'
+                         WHEN 'needs_approval' THEN 'pending' WHEN 'running' THEN 'running'
+                         ELSE 'error' END,
+           'run:' || r.id,
+           jsonb_build_object('run', r.id, 'automation', r.automation_id,
+                              'session', r.session_id, 'triggered_by', r.triggered_by),
+           jsonb_build_object('output', left(r.output, 2000), 'error', r.error,
+                              'delivered', r.delivered),
+           (extract(epoch FROM (r.finished_at - r.started_at)) * 1000)::int
+    FROM automation_runs r JOIN automations a ON a.id = r.automation_id
+    WHERE r.started_at > NOW() - INTERVAL '14 days';
+END $$;
 
 INSERT INTO activity_events (at, kind, title, status, trace, refs, detail, duration_ms)
 SELECT coalesce(j.finished_at, j.created_at), 'job',
@@ -401,9 +409,14 @@ DROP TRIGGER IF EXISTS activity_pending_trg ON pending_actions;
 CREATE TRIGGER activity_pending_trg AFTER INSERT OR UPDATE OF status ON pending_actions
     FOR EACH ROW EXECUTE FUNCTION activity_on_pending_action();
 
-DROP TRIGGER IF EXISTS activity_run_trg ON automation_runs;
-CREATE TRIGGER activity_run_trg AFTER INSERT OR UPDATE OF status ON automation_runs
-    FOR EACH ROW EXECUTE FUNCTION activity_on_automation_run();
+DO $$
+BEGIN
+    IF to_regclass('automation_runs') IS NOT NULL THEN
+        DROP TRIGGER IF EXISTS activity_run_trg ON automation_runs;
+        CREATE TRIGGER activity_run_trg AFTER INSERT OR UPDATE OF status ON automation_runs
+            FOR EACH ROW EXECUTE FUNCTION activity_on_automation_run();
+    END IF;
+END $$;
 
 DROP TRIGGER IF EXISTS activity_job_ins_trg ON jobs;
 CREATE TRIGGER activity_job_ins_trg AFTER INSERT ON jobs
