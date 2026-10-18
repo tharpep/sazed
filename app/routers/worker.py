@@ -61,7 +61,7 @@ async def claim(body: ClaimRequest):
     logger.info("Job %s (%s/%s) claimed by %s", job["id"], job["kind"], job["agent"], body.worker)
     return {
         k: job[k] for k in ("id", "kind", "agent", "model", "profile", "prompt", "params")
-    } | {"resume_session_id": await _resume_id(job)}
+    } | {"resume_session_id": await _resume_id(job), "parent_id": job.get("parent_id")}
 
 
 async def _resume_id(job: dict[str, Any]) -> str | None:

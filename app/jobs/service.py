@@ -139,6 +139,113 @@ async def create_second_opinion(
     return await _create_agy_job("second_opinion", subject, prompt, params, requested_by, model)
 
 
+DEFAULT_CLAUDE_MODEL = "claude-sonnet-5-5"
+DEFAULT_GITHUB_OWNER = "tharpep"
+
+# mode -> (profile, timeout seconds, max tool calls)
+CODE_MODES: dict[str, tuple[str, int, int]] = {
+    "review": ("review", 900, 150),
+}
+
+_REVIEW_PROMPT = """You are reviewing the GitHub repository {repo} for Pryce. It is checked out
+in the current directory (default branch, last 50 commits). You can read and search files and use
+git log/diff/show/blame. You cannot change anything; don't try.
+
+Task: {instruction}
+{context}
+Reply in markdown: a short summary first, then findings ordered by importance, each with
+file:line references and a concrete suggestion. Say what you did not check."""
+
+_REPO_RE = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
+
+
+async def _repo_info(repo: str) -> dict[str, Any]:
+    owner, name = repo.split("/", 1)
+    try:
+        resp = await get_client().get(
+            f"{settings.gateway_url}/github/repos/{owner}/{name}",
+            headers={"X-API-Key": settings.gateway_api_key},
+            timeout=20.0,
+        )
+    except httpx.HTTPError as e:
+        raise JobError(f"couldn't look up {repo}: {e}") from e
+    if resp.status_code == 404:
+        raise JobError(f"repo {repo} not found")
+    if not resp.is_success:
+        raise JobError(f"couldn't look up {repo} (HTTP {resp.status_code})")
+    return resp.json()
+
+
+async def create_code_task(
+    repo: str,
+    instruction: str,
+    mode: str,
+    requested_by: str,
+    model: str | None = None,
+    context: str = "",
+) -> dict[str, Any]:
+    if not settings.worker_key:
+        raise JobError("the worker isn't configured here (WORKER_KEY is empty)")
+    if mode not in CODE_MODES:
+        if mode == "change":
+            raise JobError("change jobs (PRs) need the GitHub App, which isn't set up yet")
+        raise JobError(f"mode must be one of: {', '.join(CODE_MODES)}")
+    repo = repo.strip().removeprefix("https://github.com/").removesuffix(".git").strip("/")
+    if "/" not in repo:
+        repo = f"{DEFAULT_GITHUB_OWNER}/{repo}"
+    if not _REPO_RE.match(repo):
+        raise JobError(f"'{repo}' isn't a repo name like owner/name")
+    info = await _repo_info(repo)
+    if info.get("private"):
+        raise JobError(f"{repo} is private; private repos need the GitHub App (not set up yet)")
+    model = model or DEFAULT_CLAUDE_MODEL
+    _check_model("claude", model)
+    await _check_cap("claude")
+    profile, timeout_s, max_tools = CODE_MODES[mode]
+    prompt = _REVIEW_PROMPT.format(
+        repo=info.get("full_name") or repo,
+        instruction=instruction.strip(),
+        context=_context_line(context),
+    )
+    params = {"repo": repo, "mode": mode, "timeout_s": timeout_s, "max_tool_calls": max_tools}
+    return await store.create_job(
+        kind="code_task",
+        agent="claude",
+        model=model,
+        profile=profile,
+        title=_title(f"{repo.split('/', 1)[1]}: {instruction}"),
+        prompt=prompt,
+        params=params,
+        requested_by=requested_by,
+        # MCP clients can't use Sazed's chat approval, so their code tasks wait in the console.
+        status="needs_approval" if requested_by == "mcp" else "queued",
+    )
+
+
+async def create_follow_up(parent_id: uuid.UUID, instruction: str, requested_by: str) -> dict:
+    """A child job that resumes the parent's agent session with a new instruction."""
+    parent = await store.get_job(parent_id)
+    if parent is None:
+        raise JobError("no job with that id")
+    if parent["status"] != "succeeded" or not parent.get("agent_session_id"):
+        raise JobError("only a finished job with an agent session can be continued")
+    await _check_cap(parent["agent"])
+    params = dict(parent.get("params") or {})
+    params.pop("save_to_kb", None)
+    return await store.create_job(
+        kind=parent["kind"],
+        agent=parent["agent"],
+        model=parent["model"],
+        profile=parent["profile"],
+        title=_title(f"Follow-up: {instruction}"),
+        prompt=instruction.strip(),
+        params=params,
+        requested_by=requested_by,
+        parent_id=parent["id"],
+        status="needs_approval" if parent["profile"] == "change" else "queued",
+    )
+
+
 async def wait_for(job_id: uuid.UUID, seconds: float) -> dict[str, Any] | None:
     """Poll until the job finishes or `seconds` pass. Returns the finished row, else None."""
     deadline = asyncio.get_running_loop().time() + seconds

@@ -9,7 +9,9 @@ from typing import Any
 from app.config import settings
 from app.jobs import service, store
 
-JOB_TOOL_NAMES = frozenset({"research", "second_opinion", "job_status"})
+JOB_TOOL_NAMES = frozenset(
+    {"research", "second_opinion", "delegate_code_task", "continue_job", "job_status"}
+)
 
 # The Sazed session the current turn belongs to, set by the agent loop. A job that outlives the
 # tool call posts its result back into this session (service._post_to_session).
@@ -79,6 +81,23 @@ async def handle(name: str, args: dict[str, Any]) -> str:
                 requested_by=_requested_by(),
                 model=args.get("model"),
                 context=args.get("context") or "",
+            )
+            return await _wait_or_hand_off(job)
+
+        if name == "delegate_code_task":
+            job = await service.create_code_task(
+                args["repo"],
+                args["instruction"],
+                args.get("mode") or "review",
+                requested_by=_requested_by(),
+                model=args.get("model"),
+                context=args.get("context") or "",
+            )
+            return await _wait_or_hand_off(job)
+
+        if name == "continue_job":
+            job = await service.create_follow_up(
+                uuid.UUID(str(args["job_id"])), args["instruction"], requested_by=_requested_by()
             )
             return await _wait_or_hand_off(job)
 

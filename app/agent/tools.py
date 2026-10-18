@@ -2291,6 +2291,62 @@ TOOLS: list[ToolDef] = [
         endpoint="",
     ),
     ToolDef(
+        name="delegate_code_task",
+        description=(
+            "Hand a code task on one of Pryce's GitHub repos to Claude Code running on the "
+            "homelab worker (his Claude subscription, not API tokens). mode='review' (the only "
+            "mode for now) gets a read-only checkout: explain code, review it, audit for bugs or "
+            "security issues, find where something is implemented, assess a change. It can't "
+            "edit anything. Always confirm with Pryce first (this tool is approval-gated, and "
+            "Claude Code jobs are capped per day). Public repos only until the GitHub App exists. "
+            "Takes minutes; waits up to one, then the result is added to this conversation."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repo as 'owner/name' or just 'name' (owner defaults to tharpep).",
+                },
+                "instruction": {
+                    "type": "string",
+                    "description": "What to do, self-contained (the agent sees nothing else).",
+                },
+                "mode": {"type": "string", "enum": ["review"]},
+                "context": {
+                    "type": "string",
+                    "description": "Optional: relevant details from the conversation.",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional: 'claude-opus-5-5' or 'claude-haiku-5-5', only when "
+                    "Pryce asks (default Sonnet 5.5).",
+                },
+            },
+            "required": ["repo", "instruction"],
+        },
+        method="INTERNAL",
+        endpoint="",
+    ),
+    ToolDef(
+        name="continue_job",
+        description=(
+            "Follow up on a finished worker job (research, second opinion or code review) by "
+            "job_id: the same agent resumes with its context and does the new instruction, "
+            "e.g. 'now also check the tests' or 'go deeper on point 2'."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string"},
+                "instruction": {"type": "string"},
+            },
+            "required": ["job_id", "instruction"],
+        },
+        method="INTERNAL",
+        endpoint="",
+    ),
+    ToolDef(
         name="job_status",
         description=(
             "Check a worker job (e.g. research that was still running) by job_id: status, "
@@ -2522,7 +2578,7 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
                  "create_pr", "search_issues", "get_github_file", "search_code",
                  "list_commits", "get_commit", "list_branches", "list_tags",
                  "list_releases", "get_latest_release", "get_pr_reviews", "get_pr_files",
-                 "list_contributors", "compare_refs"],
+                 "list_contributors", "compare_refs", "delegate_code_task"],
     "sheets":   ["create_spreadsheet", "get_spreadsheet_info", "read_sheet", "write_sheet",
                  "append_sheet_rows", "clear_sheet_range"],
     "finance":  ["get_subscriptions", "add_subscription", "update_subscription", "delete_subscription",
@@ -2537,7 +2593,8 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
                  "restart_container", "start_container", "set_service_maintenance"],
     "automations": ["list_automations", "create_automation", "update_automation",
                     "delete_automation", "run_automation"],
-    "research": ["research", "second_opinion", "job_status"],
+    "research": ["research", "second_opinion", "delegate_code_task", "continue_job",
+                 "job_status"],
 }
 
 # ---------------------------------------------------------------------------

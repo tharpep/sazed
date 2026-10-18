@@ -68,6 +68,47 @@ async def start_second_opinion(body: SecondOpinionRequest):
     return job
 
 
+class CodeTaskRequest(BaseModel):
+    repo: str = Field(..., min_length=1, max_length=200)
+    instruction: str = Field(..., min_length=3, max_length=8000)
+    mode: Literal["review", "change"] = "review"
+    model: str | None = None
+    requested_by: Literal["console", "mcp"] = "console"
+
+
+class FollowUpRequest(BaseModel):
+    instruction: str = Field(..., min_length=2, max_length=8000)
+    requested_by: Literal["console", "mcp"] = "console"
+
+
+@router.post("/code-task", status_code=201)
+async def start_code_task(body: CodeTaskRequest):
+    try:
+        job = await service.create_code_task(
+            body.repo, body.instruction, body.mode, body.requested_by, model=body.model
+        )
+    except service.JobError as e:
+        raise HTTPException(422, str(e)) from e
+    return job
+
+
+@router.post("/{job_id}/continue", status_code=201)
+async def continue_job(job_id: uuid.UUID, body: FollowUpRequest):
+    try:
+        job = await service.create_follow_up(job_id, body.instruction, body.requested_by)
+    except service.JobError as e:
+        raise HTTPException(422, str(e)) from e
+    return job
+
+
+@router.post("/{job_id}/approve")
+async def approve(job_id: uuid.UUID):
+    job = await store.approve_job(job_id)
+    if job is None:
+        raise HTTPException(409, "Job not found or not waiting for approval")
+    return job
+
+
 @router.post("/{job_id}/cancel")
 async def cancel(job_id: uuid.UUID):
     job = await store.cancel_job(job_id)

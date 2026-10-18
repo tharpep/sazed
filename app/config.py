@@ -103,6 +103,8 @@ class Settings(BaseSettings):
     # Security: prompt-injection hardening
     confirmation_required: bool = True
     sensitive_tools: list[str] = [
+        # Worker code tasks spend Claude Pro limits and (later) open PRs
+        "delegate_code_task",
         "draft_email", "send_email", "reply_to_email",
         "delete_event", "delete_task", "delete_file",
         "delete_kb_source", "delete_journal_entry", "delete_subscription",

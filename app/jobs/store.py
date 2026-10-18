@@ -200,3 +200,11 @@ async def set_notify(job_id: uuid.UUID) -> bool:
         job_id,
     )
     return rec is not None
+
+
+async def approve_job(job_id: uuid.UUID) -> dict[str, Any] | None:
+    rec = await get_pool().fetchrow(
+        "UPDATE jobs SET status = 'queued' WHERE id = $1 AND status = 'needs_approval' RETURNING *",
+        job_id,
+    )
+    return _row(rec) if rec else None
