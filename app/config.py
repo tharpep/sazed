@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     # Automations v2 scheduler (app/automations/runner.py); off = rows stay but nothing fires
     automations_scheduler: bool = True
+    # Pushover when an automation run errors or stops at an approval gate, regardless of
+    # its outputs (app/automations/runner.py:_alert).
+    automation_alerts: bool = True
 
     # Per-model request settings (thinking, effort) live in agent/client.py:model_params
     haiku_model: str = "claude-haiku-5-5"

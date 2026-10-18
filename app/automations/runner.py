@@ -66,6 +66,13 @@ async def _execute(automation: dict[str, Any], run_id: uuid.UUID) -> None:
             delivered = await _deliver(
                 name, outputs, text, needs_approval=status == "needs_approval"
             )
+        if status == "needs_approval" and "pushover" not in delivered:
+            # Always say when a run is parked on an approval, even with Pushover output off;
+            # otherwise it waits silently until someone opens the Automations page.
+            await _alert(
+                f"Needs approval: {name}",
+                "A step is waiting for your OK. Open the run in Sazed (Automations, Runs).",
+            )
         await store.finish_run(
             run_id, status, output=text[:8000], session_id=session_id, delivered=delivered
         )
@@ -73,8 +80,7 @@ async def _execute(automation: dict[str, Any], run_id: uuid.UUID) -> None:
     except Exception as e:
         logger.exception("Automation '%s' failed", name)
         await store.finish_run(run_id, "error", error=f"{type(e).__name__}: {e}"[:2000])
-        if outputs.get("pushover"):
-            await _notify(f"Automation failed: {name}", str(e)[:500], priority=0)
+        await _alert(f"Automation failed: {name}", f"{type(e).__name__}: {e}"[:500])
     finally:
         _running.discard(automation["id"])
 
@@ -145,6 +151,12 @@ async def _notify(title: str, message: str, priority: int) -> bool:
     except httpx.HTTPError:
         logger.warning("Pushover delivery failed", exc_info=True)
         return False
+
+
+async def _alert(title: str, message: str) -> None:
+    """Deterministic alert about the run itself (not its output), sent whatever the outputs say."""
+    if settings.automation_alerts:
+        await _notify(title, message, priority=0)
 
 
 async def _deliver(name: str, outputs: dict, text: str, needs_approval: bool) -> list[str]:
