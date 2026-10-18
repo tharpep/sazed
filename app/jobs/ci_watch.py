@@ -74,7 +74,10 @@ async def _check(job: dict[str, Any]) -> None:
     if state == "success":
         await store.update_outcome(job["id"], None, {"ci_state": "success", "ci_runs": runs})
         await service.notify_simple(
-            f"PR ready: {job['title']}", f"CI passed. {meta.get('pr_url', '')}"
+            f"PR #{meta.get('pr_number')} ready · {params['repo'].split('/')[-1]}",
+            f"{job['title']}. CI passed.",
+            meta.get("pr_url"),
+            f"Review PR #{meta.get('pr_number')} on GitHub",
         )
         return
 
@@ -82,8 +85,10 @@ async def _check(job: dict[str, Any]) -> None:
     if attempt > MAX_FIX_ATTEMPTS:
         await store.update_outcome(job["id"], None, {"ci_state": "failure", "ci_runs": runs})
         await service.notify_simple(
-            f"PR needs you: {job['title']}",
-            f"CI still failing after {MAX_FIX_ATTEMPTS} fix attempts. {meta.get('pr_url', '')}",
+            f"PR #{meta.get('pr_number')} needs you",
+            f"{job['title']}. CI still fails after {MAX_FIX_ATTEMPTS} automatic fixes.",
+            meta.get("pr_url"),
+            f"Open PR #{meta.get('pr_number')} on GitHub",
         )
         return
     try:

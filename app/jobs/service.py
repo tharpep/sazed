@@ -311,37 +311,67 @@ def _plain(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+_SHORT_LABEL = {"research": "Research", "second_opinion": "2nd opinion", "code_task": "Code review"}
+
+
 def _label(job: dict[str, Any]) -> str:
     return job["kind"].replace("_", " ").capitalize()
 
 
-async def _notify(job: dict[str, Any]) -> None:
-    if job["status"] == "succeeded":
-        title, body = f"{_label(job)} done: {job['title']}", _plain(job.get("result") or "(empty)")
-    else:
-        title = f"{_label(job)} {job['status'].replace('_', ' ')}: {job['title']}"
-        body = job.get("error") or "No details."
+def _gist(text: str, limit: int = 220) -> str:
+    """The first sentence or two of a result, as plain text (no headings, lists or links)."""
+    lines = [
+        _plain(line).strip(" -*>")
+        for line in text.splitlines()  # filter before _plain, which strips the "#" of headings
+        if line.strip() and not line.lstrip().startswith(("#", "|", "```", "Sources", "http"))
+    ]
+    flat = " ".join(lines)
+    sentences = re.split(r"(?<=[.!?])\s+", flat)
+    out = ""
+    for sentence in sentences:
+        if len(out) + len(sentence) > limit:
+            break
+        out = f"{out} {sentence}".strip()
+    return out or flat[:limit]
+
+
+async def notify_simple(
+    title: str, body: str, url: str | None = None, url_title: str | None = None
+) -> None:
+    """One Pushover message. Keep it a notification: short title, a sentence or two, and the
+    link as a button (the gateway trims anything longer)."""
+    payload: dict[str, Any] = {"title": title, "message": body or "(no details)", "priority": 0}
+    if url:
+        payload |= {"url": url, "url_title": url_title or "Open"}
     try:
         await get_client().post(
             f"{settings.gateway_url}/notify",
-            json={"title": title[:250], "message": body[:1024], "priority": 0},
-            headers={"X-API-Key": settings.gateway_api_key},
-            timeout=30.0,
-        )
-    except httpx.HTTPError:
-        logger.warning("Job notification failed for %s", job["id"], exc_info=True)
-
-
-async def notify_simple(title: str, body: str) -> None:
-    try:
-        await get_client().post(
-            f"{settings.gateway_url}/notify",
-            json={"title": title[:250], "message": body[:1024] or "(empty)", "priority": 0},
+            json=payload,
             headers={"X-API-Key": settings.gateway_api_key},
             timeout=30.0,
         )
     except httpx.HTTPError:
         logger.warning("Notification failed: %s", title, exc_info=True)
+
+
+async def _notify(job: dict[str, Any]) -> None:
+    meta = job.get("meta") or {}
+    label = _SHORT_LABEL.get(job["kind"], _label(job))
+    if job["status"] == "succeeded" and meta.get("pr_url"):
+        repo = (job.get("params") or {}).get("repo", "").split("/")[-1]
+        verb = "updated" if meta.get("pr_updated") else "opened"
+        await notify_simple(
+            f"PR #{meta.get('pr_number')} {verb} · {repo}",
+            f"{job['title']}. CI is running; you'll hear when it's green.",
+            meta["pr_url"],
+            f"Open PR #{meta.get('pr_number')} on GitHub",
+        )
+    elif job["status"] == "succeeded":
+        await notify_simple(f"{label} done", f"{job['title']}\n{_gist(job.get('result') or '')}")
+    else:
+        status = job["status"].replace("_", " ")
+        reason = job.get("error") or "no details"
+        await notify_simple(f"{label} {status}", f"{job['title']}: {reason}")
 
 
 async def _post_to_session(job: dict[str, Any]) -> None:
