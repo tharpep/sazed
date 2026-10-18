@@ -29,7 +29,8 @@ async def add_item(
 
 
 def _instruction(item: dict[str, Any], note: str) -> str:
-    parts = [f"Implement this backlog item: {item['title']}"]
+    # The first line becomes the PR title, so it's the item's title alone.
+    parts = [item["title"], "This is an item from Pryce's backlog that he approved."]
     if item.get("summary"):
         parts.append(f"What it is:\n{item['summary']}")
     if item.get("why"):

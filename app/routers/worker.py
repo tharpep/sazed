@@ -87,43 +87,44 @@ async def events(job_id: uuid.UUID, body: EventsRequest):
     return {"cancel": status != "running"}
 
 
-async def _open_pr(job: dict[str, Any], changes: dict[str, str | None]) -> dict[str, Any]:
-    """Turn a finished change job's files into a PR (as the bot) and record it on the job."""
+async def _pr_outcome(
+    job: dict[str, Any], result: str, changes: dict[str, str | None]
+) -> tuple[str, dict[str, Any]]:
+    """Turn a change job's files into a PR (as the bot). Returns the result text with a PR line
+    added, and the meta to record. Runs before the job is marked finished, so a succeeded job
+    always already has its PR link."""
     if not changes:
-        note = "\n\n_No files were changed, so no PR was opened._"
-        return await store.update_outcome(job["id"], (job.get("result") or "") + note, {}) or job
+        return result + "\n\n_No files were changed, so no PR was opened._", {}
     try:
-        pr = await service.open_pull_request(job, changes)
+        pr = await service.open_pull_request({**job, "result": result}, changes)
     except service.JobError as e:
         logger.warning("Job %s: %s", job["id"], e)
-        note = f"\n\n**The change was made but the PR failed:** {e}"
-        return await store.update_outcome(job["id"], (job.get("result") or "") + note,
-                                          {"pr_error": str(e)}) or job
+        return result + f"\n\n**The change was made but the PR failed:** {e}", {"pr_error": str(e)}
     verb = "updated" if pr.get("updated") else "opened"
-    note = f"\n\n**Pull request ({verb}):** {pr['url']}"
-    return await store.update_outcome(
-        job["id"],
-        (job.get("result") or "") + note,
-        {
-            "pr_url": pr["url"],
-            "pr_number": pr["number"],
-            "branch": pr["branch"],
-            "head_sha": pr.get("head_sha"),
-            "pr_updated": bool(pr.get("updated")),
-        },
-    ) or job
+    return result + f"\n\n**Pull request ({verb}):** {pr['url']}", {
+        "pr_url": pr["url"],
+        "pr_number": pr["number"],
+        "branch": pr["branch"],
+        "head_sha": pr.get("head_sha"),
+        "pr_updated": bool(pr.get("updated")),
+    }
 
 
 @router.post("/jobs/{job_id}/finish")
 async def finish(job_id: uuid.UUID, body: FinishRequest):
+    result, meta = body.result, dict(body.meta)
+    if body.status == "succeeded":
+        current = await store.get_job(job_id)
+        if current and current["profile"] == "change" and current["status"] == "running":
+            result, pr_meta = await _pr_outcome(current, result or "", body.changes or {})
+            meta |= pr_meta
     job = await store.finish_job(
-        job_id, body.status, body.result, body.error, body.agent_session_id, body.meta
+        job_id, body.status, result, body.error, body.agent_session_id, meta
     )
     if job is None:
-        # Already cancelled or timed out on this side; the worker's result is dropped.
+        # Already cancelled or timed out on this side; the worker's result is dropped (a PR
+        # opened just above stays on GitHub for Pryce to close).
         return {"recorded": False}
     logger.info("Job %s finished: %s", job_id, body.status)
-    if job["profile"] == "change" and body.status == "succeeded":
-        job = await _open_pr(job, body.changes or {})
     await service.on_finished(job)
     return {"recorded": True}
