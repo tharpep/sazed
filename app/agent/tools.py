@@ -670,7 +670,7 @@ TOOLS: list[ToolDef] = [
     ToolDef(
         name="aggregate_search",
         description=(
-            "Search across Reddit, Hacker News, Bluesky, and news sources simultaneously. "
+            "Search Hacker News, GNews, Google News and curated tech RSS feeds at once. "
             "Returns normalized results with credibility tiers, corroboration clusters, and "
             "bias signals (hedge ratio, named source count, content type, fact-check hits). "
             "Use for news, current events, research, or when you need multi-source coverage "
@@ -691,8 +691,8 @@ TOOLS: list[ToolDef] = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Platforms to search: 'reddit', 'hn', 'bluesky', 'gnews', "
-                        "'google_news_rss', 'rss'. Omit to search all available."
+                        "Platforms to search: 'hn', 'gnews', 'google_news_rss', 'rss'. "
+                        "Omit to search all available."
                     ),
                 },
                 "since": {
@@ -2621,7 +2621,7 @@ _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
         r'|current (price|weather|news|status|version|rate|score)'
         r'|latest (news|version|release|update|price|score)'
         r'|search (the )?web|search online|search for'
-        r'|reddit|hacker news|bluesky|social media'
+        r'|hacker news|social media'
         r'|what.s (trending|happening|going on)'
         r'|aggregate search|cross.?platform)\b', re.I),
     "drive":    re.compile(
@@ -2888,7 +2888,7 @@ async def _send_gateway_request(
 
 _DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
 _TOOL_TIMEOUT_OVERRIDES: dict[str, float] = {
-    "aggregate_search": 90.0,  # fans out to Reddit/HN/Bluesky/news concurrently
+    "aggregate_search": 90.0,  # fans out to HN/news/RSS concurrently
     "ingest_url": 60.0,  # fetches + parses an external page before ingesting
     "web_search": 45.0,  # search_depth="advanced" can run long
 }
