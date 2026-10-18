@@ -1,14 +1,14 @@
 """KB proxy — forwards /kb/* requests to the api-gateway."""
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 
 from app.config import settings
 from app.http_client import get_client
 
 router = APIRouter(tags=["kb"])
 
-_TIMEOUT = 60.0  # sync can take a while
+_TIMEOUT = 60.0
 
 
 def _gateway_url(path: str) -> str:
@@ -60,12 +60,6 @@ async def kb_files():
 async def kb_search(request: Request):
     body = await request.json()
     return await _proxy("POST", "/kb/search", json=body)
-
-
-
-@router.post("/sync")
-async def kb_sync(force: bool = Query(False)):
-    return await _proxy("POST", "/kb/sync", params={"force": force})
 
 
 

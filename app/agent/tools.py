@@ -500,8 +500,8 @@ TOOLS: list[ToolDef] = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Limit search to specific KB categories, matched case-insensitively "
-                        "against Drive subfolder names under \"Knowledge Base\". Omit to search all."
+                        "Limit search to specific KB categories (the category each source was "
+                        "added under, e.g. 'journal'). Omit to search all."
                     ),
                 },
                 "top_k": {
@@ -553,7 +553,7 @@ TOOLS: list[ToolDef] = [
         name="list_kb_sources",
         description=(
             "List all documents currently indexed in the knowledge base. "
-            "Returns each source's file_id, filename, category, chunk count, and sync status. "
+            "Returns each source's file_id, filename, category, origin, summary, and chunk count. "
             "Use file_id with delete_kb_source to remove a specific entry."
         ),
         input_schema={"type": "object", "properties": {}},
@@ -582,22 +582,11 @@ TOOLS: list[ToolDef] = [
         path_params=["source_id"],
     ),
     ToolDef(
-        name="sync_kb",
-        description=(
-            "Sync the knowledge base with Google Drive. "
-            "Picks up new and modified files added since the last sync. "
-            "Call this after using create_file to place a new document in a Drive KB subfolder."
-        ),
-        input_schema={"type": "object", "properties": {}},
-        method="POST",
-        endpoint="/kb/sync",
-    ),
-    ToolDef(
         name="ingest_text",
         description=(
-            "Directly add arbitrary text content to the knowledge base — no Drive file "
-            "required. Use this to save something durable (notes, a decision, research "
-            "findings) without creating a Drive doc first."
+            "Add text content to the knowledge base. Use this to save something durable "
+            "(notes, a decision, research findings) so later searches can find it. "
+            "Drive files are not in the knowledge base; to index one, read it and ingest its text."
         ),
         input_schema={
             "type": "object",
@@ -2016,10 +2005,9 @@ TOOLS: list[ToolDef] = [
     ToolDef(
         name="sync_journal_to_kb",
         description=(
-            "Export journal entries for a period to Google Drive and sync "
-            "into the knowledge base, making them searchable via KB queries. "
-            "Drive folder is selected by category (career → career folder, "
-            "personal → personal folder)."
+            "Export journal entries for a period into the knowledge base (category "
+            "'journal'), making them searchable via KB queries. Re-syncing the same period "
+            "replaces that period's earlier copy."
         ),
         input_schema={
             "type": "object",
@@ -2040,8 +2028,9 @@ TOOLS: list[ToolDef] = [
                 },
             },
         },
-        method="POST",
-        endpoint="/journal/sync-kb",
+        # Internal: the export-and-ingest lives in Sazed's journal router, not the gateway.
+        method="INTERNAL",
+        endpoint="",
     ),
 
     # -------------------------------------------------------------------------
@@ -2433,7 +2422,7 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
                  "send_email", "reply_to_email"],
     "notify":   ["send_notification"],
     "kb":       ["search_knowledge_base", "get_kb_index", "read_kb_source", "list_kb_sources",
-                 "delete_kb_source", "sync_kb", "ingest_text", "ingest_url"],
+                 "delete_kb_source", "ingest_text", "ingest_url"],
     "web":      ["web_search", "fetch_url", "aggregate_search"],
     "drive":    ["list_files", "list_folders", "create_folder", "get_file_info", "read_file",
                  "create_file", "update_file", "append_to_file", "delete_file", "move_file",
@@ -2494,7 +2483,7 @@ THINK_TOOLS: frozenset[str] = frozenset({
     "get_spreadsheet_info", "read_sheet",
     # Write (limited)
     "send_notification", "create_task", "memory_update",
-    "append_to_file", "create_file", "sync_kb",
+    "append_to_file", "create_file",
     "create_journal_entry",
 })
 
@@ -2803,7 +2792,6 @@ async def _send_gateway_request(
 _DEFAULT_TOOL_TIMEOUT_SECONDS = 30.0
 _TOOL_TIMEOUT_OVERRIDES: dict[str, float] = {
     "aggregate_search": 90.0,  # fans out to Reddit/HN/Bluesky/news concurrently
-    "sync_kb": 90.0,  # triggers a full Drive -> KB sync pass
     "ingest_url": 60.0,  # fetches + parses an external page before ingesting
     "web_search": 45.0,  # search_depth="advanced" can run long
 }
@@ -2954,6 +2942,22 @@ async def _execute_internal(name: str, args: dict[str, Any], t0: float) -> ToolR
             logger.exception("memory_update failed")
             msg = f"Memory update failed: {e}"
             return ToolResult(content=msg, status="error", error=msg, duration_ms=_ms())
+
+    if name == "sync_journal_to_kb":
+        from fastapi import HTTPException
+
+        from app.routers.journal import sync_period_to_kb
+
+        try:
+            result = await sync_period_to_kb(
+                args.get("category") or "career",
+                args.get("subcategory"),
+                args.get("period") or "week",
+            )
+        except HTTPException as e:
+            msg = f"Journal sync failed: {e.detail}"
+            return ToolResult(content=msg, status="error", error=msg, duration_ms=_ms())
+        return ToolResult(content=json.dumps(result), status="success", error=None, duration_ms=_ms())
 
     if name in AUTOMATION_TOOL_NAMES:
         content = await automation_tools.handle(name, args)

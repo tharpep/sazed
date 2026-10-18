@@ -34,10 +34,6 @@ class Settings(BaseSettings):
     # not a Drive-write-then-sync round-trip — kept here, not deleted, since it's
     # still a real Drive folder ID that may be referenced by other tooling.
     conversations_folder_id: str = "109Nh8yA11PpQ4iWbJ6LHGIL-2roCn5Ok"  # Drive folder ID for Knowledge Base/Conversations/
-    # KB/Journal/Career/ — used by /journal/sync-kb when category=career
-    journal_folder_id: str = "1mZrbPlHW0TsP7oNDpzSSi38Hjt-PfAVU"
-    # TODO: paste KB/Journal/Personal/ Drive folder ID when the folder is created
-    personal_journal_folder_id: str = ""
 
     # Feature flags
     session_summarization: bool = True  # Generate agent_memory summary after each session
@@ -74,7 +70,7 @@ class Settings(BaseSettings):
         # GitHub
         "create_issue", "update_issue", "create_pr", "add_issue_comment", "add_pr_comment",
         # Knowledge base — mutates the index the agent itself retrieves from
-        "delete_kb_source", "sync_kb", "ingest_text", "ingest_url",
+        "delete_kb_source", "ingest_text", "ingest_url",
         # Finance — precision matters for figures/dates
         "add_subscription", "update_subscription", "delete_subscription",
         "set_budget_limit", "delete_budget", "add_income_source", "delete_income",

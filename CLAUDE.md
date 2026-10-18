@@ -25,7 +25,7 @@ No test suite yet.
 
 **Entry point:** `app/main.py` — FastAPI app with lifespan (DB pool init/close), CORS, API key auth when `API_KEY` is set. Health and tools are public; all other routes require `X-API-Key` when `API_KEY` is set.
 
-**Configuration:** `app/config.py` — pydantic-settings from `.env`. Key vars: `GATEWAY_URL`, `GATEWAY_API_KEY`, `ANTHROPIC_API_KEY`, `DATABASE_URL`, `haiku_model`, `sonnet_model`, `journal_folder_id` (Career), `personal_journal_folder_id` (Personal — empty until the Drive folder is created), `session_summarization`, `session_kb_ingest_enabled`, `session_window_size`.
+**Configuration:** `app/config.py` — pydantic-settings from `.env`. Key vars: `GATEWAY_URL`, `GATEWAY_API_KEY`, `ANTHROPIC_API_KEY`, `DATABASE_URL`, `haiku_model`, `sonnet_model`, `session_summarization`, `session_kb_ingest_enabled`, `session_window_size`.
 
 **Flow:** `POST /chat` → agent loop in `app/agent/loop.py`: load memory and session history, apply context window compression if needed, call LLM (Haiku or Sonnet, escalating at turn 3), on `tool_use` execute tools via `app/agent/tools.py` (all tools call the gateway except `memory_update`), repeat up to 5 turns, then return final response and persist messages. Streaming via `GET /chat/stream` (SSE). Session processing in `app/agent/session.py` runs fact extraction, summarization, and optional KB ingestion after a conversation.
 
@@ -36,19 +36,19 @@ No test suite yet.
 - Tasks: `get_task_lists`, `get_tasks`, `create_task_list`, `rename_task_list`, `create_task`, `update_task`, `delete_task` → `/tasks/*`
 - Email: `list_emails`, `search_emails`, `get_email`, `draft_email`, `send_email`, `reply_to_email` → `/email/*`
 - Notifications: `send_notification` → `/notify`
-- Knowledge Base: `search_knowledge_base`, `get_kb_index`, `read_kb_source`, `list_kb_sources`, `delete_kb_source`, `sync_kb`, `ingest_text`, `ingest_url` → `/kb/*`
+- Knowledge Base: `search_knowledge_base`, `get_kb_index`, `read_kb_source`, `list_kb_sources`, `delete_kb_source`, `ingest_text`, `ingest_url` → `/kb/*`. The KB has no Drive sync (removed 2026-10-18); content comes from console uploads and these ingest tools.
 - Web Search: `web_search`, `fetch_url` → `/search/web*`
 - Storage (Drive): `list_files`, `list_folders`, `create_folder`, `get_file_info`, `read_file`, `create_file`, `update_file`, `append_to_file`, `delete_file`, `move_file`, `copy_file`, `copy_file_from_github` → `/storage/*`
 - GitHub: `list_repos`, `get_repo`, `list_issues`, `get_issue`, `create_issue`, `update_issue`, `add_issue_comment`, `list_prs`, `get_pr`, `add_pr_comment`, `create_pr`, `search_issues`, `get_github_file`, `search_code` → `/github/*`
 - Google Sheets: `create_spreadsheet`, `get_spreadsheet_info`, `read_sheet`, `write_sheet`, `append_sheet_rows`, `clear_sheet_range` → `/sheets/*`
-- Journal: `list_journal_entries`, `get_journal_entry`, `create_journal_entry`, `update_journal_entry`, `delete_journal_entry`, `list_journal_subcategories`, `get_journal_summary`, `export_journal`, `sync_journal_to_kb` → `/journal/*`. All take `category` (`career` | `personal`, default `career`) and `subcategory` (free-form). `sync_journal_to_kb` picks the Drive folder per category.
+- Journal: `list_journal_entries`, `get_journal_entry`, `create_journal_entry`, `update_journal_entry`, `delete_journal_entry`, `list_journal_subcategories`, `get_journal_summary`, `export_journal`, `sync_journal_to_kb` → `/journal/*`. All take `category` (`career` | `personal`, default `career`) and `subcategory` (free-form). `sync_journal_to_kb` ingests a period's export into the KB under category `journal`, with a stable source_id per (category, subcategory, date range) so re-syncing replaces.
 - Homelab: `homelab_status` (GET `/homelab/services` with fixed `compact=true` via `ToolDef.query`), `homelab_service`, `homelab_host`, `homelab_containers`, `restart_container`, `start_container`, `set_service_maintenance` → `/homelab/*`. `restart_container` and `start_container` are in `sensitive_tools`, so they always go through the pending_actions confirmation. Proxmox ACLs on the gateway's power token decide which VMIDs are allowed (108 never is).
 - Automations (internal, `app/automations/tools.py`): `list_automations`, `create_automation`, `update_automation`, `delete_automation` (sensitive), `run_automation`. Chat-created automations are always `sazed_prompt` actions.
 - Memory (internal): `memory_update`
 
 **Automations v2 (`app/automations/`, migration 003):** automations are rows (`automations`, `automation_runs`), not code. Each has a cron `trigger` + timezone, an `action` (`sazed_prompt`, or a `gateway_call` that is GET-only plus a small write allowlist in `models.GATEWAY_WRITE_ALLOWLIST`), and `outputs` (Pushover, journal, `skip_if_nothing`). `runner.py` wakes every 30s. `store.claim_due` row-locks due automations and advances `next_run_at` before running, so a slot never fires twice. Slots more than 15 min late are recorded as `missed`. Prompt runs use `run_turn(..., interactive=True, session_type="automation")` in a fresh session per run, so sensitive tools become pending approvals (run status `needs_approval`) instead of executing unattended; open the run's session in History to approve. REST: `/automations` (list/create), `/automations/{id}` (get with runs/patch/delete), `/automations/{id}/run` (202, background), `/automations/preview-schedule`. `AUTOMATIONS_SCHEDULER=false` stops firing without touching rows. Replaces the old script runner on CT 107.
 
-**Routers:** `health.py` (GET /health), `chat.py` (POST /chat, GET /chat/stream), `conversations.py` (GET /conversations — accepts `?type=` filter, defaults to `chat`, pass `all` for every type; GET /conversations/{id}, POST /conversations/{id}/process, POST /conversations/archive), `memory.py` (GET /memory, PUT /memory, DELETE /memory/{id}), `kb.py` (GET /kb/stats, /kb/sources, /kb/files, POST /kb/search, /kb/sync, DELETE /kb/files/{id}, DELETE /kb), `journal.py` (`/journal/*` proxy to api-gateway + `POST /journal/sync-kb` which exports to the per-category Drive folder and triggers KB ingestion), `tools.py` (GET /tools).
+**Routers:** `health.py` (GET /health), `chat.py` (POST /chat, GET /chat/stream), `conversations.py` (GET /conversations — accepts `?type=` filter, defaults to `chat`, pass `all` for every type; GET /conversations/{id}, POST /conversations/{id}/process, POST /conversations/archive), `memory.py` (GET /memory, PUT /memory, DELETE /memory/{id}), `kb.py` (GET /kb/stats, /kb/sources, /kb/files, POST /kb/search, DELETE /kb/files/{id}, DELETE /kb), `journal.py` (`/journal/*` proxy to api-gateway + `POST /journal/sync-kb` which ingests a period's markdown export into the KB via `/kb/ingest/text`), `tools.py` (GET /tools).
 
 **Database:** `app/db.py` — asyncpg pool for sessions and agent_memory. Sessions store `context_summary` and `summarized_through` for context window management, and `session_type` (`chat` default; `think`, `automation`, `claude` for other callers) for listing/archival/process_session gating.
 
@@ -74,7 +74,7 @@ app/
     chat.py            — POST /chat, POST /chat/stream (SSE), POST /chat/edit, POST /chat/edit/stream (truncate a past user message + everything after it, then resubmit)
     conversations.py   — GET /conversations, GET /conversations/{id}, POST /conversations/{id}/process
     memory.py          — GET /memory, PUT /memory, DELETE /memory/{id}
-    kb.py              — KB proxy: stats, sources, search, sync, delete
+    kb.py              — KB proxy: stats, sources, search, delete
     tools.py           — GET /tools (agent tool registry)
 chat.py                — CLI for testing (calls local /chat)
 ```

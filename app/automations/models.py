@@ -14,7 +14,6 @@ DEFAULT_TIMEZONE = "America/New_York"
 # sensitive tools become pending approvals instead of running unattended.
 GATEWAY_WRITE_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
     {
-        ("POST", "/kb/sync"),
         ("POST", "/notify"),
     }
 )
@@ -106,7 +105,7 @@ class GatewayAction(BaseModel):
     @model_validator(mode="after")
     def _safe_path(self):
         if not self.path.startswith("/") or "://" in self.path or ".." in self.path:
-            raise ValueError("path must be a gateway path like '/kb/sync'")
+            raise ValueError("path must be a gateway path like '/homelab/services'")
         if self.method != "GET" and (self.method, self.path) not in GATEWAY_WRITE_ALLOWLIST:
             allowed = ", ".join(f"{m} {p}" for m, p in sorted(GATEWAY_WRITE_ALLOWLIST))
             raise ValueError(

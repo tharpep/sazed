@@ -30,7 +30,7 @@ _THINK_SESSION_DEFAULT = str(uuid.uuid5(uuid.NAMESPACE_DNS, "think-default"))
 
 _WRITE_TOOLS = frozenset({
     "send_notification", "create_task", "memory_update",
-    "append_to_file", "create_file", "sync_kb",
+    "append_to_file", "create_file",
 })
 
 _CONTEXT_DESCRIPTIONS = {
@@ -78,7 +78,7 @@ def _build_think_system_prompt(
                 "in an appropriate list (a 'Reminders' list if one exists, otherwise create it)\n"
                 "   - A durable fact worth preserving → memory_update\n"
                 "   - A longer observation worth keeping → append_to_file on "
-                "'Sazed Think Log.md' in Drive (find it with list_files, or create it), then sync_kb\n"
+                "'Sazed Think Log.md' in Drive (find it with list_files, or create it)\n"
                 "4. If nothing is genuinely worth doing, do nothing. "
                 "Silence is the correct answer most of the time.\n\n"
                 "## Rules\n"

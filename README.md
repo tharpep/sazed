@@ -119,7 +119,7 @@ All tools call the api-gateway. One base URL, one API key. Full registry with sc
 | tasks | get_task_lists, get_tasks, create_task_list, rename_task_list, create_task, update_task, delete_task |
 | email | list_emails, search_emails, get_email, draft_email |
 | notify | send_notification |
-| kb | search_knowledge_base, list_kb_sources, delete_kb_source, sync_kb |
+| kb | search_knowledge_base, list_kb_sources, delete_kb_source, ingest_text, ingest_url |
 | web | web_search, fetch_url |
 | storage | list_files, list_folders, create_folder, get_file_info, read_file, create_file, update_file, append_to_file, delete_file, move_file, copy_file, copy_file_from_github |
 | github | list_repos, get_repo, list_issues, get_issue, create_issue, update_issue, add_issue_comment, list_prs, get_pr, add_pr_comment, create_pr, search_issues, get_github_file, search_code |
