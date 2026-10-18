@@ -92,7 +92,7 @@ async def count_recent(agent: str) -> int:
         SELECT COUNT(*) FROM jobs
         WHERE agent = $1 AND created_at > NOW() - INTERVAL '24 hours'
           AND status NOT IN ('cancelled', 'needs_approval')
-          AND (requested_by LIKE 'automation:%' OR requested_by LIKE 'think:%'
+          AND (requested_by LIKE 'automation%' OR requested_by LIKE 'think:%'
                OR requested_by LIKE 'ci-fix%' OR requested_by = 'sazed')
         """,
         agent,

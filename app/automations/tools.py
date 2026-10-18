@@ -42,6 +42,13 @@ def _when(moment: datetime | None, tz: str) -> str | None:
     return moment.astimezone(ZoneInfo(tz)).strftime("%a %b %d, %I:%M %p %Z")
 
 
+def _describe_action(action: dict[str, Any]) -> str:
+    if action.get("type") == "job":
+        where = f" on {action.get('repo')} ({action.get('mode')})" if action.get("repo") else ""
+        return f"[{action.get('kind')} job{where}] {action.get('input', '')}"
+    return action.get("prompt") or f"{action.get('method')} {action.get('path')}"
+
+
 def _summary(row: dict[str, Any]) -> dict[str, Any]:
     tz = row["trigger"].get("timezone", DEFAULT_TIMEZONE)
     outputs = row["outputs"] or {}
@@ -55,10 +62,7 @@ def _summary(row: dict[str, Any]) -> dict[str, Any]:
         "cron": row["trigger"]["cron"],
         "timezone": tz,
         "next_runs": [_when(t, tz) for t in upcoming],
-        "prompt": (
-            row["action"].get("prompt")
-            or f"{row['action'].get('method')} {row['action'].get('path')}"
-        )[:300],
+        "prompt": _describe_action(row["action"])[:300],
         "notify": bool(outputs.get("pushover")),
         "journal": bool(outputs.get("journal")),
         "skip_if_nothing": bool(outputs.get("skip_if_nothing")),

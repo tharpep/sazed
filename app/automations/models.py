@@ -115,7 +115,30 @@ class GatewayAction(BaseModel):
         return self
 
 
-Action = Annotated[PromptAction | GatewayAction, Field(discriminator="type")]
+class JobAction(BaseModel):
+    """Run a worker job directly (plans/07): research, a second opinion, or a code task.
+
+    Deterministic: no Sazed turn decides anything; the job runs with this exact input. Change
+    tasks still wait for Pryce's approval in the console before they start.
+    """
+
+    type: Literal["job"] = "job"
+    kind: Literal["research", "second_opinion", "code_task"]
+    # The question (research), the thing to judge (second_opinion) or the instruction (code_task)
+    input: str = Field(..., min_length=3, max_length=8000)
+    depth: Literal["quick", "deep"] = "quick"
+    save_to_kb: bool = False
+    repo: str | None = Field(None, max_length=200)
+    mode: Literal["review", "change"] = "review"
+
+    @model_validator(mode="after")
+    def _repo_for_code(self):
+        if self.kind == "code_task" and not self.repo:
+            raise ValueError("code_task automations need a repo")
+        return self
+
+
+Action = Annotated[PromptAction | GatewayAction | JobAction, Field(discriminator="type")]
 
 
 class PushoverOutput(BaseModel):

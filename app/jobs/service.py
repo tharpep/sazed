@@ -71,7 +71,7 @@ def _check_model(agent: str, model: str) -> None:
 # Jobs started by automations, think runs, CI fix-ups or Sazed with no conversation count against
 # the daily cap (it protects Pryce's subscription limits from runaway loops). Jobs he starts from
 # the console, a chat he's in, or MCP don't: Claude's and Google's own limits are the backstop.
-_CAPPED_PREFIXES = ("automation:", "think:", "ci-fix", "sazed")
+_CAPPED_PREFIXES = ("automation", "think:", "ci-fix", "sazed")
 
 
 def counts_toward_cap(requested_by: str) -> bool:
@@ -247,8 +247,13 @@ async def create_code_task(
         prompt=prompt,
         params=params,
         requested_by=requested_by,
-        # MCP clients can't use Sazed's chat approval, so their code tasks wait in the console.
-        status="needs_approval" if requested_by == "mcp" else "queued",
+        # MCP clients can't use Sazed's chat approval, so their code tasks wait in the console;
+        # so do change tasks an automation starts (nobody approved those in a chat).
+        status=(
+            "needs_approval"
+            if requested_by == "mcp" or (mode == "change" and requested_by.startswith("automation"))
+            else "queued"
+        ),
     )
 
 
@@ -318,7 +323,7 @@ def _label(job: dict[str, Any]) -> str:
     return job["kind"].replace("_", " ").capitalize()
 
 
-def _gist(text: str, limit: int = 220) -> str:
+def gist(text: str, limit: int = 220) -> str:
     """The first sentence or two of a result, as plain text (no headings, lists or links)."""
     lines = [
         _plain(line).strip(" -*>")
@@ -368,7 +373,7 @@ async def _notify(job: dict[str, Any]) -> None:
             f"Open PR #{meta.get('pr_number')} on GitHub",
         )
     elif job["status"] == "succeeded":
-        await notify_simple(f"{label} done", f"{job['title']}\n{_gist(job.get('result') or '')}")
+        await notify_simple(f"{label} done", f"{job['title']}\n{gist(job.get('result') or '')}")
     else:
         status = job["status"].replace("_", " ")
         reason = job.get("error") or "no details"

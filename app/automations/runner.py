@@ -56,15 +56,25 @@ async def _execute(automation: dict[str, Any], run_id: uuid.UUID) -> None:
     name = automation["name"]
     outputs = automation["outputs"] or {}
     try:
+        notify_text = None
+        notify_url = None
         if automation["action"]["type"] == "sazed_prompt":
             status, text, session_id = await _run_prompt(automation)
+        elif automation["action"]["type"] == "job":
+            status, text, notify_text, notify_url = await _run_job(automation["action"], run_id)
+            session_id = None
         else:
             status, text = await _run_gateway_call(automation["action"])
             session_id = None
         delivered: list[str] = []
         if status in ("success", "needs_approval"):
             delivered = await _deliver(
-                name, outputs, text, needs_approval=status == "needs_approval"
+                name,
+                outputs,
+                text,
+                needs_approval=status == "needs_approval",
+                notify_text=notify_text,
+                notify_url=notify_url,
             )
         if status == "needs_approval" and "pushover" not in delivered:
             # Always say when a run is parked on an approval, even with Pushover output off;
@@ -110,6 +120,42 @@ async def _run_prompt(automation: dict[str, Any]) -> tuple[str, str, uuid.UUID]:
     return "success", text, sid
 
 
+async def _run_job(
+    action: dict[str, Any], run_id: uuid.UUID
+) -> tuple[str, str, str | None, str | None]:
+    """Run a worker job and wait for it. Returns (status, full text, short gist, link)."""
+    from app.jobs import service as jobs  # lazy: avoids an import cycle at startup
+
+    requested_by = f"automation-run:{run_id}"  # capped like all automation work
+    kind = action["kind"]
+    if kind == "research":
+        job = await jobs.create_research(
+            action["input"], action.get("depth") or "quick", requested_by,
+            save_to_kb=bool(action.get("save_to_kb")),
+        )
+    elif kind == "second_opinion":
+        job = await jobs.create_second_opinion(action["input"], requested_by)
+    else:
+        job = await jobs.create_code_task(
+            action["repo"], action["input"], action.get("mode") or "review", requested_by
+        )
+    if job["status"] == "needs_approval":
+        return (
+            "needs_approval",
+            f"Job {job['id']} ({job['title']}) is waiting for your approval in Jobs.",
+            "Waiting for your approval in Sazed (Automations, Jobs).",
+            None,
+        )
+    timeout = int((job.get("params") or {}).get("timeout_s", 300)) + 300
+    done = await jobs.wait_for(job["id"], timeout)
+    if done is None:
+        raise RuntimeError(f"job {job['id']} didn't finish within {timeout}s")
+    if done["status"] != "succeeded":
+        raise RuntimeError(f"job {done['id']} {done['status']}: {done.get('error') or ''}")
+    result = done.get("result") or ""
+    return "success", result, jobs.gist(result), (done.get("meta") or {}).get("pr_url")
+
+
 async def _run_gateway_call(action: dict[str, Any]) -> tuple[str, str]:
     resp = await get_http_client().request(
         action["method"],
@@ -135,7 +181,7 @@ def _plain(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
-async def _notify(title: str, message: str, priority: int) -> bool:
+async def _notify(title: str, message: str, priority: int, url: str | None = None) -> bool:
     try:
         resp = await get_http_client().post(
             f"{settings.gateway_url}/notify",
@@ -143,6 +189,7 @@ async def _notify(title: str, message: str, priority: int) -> bool:
                 "title": title[:250],
                 "message": message[:1024] or "(empty)",
                 "priority": priority,
+                **({"url": url, "url_title": "Open on GitHub"} if url else {}),
             },
             headers={"X-API-Key": settings.gateway_api_key},
             timeout=30.0,
@@ -159,13 +206,24 @@ async def _alert(title: str, message: str) -> None:
         await _notify(title, message, priority=0)
 
 
-async def _deliver(name: str, outputs: dict, text: str, needs_approval: bool) -> list[str]:
+async def _deliver(
+    name: str,
+    outputs: dict,
+    text: str,
+    needs_approval: bool,
+    notify_text: str | None = None,
+    notify_url: str | None = None,
+) -> list[str]:
+    """Send a run's output. Pushover gets the short version (a job's gist) when there is one;
+    the journal always gets the full text."""
     delivered: list[str] = []
     if pushover := outputs.get("pushover"):
         title = pushover.get("title") or name
         if needs_approval:
             title = f"Needs approval: {title}"
-        if await _notify(title, _plain(text), pushover.get("priority", 0)):
+        if await _notify(
+            title, notify_text or _plain(text), pushover.get("priority", 0), url=notify_url
+        ):
             delivered.append("pushover")
     if journal := outputs.get("journal"):
         try:
