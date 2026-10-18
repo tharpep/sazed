@@ -2246,8 +2246,46 @@ TOOLS: list[ToolDef] = [
                     "type": "string",
                     "description": "Optional model override, only when Pryce names one.",
                 },
+                "save_to_kb": {
+                    "type": "boolean",
+                    "description": "Save the result to the knowledge base (category 'research'). "
+                    "Only when Pryce asks to keep or save it.",
+                },
             },
             "required": ["question"],
+        },
+        method="INTERNAL",
+        endpoint="",
+    ),
+    ToolDef(
+        name="second_opinion",
+        description=(
+            "Get an independent second opinion from a different model family (Gemini via "
+            "Antigravity, which can check facts on the web) on a plan, decision, design, "
+            "explanation or answer. Use it when Pryce asks for a second opinion or a sanity "
+            "check, or before committing him to something consequential you're unsure about. "
+            "Pass the full thing to judge in `subject` (the reviewer sees nothing else). "
+            "Returns a verdict, concerns and alternatives; waits up to a minute, otherwise "
+            "returns a job_id and the answer is added to this conversation when ready."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "subject": {
+                    "type": "string",
+                    "description": "The plan/decision/answer to evaluate, self-contained.",
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Optional: constraints or goals that matter for the judgment.",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model override (e.g. 'claude-opus-4-6-thinking'), "
+                    "only when Pryce names one.",
+                },
+            },
+            "required": ["subject"],
         },
         method="INTERNAL",
         endpoint="",
@@ -2499,7 +2537,7 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
                  "restart_container", "start_container", "set_service_maintenance"],
     "automations": ["list_automations", "create_automation", "update_automation",
                     "delete_automation", "run_automation"],
-    "research": ["research", "job_status"],
+    "research": ["research", "second_opinion", "job_status"],
 }
 
 # ---------------------------------------------------------------------------
@@ -2614,7 +2652,8 @@ _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
         r'|what.s (down|broken)|services? (down|status|health))\b', re.I),
     "research": re.compile(
         r'\b(research|look into|dig into|deep dive|investigate|compare|comparison'
-        r'|pros and cons|which is better|best (way|option|practice)|job status)\b', re.I),
+        r'|pros and cons|which is better|best (way|option|practice)|job status'
+        r'|second opinion|sanity check|gut check|double.?check)\b', re.I),
     "automations": re.compile(
         r'\b(automations?|automate|scheduled?|recurring|cron'
         r'|every (day|morning|evening|night|week|weekday|monday|tuesday|wednesday|thursday'

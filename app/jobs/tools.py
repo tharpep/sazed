@@ -2,15 +2,25 @@
 
 import json
 import uuid
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
 
 from app.config import settings
 from app.jobs import service, store
 
-JOB_TOOL_NAMES = frozenset({"research", "job_status"})
+JOB_TOOL_NAMES = frozenset({"research", "second_opinion", "job_status"})
+
+# The Sazed session the current turn belongs to, set by the agent loop. A job that outlives the
+# tool call posts its result back into this session (service._post_to_session).
+current_session: ContextVar[str | None] = ContextVar("current_session", default=None)
 
 _RESULT_LIMIT = 12_000
+
+
+def _requested_by() -> str:
+    session = current_session.get()
+    return f"session:{session}" if session else "sazed"
 
 
 def _elapsed(job: dict[str, Any]) -> int | None:
@@ -30,7 +40,24 @@ def _report(job: dict[str, Any]) -> str:
         out["result"] = (job.get("result") or "")[:_RESULT_LIMIT]
     elif job.get("error"):
         out["error"] = job["error"]
+    if (job.get("params") or {}).get("save_to_kb"):
+        out["saved_to_kb"] = job["status"] == "succeeded"
     return json.dumps(out)
+
+
+async def _wait_or_hand_off(job: dict[str, Any]) -> str:
+    """Wait a while for the answer; if it isn't ready, hand back the id and notify on finish."""
+    done = await service.wait_for(job["id"], settings.research_wait_seconds)
+    if done is None and await store.set_notify(job["id"]):
+        return json.dumps(
+            {
+                "job_id": str(job["id"]),
+                "status": "running",
+                "note": "Still working. When it finishes, Pryce gets a Pushover and the answer is "
+                "added to this conversation. job_status fetches it sooner.",
+            }
+        )
+    return _report(done or await store.get_job(job["id"]))
 
 
 async def handle(name: str, args: dict[str, Any]) -> str:
@@ -39,21 +66,21 @@ async def handle(name: str, args: dict[str, Any]) -> str:
             job = await service.create_research(
                 args["question"],
                 args.get("depth") or "quick",
-                requested_by="sazed",
+                requested_by=_requested_by(),
+                model=args.get("model"),
+                context=args.get("context") or "",
+                save_to_kb=bool(args.get("save_to_kb")),
+            )
+            return await _wait_or_hand_off(job)
+
+        if name == "second_opinion":
+            job = await service.create_second_opinion(
+                args["subject"],
+                requested_by=_requested_by(),
                 model=args.get("model"),
                 context=args.get("context") or "",
             )
-            done = await service.wait_for(job["id"], settings.research_wait_seconds)
-            if done is None and await store.set_notify(job["id"]):
-                return json.dumps(
-                    {
-                        "job_id": str(job["id"]),
-                        "status": "running",
-                        "note": "Still researching. Pryce gets a Pushover when it's done; "
-                        "call job_status with this id to fetch the result.",
-                    }
-                )
-            return _report(done or await store.get_job(job["id"]))
+            return await _wait_or_hand_off(job)
 
         if name == "job_status":
             job = await store.get_job(uuid.UUID(str(args["job_id"])))

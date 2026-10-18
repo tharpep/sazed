@@ -46,15 +46,15 @@ class FinishRequest(BaseModel):
     meta: dict[str, Any] = Field(default_factory=dict)
 
 
-async def _notify_all(jobs: list[dict[str, Any]]) -> None:
+async def _after_finish(jobs: list[dict[str, Any]]) -> None:
     for job in jobs:
-        await service.notify_finished(job)
+        await service.on_finished(job)
 
 
 @router.post("/claim")
 async def claim(body: ClaimRequest):
     """The next queued job for one of the worker's agents, or 204 when there's nothing to do."""
-    await _notify_all(await store.expire_stale())
+    await _after_finish(await store.expire_stale())
     job = await store.claim_next(list(body.agents))
     if job is None:
         return Response(status_code=204)
@@ -90,5 +90,5 @@ async def finish(job_id: uuid.UUID, body: FinishRequest):
         # Already cancelled or timed out on this side; the worker's result is dropped.
         return {"recorded": False}
     logger.info("Job %s finished: %s", job_id, body.status)
-    await service.notify_finished(job)
+    await service.on_finished(job)
     return {"recorded": True}

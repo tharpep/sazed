@@ -30,6 +30,7 @@ from app.agent.tools import (
 )
 from app.config import settings
 from app.db import get_pool
+from app.jobs.tools import current_session
 
 logger = logging.getLogger(__name__)
 
@@ -360,6 +361,27 @@ async def _save_message(pool, session_id: uuid.UUID, role: str, content: Any) ->
     )
 
 
+def _merge_same_role(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Join back-to-back messages from the same role into one.
+
+    A worker job that finishes after its turn ended appends its result as an extra assistant
+    message (app/jobs/service.py), right after Sazed's own reply; the API needs roles to alternate.
+    """
+    def blocks(content: Any) -> list[dict[str, Any]]:
+        return [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
+
+    merged: list[dict[str, Any]] = []
+    for m in messages:
+        if merged and merged[-1]["role"] == m["role"]:
+            merged[-1] = {
+                "role": m["role"],
+                "content": blocks(merged[-1]["content"]) + blocks(m["content"]),
+            }
+        else:
+            merged.append(m)
+    return merged
+
+
 async def _setup_turn(
     pool,
     sid: uuid.UUID,
@@ -377,9 +399,9 @@ async def _setup_turn(
         "SELECT role, content FROM messages WHERE session_id = $1 ORDER BY timestamp",
         sid,
     )
-    messages: list[dict[str, Any]] = [
-        {"role": r["role"], "content": json.loads(r["content"])} for r in rows
-    ]
+    messages = _merge_same_role(
+        [{"role": r["role"], "content": json.loads(r["content"])} for r in rows]
+    )
     logger.debug(f"session {sid}: loaded {len(messages)} prior messages")
 
     if not rows:
@@ -599,6 +621,7 @@ async def run_turn(
 
     pool = get_pool()
     sid = uuid.UUID(session_id)
+    current_session.set(session_id)  # lets job tools post late results back here
     await pool.execute(
         "INSERT INTO sessions (id, session_type) VALUES ($1, $2) ON CONFLICT DO NOTHING",
         sid, session_type,
@@ -805,6 +828,7 @@ async def run_turn_stream(
 
     pool = get_pool()
     sid = uuid.UUID(session_id)
+    current_session.set(session_id)  # lets job tools post late results back here
     try:
         await pool.execute(
             "INSERT INTO sessions (id, session_type) VALUES ($1, $2) ON CONFLICT DO NOTHING",

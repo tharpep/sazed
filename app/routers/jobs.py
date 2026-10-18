@@ -1,4 +1,4 @@
-"""Jobs API for the console and MCP (plans/07): list, inspect, start research, cancel."""
+"""Jobs API for the console and MCP (plans/07): list, inspect, start jobs, cancel."""
 
 import uuid
 from typing import Literal
@@ -14,6 +14,14 @@ router = APIRouter()
 class ResearchRequest(BaseModel):
     question: str = Field(..., min_length=3, max_length=4000)
     depth: Literal["quick", "deep"] = "quick"
+    model: str | None = None
+    save_to_kb: bool = False
+    requested_by: Literal["console", "mcp"] = "console"
+
+
+class SecondOpinionRequest(BaseModel):
+    subject: str = Field(..., min_length=3, max_length=20000)
+    context: str = Field("", max_length=4000)
     model: str | None = None
     requested_by: Literal["console", "mcp"] = "console"
 
@@ -38,7 +46,22 @@ async def start_research(body: ResearchRequest):
     """Queue a research job. It runs in the background; poll GET /jobs/{id} for the result."""
     try:
         job = await service.create_research(
-            body.question, body.depth, body.requested_by, model=body.model
+            body.question,
+            body.depth,
+            body.requested_by,
+            model=body.model,
+            save_to_kb=body.save_to_kb,
+        )
+    except service.JobError as e:
+        raise HTTPException(422, str(e)) from e
+    return job
+
+
+@router.post("/second-opinion", status_code=201)
+async def start_second_opinion(body: SecondOpinionRequest):
+    try:
+        job = await service.create_second_opinion(
+            body.subject, body.requested_by, model=body.model, context=body.context
         )
     except service.JobError as e:
         raise HTTPException(422, str(e)) from e
