@@ -15,7 +15,13 @@ from typing import Any, AsyncIterator
 import asyncpg
 from fastapi import Request
 
-from app.agent.client import get_client, model_params, schedule_llm_log, tool_sig
+from app.agent.client import (
+    get_client,
+    model_params,
+    schedule_llm_log,
+    tool_sig,
+    with_message_cache,
+)
 from app.agent.memory import format_for_prompt, load_memory, load_relevant_memory
 from app.agent.procedures import format_procedures_for_prompt, load_relevant_procedures
 from app.agent.session import compress_context
@@ -224,8 +230,10 @@ async def _build_system_prompt(mode: str = "chat", user_message: str = "", locat
         },
         {
             "type": "text",
+            # No breakpoint here: the API allows 4 per request, and the last message
+            # (with_message_cache) needs the slot. Procedures after this block change
+            # per message, so a breakpoint on memory would rarely be reused anyway.
             "text": f"## Known facts about the user\n{memory_section}{location_section}",
-            "cache_control": {"type": "ephemeral"},
         },
     ]
     if settings.procedural_memory_enabled:
@@ -657,7 +665,7 @@ async def run_turn(
                     model=model,
                     **model_params(model),
                     system=system,
-                    messages=messages,
+                    messages=with_message_cache(messages),
                     tools=tools,
                     max_tokens=16000,  # Sonnet thinks; thinking counts toward max_tokens
                 ),
@@ -774,7 +782,7 @@ async def run_turn(
                     model=settings.sonnet_model,
                     **model_params(settings.sonnet_model),
                     system=system,
-                    messages=messages,
+                    messages=with_message_cache(messages),
                     max_tokens=16000,  # Sonnet thinks; thinking counts toward max_tokens
                 ),
                 timeout=settings.turn_timeout_seconds,
@@ -879,7 +887,7 @@ async def run_turn_stream(
                         model=model,
                         **model_params(model),
                         system=system,
-                        messages=messages,
+                        messages=with_message_cache(messages),
                         tools=tools,
                         max_tokens=16000,  # Sonnet thinks; thinking counts toward max_tokens
                     ) as stream:
@@ -1054,7 +1062,7 @@ async def run_turn_stream(
                         model=settings.sonnet_model,
                         **model_params(settings.sonnet_model),
                         system=system,
-                        messages=messages,
+                        messages=with_message_cache(messages),
                         max_tokens=16000,  # Sonnet thinks; thinking counts toward max_tokens
                     ) as stream:
                         async for text in stream.text_stream:
