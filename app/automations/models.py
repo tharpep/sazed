@@ -20,6 +20,27 @@ GATEWAY_WRITE_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
 )
 
 
+# Index = standard cron weekday number; cron allows both 0 and 7 for Sunday.
+_DOW_NAMES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def _cron_dow_to_names(field: str) -> str:
+    """Standard cron numbers weekdays 0=Sunday, but APScheduler 3 numbers them 0=Monday (and
+    from_crontab doesn't convert), so '1-5' would mean Tue-Sat. Day names mean the same to both,
+    so rewrite numbers as names: '1-5' -> 'mon-fri', '0,6' -> 'sun,sat'."""
+
+    def name(token: str) -> str:
+        return _DOW_NAMES[int(token)] if token.isdigit() else token
+
+    parts = []
+    for part in field.split(","):
+        base, slash, step = part.partition("/")
+        if base != "*":
+            base = "-".join(name(t) for t in base.split("-"))
+        parts.append(base + slash + step)
+    return ",".join(parts)
+
+
 class CronSchedule(BaseModel):
     type: Literal["cron"] = "cron"
     cron: str = Field(..., description="5-field crontab, e.g. '0 8 * * 1-5'")
@@ -40,9 +61,20 @@ class CronSchedule(BaseModel):
         return self
 
     def _trigger(self) -> _ApsCron:
+        fields = self.cron.split()
+        if len(fields) != 5:
+            raise ValueError(f"invalid cron '{self.cron}': expected 5 fields")
+        minute, hour, day, month, dow = fields
         try:
-            return _ApsCron.from_crontab(self.cron, timezone=ZoneInfo(self.timezone))
-        except ValueError as e:
+            return _ApsCron(
+                minute=minute,
+                hour=hour,
+                day=day,
+                month=month,
+                day_of_week=_cron_dow_to_names(dow),
+                timezone=ZoneInfo(self.timezone),
+            )
+        except (ValueError, IndexError) as e:
             raise ValueError(f"invalid cron '{self.cron}': {e}") from e
 
     def next_after(self, moment: datetime) -> datetime:
