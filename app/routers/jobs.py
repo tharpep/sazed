@@ -1,0 +1,53 @@
+"""Jobs API for the console and MCP (plans/07): list, inspect, start research, cancel."""
+
+import uuid
+from typing import Literal
+
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
+
+from app.jobs import service, store
+
+router = APIRouter()
+
+
+class ResearchRequest(BaseModel):
+    question: str = Field(..., min_length=3, max_length=4000)
+    depth: Literal["quick", "deep"] = "quick"
+    model: str | None = None
+    requested_by: Literal["console", "mcp"] = "console"
+
+
+@router.get("")
+async def list_jobs(status: str | None = Query(None), limit: int = Query(50, ge=1, le=200)):
+    return {"jobs": await store.list_jobs(status, limit)}
+
+
+@router.get("/{job_id}")
+async def get_job(job_id: uuid.UUID, events: bool = Query(True)):
+    job = await store.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if events:
+        job["events"] = await store.get_events(job_id)
+    return job
+
+
+@router.post("/research", status_code=201)
+async def start_research(body: ResearchRequest):
+    """Queue a research job. It runs in the background; poll GET /jobs/{id} for the result."""
+    try:
+        job = await service.create_research(
+            body.question, body.depth, body.requested_by, model=body.model
+        )
+    except service.JobError as e:
+        raise HTTPException(422, str(e)) from e
+    return job
+
+
+@router.post("/{job_id}/cancel")
+async def cancel(job_id: uuid.UUID):
+    job = await store.cancel_job(job_id)
+    if job is None:
+        raise HTTPException(409, "Job not found or already finished")
+    return job

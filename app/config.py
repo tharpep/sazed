@@ -24,6 +24,24 @@ class Settings(BaseSettings):
     # its outputs (app/automations/runner.py:_alert).
     automation_alerts: bool = True
 
+    # Worker jobs (plans/07, app/jobs/). The sazed-worker container authenticates with
+    # X-Worker-Key; empty disables the worker API (as on GCP).
+    worker_key: str = ""
+    # Models the worker may run, per agent (allowlist: anything else is refused, no Fable).
+    agy_models: list[str] = [
+        "gemini-3.8-flash-high",
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-low",
+        "claude-sonnet-4-6",
+        "claude-opus-4-6-thinking",
+        "gpt-oss-120b-medium",
+    ]
+    claude_models: list[str] = ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5"]
+    # Jobs per agent per rolling 24h; protects the subscriptions for Pryce's own use (Claude Pro).
+    jobs_daily_cap_agy: int = 20
+    jobs_daily_cap_claude: int = 5
+    research_wait_seconds: int = 60  # how long the research tool waits before handing back a job id
+
     # Per-model request settings (thinking, effort) live in agent/client.py:model_params
     haiku_model: str = "claude-haiku-5-5"
     sonnet_model: str = "claude-sonnet-5-5"

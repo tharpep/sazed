@@ -17,6 +17,8 @@ import httpx
 from app.agent.memory import upsert_fact
 from app.automations import tools as automation_tools
 from app.automations.tools import AUTOMATION_TOOL_NAMES
+from app.jobs import tools as job_tools
+from app.jobs.tools import JOB_TOOL_NAMES
 from app.config import settings
 from app.http_client import get_client
 
@@ -2214,6 +2216,56 @@ TOOLS: list[ToolDef] = [
         endpoint="/homelab/services/{service_id}/state",
         path_params=["service_id"],
     ),
+    # ── Research jobs (internal: app/jobs/tools.py, run on the sazed-worker) ─────
+    ToolDef(
+        name="research",
+        description=(
+            "Research a question on the web with an agent (Gemini via Antigravity, live Google "
+            "Search, reads pages, cites sources). Use it for questions that need current or "
+            "detailed outside information: how something works, what changed, comparisons, "
+            "release details, recommendations. depth='quick' (default, about a minute) answers "
+            "in a few sentences; depth='deep' (several minutes) writes a fuller report, use it "
+            "only when asked for depth or the question clearly needs it. Waits up to a minute; "
+            "if the job is still running it returns a job_id and Pryce is notified when it "
+            "finishes. Prefer web_search for a single quick fact and aggregate_search for "
+            "what people or news outlets are saying."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The full question, self-contained (the agent sees nothing else).",
+                },
+                "depth": {"type": "string", "enum": ["quick", "deep"]},
+                "context": {
+                    "type": "string",
+                    "description": "Optional: relevant details from the conversation.",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model override, only when Pryce names one.",
+                },
+            },
+            "required": ["question"],
+        },
+        method="INTERNAL",
+        endpoint="",
+    ),
+    ToolDef(
+        name="job_status",
+        description=(
+            "Check a worker job (e.g. research that was still running) by job_id: status, "
+            "and the result once it has finished."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"job_id": {"type": "string"}},
+            "required": ["job_id"],
+        },
+        method="INTERNAL",
+        endpoint="",
+    ),
     # ── Automations (internal: app/automations/tools.py) ─────────────────────
     ToolDef(
         name="list_automations",
@@ -2447,6 +2499,7 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
                  "restart_container", "start_container", "set_service_maintenance"],
     "automations": ["list_automations", "create_automation", "update_automation",
                     "delete_automation", "run_automation"],
+    "research": ["research", "job_status"],
 }
 
 # ---------------------------------------------------------------------------
@@ -2559,6 +2612,9 @@ _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
         r'|sillytavern|postgres|gateway|restart|reboot|maintenance'
         r'|(is|are) (it|everything|anything|things|the \w+) (up|down|running|working|broken)'
         r'|what.s (down|broken)|services? (down|status|health))\b', re.I),
+    "research": re.compile(
+        r'\b(research|look into|dig into|deep dive|investigate|compare|comparison'
+        r'|pros and cons|which is better|best (way|option|practice)|job status)\b', re.I),
     "automations": re.compile(
         r'\b(automations?|automate|scheduled?|recurring|cron'
         r'|every (day|morning|evening|night|week|weekday|monday|tuesday|wednesday|thursday'
@@ -2572,6 +2628,8 @@ _DEFAULT_CATEGORIES: frozenset[str] = frozenset({"calendar", "tasks", "kb", "web
 _STICKY_CATEGORIES: frozenset[str] = frozenset({"kb"})  # always injected regardless of pattern match
 _CO_SELECT: dict[str, frozenset[str]] = {
     "sheets": frozenset({"drive"}),
+    # Research is the better tool for most web questions, so it rides along with web.
+    "web": frozenset({"research"}),
 }
 
 
@@ -2958,6 +3016,16 @@ async def _execute_internal(name: str, args: dict[str, Any], t0: float) -> ToolR
             msg = f"Journal sync failed: {e.detail}"
             return ToolResult(content=msg, status="error", error=msg, duration_ms=_ms())
         return ToolResult(content=json.dumps(result), status="success", error=None, duration_ms=_ms())
+
+    if name in JOB_TOOL_NAMES:
+        content = await job_tools.handle(name, args)
+        is_error = content.startswith("Error")
+        return ToolResult(
+            content=content,
+            status="error" if is_error else "success",
+            error=content if is_error else None,
+            duration_ms=_ms(),
+        )
 
     if name in AUTOMATION_TOOL_NAMES:
         content = await automation_tools.handle(name, args)

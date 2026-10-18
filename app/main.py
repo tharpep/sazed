@@ -22,12 +22,14 @@ from app.routers import (
     conversations,
     finance,
     health,
+    jobs,
     journal,
     kb,
     memory,
     procedures,
     think,
     tools,
+    worker,
 )
 
 logger = logging.getLogger(__name__)
@@ -125,6 +127,11 @@ app.include_router(
     tags=["automations"],
     dependencies=[Depends(verify_api_key)],
 )
+app.include_router(
+    jobs.router, prefix="/jobs", tags=["jobs"], dependencies=[Depends(verify_api_key)]
+)
+# The worker authenticates with its own key (X-Worker-Key), checked inside the router.
+app.include_router(worker.router, prefix="/worker", tags=["worker"])
 app.include_router(
     procedures.router,
     prefix="/procedures",
