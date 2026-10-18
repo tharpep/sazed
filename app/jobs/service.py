@@ -145,7 +145,20 @@ DEFAULT_GITHUB_OWNER = "tharpep"
 # mode -> (profile, timeout seconds, max tool calls)
 CODE_MODES: dict[str, tuple[str, int, int]] = {
     "review": ("review", 900, 150),
+    "change": ("change", 1800, 200),
 }
+
+_CHANGE_PROMPT = """You are making a change to the GitHub repository {repo} for Pryce. A copy of its
+default branch is in the current directory (no .git). You can read, search, edit and create
+files here. You cannot run commands, tests or git; your edits become a pull request that Pryce
+reviews and merges himself.
+
+Task: {instruction}
+{context}
+Keep the change focused: only what the task needs, matching the repo's existing style. Don't
+edit .github/workflows (it will be rejected). When done, reply in markdown with a PR
+description: what you changed and why, file by file, and anything Pryce should check or test.
+If the task can't or shouldn't be done, change nothing and explain why."""
 
 _REVIEW_PROMPT = """You are reviewing the GitHub repository {repo} for Pryce. It is checked out
 in the current directory (default branch, last 50 commits). You can read and search files and use
@@ -187,27 +200,32 @@ async def create_code_task(
     if not settings.worker_key:
         raise JobError("the worker isn't configured here (WORKER_KEY is empty)")
     if mode not in CODE_MODES:
-        if mode == "change":
-            raise JobError("change jobs (PRs) need the GitHub App, which isn't set up yet")
         raise JobError(f"mode must be one of: {', '.join(CODE_MODES)}")
     repo = repo.strip().removeprefix("https://github.com/").removesuffix(".git").strip("/")
     if "/" not in repo:
         repo = f"{DEFAULT_GITHUB_OWNER}/{repo}"
     if not _REPO_RE.match(repo):
         raise JobError(f"'{repo}' isn't a repo name like owner/name")
+    if repo.lower() in {r.lower() for r in settings.code_task_excluded_repos}:
+        raise JobError(f"{repo} is excluded from code tasks")
     info = await _repo_info(repo)
-    if info.get("private"):
-        raise JobError(f"{repo} is private; private repos need the GitHub App (not set up yet)")
     model = model or DEFAULT_CLAUDE_MODEL
     _check_model("claude", model)
     await _check_cap("claude")
     profile, timeout_s, max_tools = CODE_MODES[mode]
-    prompt = _REVIEW_PROMPT.format(
+    prompt = (_CHANGE_PROMPT if mode == "change" else _REVIEW_PROMPT).format(
         repo=info.get("full_name") or repo,
         instruction=instruction.strip(),
         context=_context_line(context),
     )
-    params = {"repo": repo, "mode": mode, "timeout_s": timeout_s, "max_tool_calls": max_tools}
+    params = {
+        "repo": repo,
+        "mode": mode,
+        "private": bool(info.get("private")),
+        "instruction": instruction.strip(),
+        "timeout_s": timeout_s,
+        "max_tool_calls": max_tools,
+    }
     return await store.create_job(
         kind="code_task",
         agent="claude",
@@ -332,6 +350,54 @@ async def _save_to_kb(job: dict[str, Any]) -> None:
         resp.raise_for_status()
     except httpx.HTTPError:
         logger.warning("KB save failed for job %s", job["id"], exc_info=True)
+
+
+async def clone_token(repo: str) -> str | None:
+    """A read-only, single-repo token from the gateway's GitHub App, for private clones."""
+    try:
+        resp = await get_client().post(
+            f"{settings.gateway_url}/github/app/clone-token",
+            json={"repo": repo},
+            headers={"X-API-Key": settings.gateway_api_key},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        return resp.json()["token"]
+    except (httpx.HTTPError, KeyError):
+        logger.warning("No clone token for %s", repo, exc_info=True)
+        return None
+
+
+async def open_pull_request(job: dict[str, Any], changes: dict[str, str | None]) -> dict:
+    """Have the gateway's bot commit the changed files on sazed/<job id> and open a PR."""
+    params = job.get("params") or {}
+    instruction = params.get("instruction") or job["title"]
+    title = _title(instruction, 70)
+    body = (
+        f"{job.get('result') or ''}\n\n---\n"
+        f"Opened by Sazed's worker (Claude Code, `{job['model']}`) for job `{job['id']}`.\n"
+        f"Task: {instruction}"
+    )
+    resp = await get_client().post(
+        f"{settings.gateway_url}/github/app/pull-request",
+        json={
+            "repo": params["repo"],
+            "branch": f"sazed/{job['id']}",
+            "title": title,
+            "body": body[:60_000],
+            "commit_message": f"{title}\n\nSazed job {job['id']}",
+            "files": changes,
+        },
+        headers={"X-API-Key": settings.gateway_api_key},
+        timeout=120.0,
+    )
+    if not resp.is_success:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except ValueError:
+            detail = resp.text
+        raise JobError(f"couldn't open the PR: {detail}")
+    return resp.json()
 
 
 async def on_finished(job: dict[str, Any]) -> None:

@@ -208,3 +208,17 @@ async def approve_job(job_id: uuid.UUID) -> dict[str, Any] | None:
         job_id,
     )
     return _row(rec) if rec else None
+
+
+async def update_outcome(
+    job_id: uuid.UUID, result: str | None, meta_patch: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Replace the result text and merge keys into meta (e.g. the PR a change job opened)."""
+    rec = await get_pool().fetchrow(
+        "UPDATE jobs SET result = COALESCE($2, result), meta = meta || $3::jsonb "
+        "WHERE id = $1 RETURNING *",
+        job_id,
+        result,
+        json.dumps(meta_patch),
+    )
+    return _row(rec) if rec else None

@@ -44,6 +44,8 @@ class FinishRequest(BaseModel):
     error: str | None = Field(None, max_length=10_000)
     agent_session_id: str | None = Field(None, max_length=200)
     meta: dict[str, Any] = Field(default_factory=dict)
+    # change jobs: path -> new content (base64) or null for a deletion
+    changes: dict[str, str | None] | None = None
 
 
 async def _after_finish(jobs: list[dict[str, Any]]) -> None:
@@ -59,9 +61,13 @@ async def claim(body: ClaimRequest):
     if job is None:
         return Response(status_code=204)
     logger.info("Job %s (%s/%s) claimed by %s", job["id"], job["kind"], job["agent"], body.worker)
-    return {
+    payload = {
         k: job[k] for k in ("id", "kind", "agent", "model", "profile", "prompt", "params")
     } | {"resume_session_id": await _resume_id(job), "parent_id": job.get("parent_id")}
+    params = job.get("params") or {}
+    if params.get("private") and params.get("repo"):
+        payload["clone_token"] = await service.clone_token(params["repo"])
+    return payload
 
 
 async def _resume_id(job: dict[str, Any]) -> str | None:
@@ -81,6 +87,26 @@ async def events(job_id: uuid.UUID, body: EventsRequest):
     return {"cancel": status != "running"}
 
 
+async def _open_pr(job: dict[str, Any], changes: dict[str, str | None]) -> dict[str, Any]:
+    """Turn a finished change job's files into a PR (as the bot) and record it on the job."""
+    if not changes:
+        note = "\n\n_No files were changed, so no PR was opened._"
+        return await store.update_outcome(job["id"], (job.get("result") or "") + note, {}) or job
+    try:
+        pr = await service.open_pull_request(job, changes)
+    except service.JobError as e:
+        logger.warning("Job %s: %s", job["id"], e)
+        note = f"\n\n**The change was made but the PR failed:** {e}"
+        return await store.update_outcome(job["id"], (job.get("result") or "") + note,
+                                          {"pr_error": str(e)}) or job
+    note = f"\n\n**Pull request:** {pr['url']}"
+    return await store.update_outcome(
+        job["id"],
+        (job.get("result") or "") + note,
+        {"pr_url": pr["url"], "pr_number": pr["number"], "branch": pr["branch"]},
+    ) or job
+
+
 @router.post("/jobs/{job_id}/finish")
 async def finish(job_id: uuid.UUID, body: FinishRequest):
     job = await store.finish_job(
@@ -90,5 +116,7 @@ async def finish(job_id: uuid.UUID, body: FinishRequest):
         # Already cancelled or timed out on this side; the worker's result is dropped.
         return {"recorded": False}
     logger.info("Job %s finished: %s", job_id, body.status)
+    if job["profile"] == "change" and body.status == "succeeded":
+        job = await _open_pr(job, body.changes or {})
     await service.on_finished(job)
     return {"recorded": True}

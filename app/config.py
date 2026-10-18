@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     jobs_daily_cap_agy: int = 20
     jobs_daily_cap_claude: int = 5
     research_wait_seconds: int = 60  # how long the research tool waits before handing back a job id
+    # Repos Sazed never runs code tasks on (dormant; the gateway's bot refuses them too).
+    code_task_excluded_repos: list[str] = [
+        "tharpep/Trusted-Model-Registry",
+        "tharpep/gotenberg-fork",
+    ]
 
     # Per-model request settings (thinking, effort) live in agent/client.py:model_params
     haiku_model: str = "claude-haiku-5-5"

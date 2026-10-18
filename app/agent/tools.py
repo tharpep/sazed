@@ -1086,7 +1086,8 @@ TOOLS: list[ToolDef] = [
             "required": ["owner", "repo", "title"],
         },
         method="POST",
-        endpoint="/github/repos/{owner}/{repo}/issues",
+        # As the sazed-worker bot (gateway GitHub App), so Sazed's issues are labeled as his.
+        endpoint="/github/app/repos/{owner}/{repo}/issues",
         path_params=["owner", "repo"],
     ),
     ToolDef(
@@ -1131,7 +1132,7 @@ TOOLS: list[ToolDef] = [
             "required": ["owner", "repo", "number", "body"],
         },
         method="POST",
-        endpoint="/github/repos/{owner}/{repo}/issues/{number}/comments",
+        endpoint="/github/app/repos/{owner}/{repo}/issues/{number}/comments",  # as the bot
         path_params=["owner", "repo", "number"],
     ),
     ToolDef(
@@ -1185,7 +1186,7 @@ TOOLS: list[ToolDef] = [
             "required": ["owner", "repo", "number", "body"],
         },
         method="POST",
-        endpoint="/github/repos/{owner}/{repo}/pulls/{number}/comments",
+        endpoint="/github/app/repos/{owner}/{repo}/issues/{number}/comments",  # as the bot
         path_params=["owner", "repo", "number"],
     ),
     ToolDef(
@@ -2294,12 +2295,14 @@ TOOLS: list[ToolDef] = [
         name="delegate_code_task",
         description=(
             "Hand a code task on one of Pryce's GitHub repos to Claude Code running on the "
-            "homelab worker (his Claude subscription, not API tokens). mode='review' (the only "
-            "mode for now) gets a read-only checkout: explain code, review it, audit for bugs or "
-            "security issues, find where something is implemented, assess a change. It can't "
-            "edit anything. Always confirm with Pryce first (this tool is approval-gated, and "
-            "Claude Code jobs are capped per day). Public repos only until the GitHub App exists. "
-            "Takes minutes; waits up to one, then the result is added to this conversation."
+            "homelab worker (his Claude subscription, not API tokens). mode='review' gets a "
+            "read-only checkout: explain code, review it, audit for bugs or security issues, find "
+            "where something is implemented, assess a change. mode='change' edits a copy of the "
+            "repo and the result becomes a pull request opened by the sazed-worker bot, which "
+            "Pryce reviews and merges himself (nothing is pushed to the default branch). Always "
+            "confirm with Pryce first (this tool is approval-gated, and Claude Code jobs are "
+            "capped per day). Takes minutes; waits up to one, then the result (and PR link) is "
+            "added to this conversation."
         ),
         input_schema={
             "type": "object",
@@ -2312,7 +2315,7 @@ TOOLS: list[ToolDef] = [
                     "type": "string",
                     "description": "What to do, self-contained (the agent sees nothing else).",
                 },
-                "mode": {"type": "string", "enum": ["review"]},
+                "mode": {"type": "string", "enum": ["review", "change"]},
                 "context": {
                     "type": "string",
                     "description": "Optional: relevant details from the conversation.",
