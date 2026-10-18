@@ -13,16 +13,17 @@ JOB_TOOL_NAMES = frozenset(
     {"research", "second_opinion", "delegate_code_task", "continue_job", "job_status"}
 )
 
-# The Sazed session the current turn belongs to, set by the agent loop. A job that outlives the
-# tool call posts its result back into this session (service._post_to_session).
+# "<kind>:<session id>" for the current turn, set by the agent loop: kind is "session" for
+# Pryce's chats, otherwise the session type (automation, think, claude). A job that outlives the
+# tool call posts its result back into this session (service._post_to_session), and the kind
+# decides whether the job counts against the daily cap (service.counts_toward_cap).
 current_session: ContextVar[str | None] = ContextVar("current_session", default=None)
 
 _RESULT_LIMIT = 12_000
 
 
 def _requested_by() -> str:
-    session = current_session.get()
-    return f"session:{session}" if session else "sazed"
+    return current_session.get() or "sazed"
 
 
 def _elapsed(job: dict[str, Any]) -> int | None:

@@ -621,7 +621,8 @@ async def run_turn(
 
     pool = get_pool()
     sid = uuid.UUID(session_id)
-    current_session.set(session_id)  # lets job tools post late results back here
+    # Lets job tools post late results back here, and tell Pryce's chats from automations.
+    current_session.set(f"{'session' if session_type == 'chat' else session_type}:{session_id}")
     await pool.execute(
         "INSERT INTO sessions (id, session_type) VALUES ($1, $2) ON CONFLICT DO NOTHING",
         sid, session_type,
@@ -828,7 +829,8 @@ async def run_turn_stream(
 
     pool = get_pool()
     sid = uuid.UUID(session_id)
-    current_session.set(session_id)  # lets job tools post late results back here
+    # Lets job tools post late results back here, and tell Pryce's chats from automations.
+    current_session.set(f"{'session' if session_type == 'chat' else session_type}:{session_id}")
     try:
         await pool.execute(
             "INSERT INTO sessions (id, session_type) VALUES ($1, $2) ON CONFLICT DO NOTHING",

@@ -10,6 +10,7 @@ from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.logging import LoggingIntegration
 
 from app.automations import runner as automation_runner
+from app.jobs import ci_watch
 from app.config import settings
 from app.db import close_pool, init_pool
 from app.dependencies import verify_api_key
@@ -72,8 +73,10 @@ async def lifespan(app: FastAPI):
     await init_pool()
     await http_client_startup()
     await automation_runner.start()
+    await ci_watch.start()
     yield
     await automation_runner.stop()
+    await ci_watch.stop()
     await http_client_shutdown()
     await close_pool()
 

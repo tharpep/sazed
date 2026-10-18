@@ -68,7 +68,19 @@ def _check_model(agent: str, model: str) -> None:
         raise JobError(f"model '{model}' is not allowed for {agent}. Allowed: {', '.join(allowed)}")
 
 
-async def _check_cap(agent: str) -> None:
+# Jobs started by automations, think runs, CI fix-ups or Sazed with no conversation count against
+# the daily cap (it protects Pryce's subscription limits from runaway loops). Jobs he starts from
+# the console, a chat he's in, or MCP don't: Claude's and Google's own limits are the backstop.
+_CAPPED_PREFIXES = ("automation:", "think:", "ci-fix", "sazed")
+
+
+def counts_toward_cap(requested_by: str) -> bool:
+    return requested_by.startswith(_CAPPED_PREFIXES)
+
+
+async def _check_cap(agent: str, requested_by: str) -> None:
+    if not counts_toward_cap(requested_by):
+        return
     cap = settings.jobs_daily_cap_agy if agent == "agy" else settings.jobs_daily_cap_claude
     used = await store.count_recent(agent)
     if used >= cap:
@@ -94,7 +106,7 @@ async def _create_agy_job(
         raise JobError("the worker isn't configured here (WORKER_KEY is empty)")
     model = model or DEFAULT_AGY_MODEL
     _check_model("agy", model)
-    await _check_cap("agy")
+    await _check_cap("agy", requested_by)
     return await store.create_job(
         kind=kind,
         agent="agy",
@@ -211,7 +223,7 @@ async def create_code_task(
     info = await _repo_info(repo)
     model = model or DEFAULT_CLAUDE_MODEL
     _check_model("claude", model)
-    await _check_cap("claude")
+    await _check_cap("claude", requested_by)
     profile, timeout_s, max_tools = CODE_MODES[mode]
     prompt = (_CHANGE_PROMPT if mode == "change" else _REVIEW_PROMPT).format(
         repo=info.get("full_name") or repo,
@@ -240,15 +252,24 @@ async def create_code_task(
     )
 
 
-async def create_follow_up(parent_id: uuid.UUID, instruction: str, requested_by: str) -> dict:
-    """A child job that resumes the parent's agent session with a new instruction."""
+async def create_follow_up(
+    parent_id: uuid.UUID,
+    instruction: str,
+    requested_by: str,
+    extra_params: dict[str, Any] | None = None,
+) -> dict:
+    """A child job that resumes the parent's agent session with a new instruction.
+
+    A follow-up on a change job needs approval again, except CI fix-ups: they fix a PR Pryce
+    already approved and are bounded (ci_watch.MAX_FIX_ATTEMPTS, daily cap).
+    """
     parent = await store.get_job(parent_id)
     if parent is None:
         raise JobError("no job with that id")
     if parent["status"] != "succeeded" or not parent.get("agent_session_id"):
         raise JobError("only a finished job with an agent session can be continued")
-    await _check_cap(parent["agent"])
-    params = dict(parent.get("params") or {})
+    await _check_cap(parent["agent"], requested_by)
+    params = dict(parent.get("params") or {}) | (extra_params or {})
     params.pop("save_to_kb", None)
     return await store.create_job(
         kind=parent["kind"],
@@ -260,7 +281,11 @@ async def create_follow_up(parent_id: uuid.UUID, instruction: str, requested_by:
         params=params,
         requested_by=requested_by,
         parent_id=parent["id"],
-        status="needs_approval" if parent["profile"] == "change" else "queued",
+        status=(
+            "needs_approval"
+            if parent["profile"] == "change" and not requested_by.startswith("ci-fix")
+            else "queued"
+        ),
     )
 
 
@@ -307,13 +332,25 @@ async def _notify(job: dict[str, Any]) -> None:
         logger.warning("Job notification failed for %s", job["id"], exc_info=True)
 
 
+async def notify_simple(title: str, body: str) -> None:
+    try:
+        await get_client().post(
+            f"{settings.gateway_url}/notify",
+            json={"title": title[:250], "message": body[:1024] or "(empty)", "priority": 0},
+            headers={"X-API-Key": settings.gateway_api_key},
+            timeout=30.0,
+        )
+    except httpx.HTTPError:
+        logger.warning("Notification failed: %s", title, exc_info=True)
+
+
 async def _post_to_session(job: dict[str, Any]) -> None:
     """Append the outcome to the conversation that asked, so it's there when Pryce looks."""
-    requested_by = job.get("requested_by") or ""
-    if not requested_by.startswith("session:"):
+    kind, _, raw_id = (job.get("requested_by") or "").partition(":")
+    if kind not in ("session", "automation", "claude", "think"):
         return
     try:
-        session_id = uuid.UUID(requested_by.removeprefix("session:"))
+        session_id = uuid.UUID(raw_id)
     except ValueError:
         return
     if job["status"] == "succeeded":
@@ -368,8 +405,18 @@ async def clone_token(repo: str) -> str | None:
         return None
 
 
+async def _pr_branch(job: dict[str, Any]) -> str:
+    """A follow-up keeps working on its parent's PR branch; a new change gets sazed/<job id>."""
+    if job.get("parent_id"):
+        parent = await store.get_job(job["parent_id"])
+        branch = ((parent or {}).get("meta") or {}).get("branch")
+        if branch:
+            return branch
+    return f"sazed/{job['id']}"
+
+
 async def open_pull_request(job: dict[str, Any], changes: dict[str, str | None]) -> dict:
-    """Have the gateway's bot commit the changed files on sazed/<job id> and open a PR."""
+    """Have the gateway's bot commit the changed files and open (or update) the PR."""
     params = job.get("params") or {}
     instruction = params.get("instruction") or job["title"]
     title = _title(instruction, 70)
@@ -382,7 +429,7 @@ async def open_pull_request(job: dict[str, Any], changes: dict[str, str | None])
         f"{settings.gateway_url}/github/app/pull-request",
         json={
             "repo": params["repo"],
-            "branch": f"sazed/{job['id']}",
+            "branch": await _pr_branch(job),
             "title": title,
             "body": body[:60_000],
             "commit_message": f"{title}\n\nSazed job {job['id']}",

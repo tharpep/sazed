@@ -99,11 +99,18 @@ async def _open_pr(job: dict[str, Any], changes: dict[str, str | None]) -> dict[
         note = f"\n\n**The change was made but the PR failed:** {e}"
         return await store.update_outcome(job["id"], (job.get("result") or "") + note,
                                           {"pr_error": str(e)}) or job
-    note = f"\n\n**Pull request:** {pr['url']}"
+    verb = "updated" if pr.get("updated") else "opened"
+    note = f"\n\n**Pull request ({verb}):** {pr['url']}"
     return await store.update_outcome(
         job["id"],
         (job.get("result") or "") + note,
-        {"pr_url": pr["url"], "pr_number": pr["number"], "branch": pr["branch"]},
+        {
+            "pr_url": pr["url"],
+            "pr_number": pr["number"],
+            "branch": pr["branch"],
+            "head_sha": pr.get("head_sha"),
+            "pr_updated": bool(pr.get("updated")),
+        },
     ) or job
 
 

@@ -2309,7 +2309,7 @@ TOOLS: list[ToolDef] = [
             "properties": {
                 "repo": {
                     "type": "string",
-                    "description": "Repo as 'owner/name' or just 'name' (owner defaults to tharpep).",
+                    "description": "Repo as 'owner/name' or just 'name' (owner: tharpep).",
                 },
                 "instruction": {
                     "type": "string",

@@ -86,12 +86,14 @@ async def get_events(job_id: uuid.UUID, limit: int = 500) -> list[dict[str, Any]
 
 
 async def count_recent(agent: str) -> int:
-    """Jobs for this agent in the last 24h that used (or will use) a run."""
+    """Capped jobs (automations, think, CI fix-ups, Sazed alone) for this agent in the last 24h."""
     return await get_pool().fetchval(
         """
         SELECT COUNT(*) FROM jobs
         WHERE agent = $1 AND created_at > NOW() - INTERVAL '24 hours'
           AND status NOT IN ('cancelled', 'needs_approval')
+          AND (requested_by LIKE 'automation:%' OR requested_by LIKE 'think:%'
+               OR requested_by LIKE 'ci-fix%' OR requested_by = 'sazed')
         """,
         agent,
     )
@@ -222,3 +224,17 @@ async def update_outcome(
         json.dumps(meta_patch),
     )
     return _row(rec) if rec else None
+
+
+async def awaiting_ci() -> list[dict[str, Any]]:
+    """Recent change jobs with an open PR whose CI result hasn't been handled yet."""
+    rows = await get_pool().fetch(
+        """
+        SELECT * FROM jobs
+        WHERE profile = 'change' AND status = 'succeeded'
+          AND meta ? 'pr_url' AND meta ? 'head_sha' AND NOT meta ? 'ci_state'
+          AND finished_at > NOW() - INTERVAL '6 hours'
+        ORDER BY finished_at
+        """
+    )
+    return [_row(r) for r in rows]

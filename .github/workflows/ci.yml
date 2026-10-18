@@ -1,0 +1,74 @@
+# Checks for pull requests (plans/07): runs on GitHub-hosted runners, never the homelab's
+# self-hosted ones, with a read-only token and no secrets. Sazed's CI watcher reads the result
+# and has the worker fix failing bot PRs. The bot can't edit this directory, so it can't change
+# its own checks (keep check logic inline here, not in scripts it could edit).
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff==0.17.1
+
+      - name: Python compiles
+        run: python -m compileall -q app
+
+      - name: Serious errors anywhere (syntax, undefined names)
+        run: ruff check --select E9,F63,F7,F82 --output-format=github .
+
+      - name: All lint rules on the lines this PR changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: origin/${{ github.base_ref }}
+        run: |
+          python - <<'EOF'
+          # Existing code isn't held to every rule yet; new and edited lines are.
+          import json, os, re, subprocess, sys
+          base = os.environ["BASE"]
+          files = [f for f in subprocess.check_output(
+              ["git", "diff", "--name-only", "--diff-filter=AM", f"{base}...HEAD", "--", "*.py"],
+              text=True).split() if f]
+          if not files:
+              print("No Python files changed."); sys.exit(0)
+          changed, cur = {}, None
+          diff = subprocess.check_output(["git", "diff", "-U0", f"{base}...HEAD", "--", *files], text=True)
+          for line in diff.splitlines():
+              if line.startswith("+++ b/"):
+                  cur = line[6:]; changed.setdefault(cur, set())
+              m = re.match(r"@@ -\S+ \+(\d+)(?:,(\d+))? @@", line)
+              if m and cur:
+                  start, n = int(m.group(1)), int(m.group(2) or 1)
+                  changed[cur].update(range(start, start + n))
+          out = subprocess.run(["ruff", "check", "--output-format=json", "--exit-zero", *files],
+                               capture_output=True, text=True).stdout
+          root = os.getcwd()
+          issues = [i for i in json.loads(out or "[]")
+                    if i["location"]["row"] in changed.get(os.path.relpath(i["filename"], root).replace(os.sep, "/"), set())]
+          for i in issues:
+              rel = os.path.relpath(i["filename"], root)
+              print(f"::error file={rel},line={i['location']['row']}::{i['code']} {i['message']}")
+              print(f"{rel}:{i['location']['row']}: {i['code']} {i['message']}")
+          print(f"{len(issues)} lint problem(s) on changed lines.")
+          sys.exit(1 if issues else 0)
+          EOF
