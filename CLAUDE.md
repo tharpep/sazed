@@ -60,7 +60,8 @@ No test suite yet.
 **Backlog (`app/backlog/`, migration 005, plans/07 section 9b):**
 - `backlog_items` holds ideas, bugs, gaps, optimizations, planned work and known issues.
 - **Never deleted.** Dismissed and stale items stay so `store.similar` dedupe keeps them from coming back.
-- REST `/backlog`: list, get, create, patch, and `POST /backlog/{id}/approve {repo, note}`. Approve queues a change code task right away (requested_by `console`) and stores the `job_id`.
+- REST `/backlog`: list, get, create, patch, and `POST /backlog/{id}/approve {repo, note}`.
+- **Priority:** `rank` is Pryce's saved pick-up order across open items (1 = next). `POST /backlog/{id}/move {position}` inserts there and shifts the others (`null` removes the rank); `store.normalize_ranks` keeps ranks contiguous as items leave the open views. The weekly triage only shortlists and never touches rank. Approve queues a change code task right away (requested_by `console`) and stores the `job_id`.
 - **Pipelines** (`pipelines.py`) are the automation action `{"type": "pipeline", "name": "scout" | "triage"}`:
   - **scout:** agy research on `SCOUT_RESEARCH_MODEL`, then code dedupe, then a judge job on `SCOUT_JUDGE_MODEL` (a different family) that keeps at most `max_ideas`, stored as ideas.
   - **triage:** marks stale after `BACKLOG_STALE_DAYS`, ranks with the judge model, shortlists the top two.
