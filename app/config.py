@@ -65,6 +65,12 @@ class Settings(BaseSettings):
     scout_max_ideas: int = 3
     backlog_stale_days: int = 30
 
+    # Public architecture map for the portfolio (app/activity/public_map.py): Upstash Redis REST
+    # URL and a write token. Empty = publisher off.
+    public_map_redis_url: str = ""
+    public_map_redis_token: str = ""
+    public_map_key: str = "homelab:map"
+
     # Per-model request settings (thinking, effort) live in agent/client.py:model_params
     haiku_model: str = "claude-haiku-5-5"
     sonnet_model: str = "claude-sonnet-5-5"

@@ -20,7 +20,7 @@ from app.db import get_pool
 from app.http_client import get_client
 
 
-def _matches(signal: dict[str, Any], kind: str, title: str, agent: str | None) -> bool:
+def signal_matches(signal: dict[str, Any], kind: str, title: str, agent: str | None) -> bool:
     if not re.fullmatch(signal["kind"], kind):
         return False
     if signal.get("title") and not re.search(signal["title"], title, re.IGNORECASE):
@@ -51,7 +51,7 @@ async def _week_traffic(edges: list[dict[str, Any]]) -> tuple[dict[str, int], di
     for r in rows:
         hit = False
         for e in edges:
-            if any(_matches(s, r["kind"], r["title"], r["agent"]) for s in e["signals"]):
+            if any(signal_matches(s, r["kind"], r["title"], r["agent"]) for s in e["signals"]):
                 counts[f"{e['from']}>{e['to']}"] += 1
                 hit = True
         if not hit:

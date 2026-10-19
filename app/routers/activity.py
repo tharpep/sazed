@@ -38,6 +38,14 @@ async def get_event(event_id: int):
     return event
 
 
+@router.get("/public-map")
+async def public_map_snapshot():
+    """The snapshot the portfolio gets (what app/activity/public_map.py pushes each minute)."""
+    from app.activity import public_map
+
+    return await public_map.build_snapshot()
+
+
 @router.get("/flow")
 async def flow(trace: str = Query(..., min_length=3, max_length=200)):
     return await service.flow(trace)
