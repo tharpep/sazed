@@ -297,6 +297,10 @@ async def triage(run_id: uuid.UUID) -> tuple[str, str, str | None, str | None]:
 
 
 async def run(action: dict[str, Any], run_id: uuid.UUID) -> tuple[str, str, str | None, str | None]:
+    if action["name"] == "map":
+        from app.activity import map_report  # lazy: unrelated to the backlog pipelines
+
+        return await map_report.run(run_id)
     if action["name"] == "scout":
         return await scout(run_id, int(action.get("max_ideas") or settings.scout_max_ideas))
     return await triage(run_id)

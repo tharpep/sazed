@@ -140,10 +140,11 @@ class JobAction(BaseModel):
 
 class PipelineAction(BaseModel):
     """A built-in multi-step pipeline (app/backlog/pipelines.py): the daily scout that files new
-    ideas, or the weekly triage that ranks them. Code drives the steps; models only write text."""
+    ideas, the weekly triage that ranks them, or the weekly architecture map check
+    (app/activity/map_report.py). Code drives the steps; models only write text."""
 
     type: Literal["pipeline"] = "pipeline"
-    name: Literal["scout", "triage"]
+    name: Literal["scout", "triage", "map"]
     max_ideas: int = Field(3, ge=1, le=5)  # scout only
 
 
