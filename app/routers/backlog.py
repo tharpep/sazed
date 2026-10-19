@@ -35,6 +35,7 @@ class ItemUpdate(BaseModel):
     title: str | None = Field(None, min_length=3, max_length=200)
     summary: str | None = Field(None, max_length=8000)
     why: str | None = Field(None, max_length=4000)
+    rank: int | None = Field(None, ge=1, le=999)  # pick-up order; the weekly triage ranks ideas
 
 
 class ApproveRequest(BaseModel):
