@@ -2,8 +2,8 @@
 
 scout:  research job (Gemini) proposes candidates -> code drops anything already recorded ->
         judge job (Claude Opus via agy, a different family) keeps at most N -> stored as ideas.
-triage: open ideas older than BACKLOG_STALE_DAYS go stale -> judge ranks the rest -> top two are
-        shortlisted.
+triage: open ideas older than BACKLOG_STALE_DAYS go stale -> judge orders the rest -> top two are
+        shortlisted (the item's rank, Pryce's priority, is left alone).
 
 The models only write and rank text. Code decides what gets stored, nothing is ever deleted, and
 nothing becomes a PR until Pryce approves it in the console.
@@ -281,10 +281,11 @@ async def triage(run_id: uuid.UUID) -> tuple[str, str, str | None, str | None]:
     by_id = {str(i["id"]): i for i in ideas}
     order = [r for r in ranked if str(r.get("id")) in by_id]
     top = {str(r["id"]) for r in order[:2]}
-    for n, r in enumerate(order, start=1):
+    for r in order:
         item = by_id[str(r["id"])]
         status = "shortlisted" if str(r["id"]) in top else "new"
-        await store.update_item(item["id"], rank=n, status=status)
+        # Shortlisting only: rank is Pryce's saved priority and the triage never touches it.
+        await store.update_item(item["id"], status=status)
 
     lines = ["Top picks:"]
     for r in order[:2]:

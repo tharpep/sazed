@@ -35,7 +35,7 @@ class ItemUpdate(BaseModel):
     title: str | None = Field(None, min_length=3, max_length=200)
     summary: str | None = Field(None, max_length=8000)
     why: str | None = Field(None, max_length=4000)
-    rank: int | None = Field(None, ge=1, le=999)  # pick-up order; the weekly triage ranks ideas
+    rank: int | None = Field(None, ge=1, le=999)  # same as /move with this position
 
 
 class ApproveRequest(BaseModel):
@@ -72,9 +72,32 @@ async def create_item(body: ItemCreate):
 @router.patch("/{item_id}")
 async def update_item(item_id: uuid.UUID, body: ItemUpdate):
     fields = body.model_dump(exclude_none=True)
-    if not fields:
+    rank = fields.pop("rank", None)
+    if not fields and rank is None:
         raise HTTPException(422, "Nothing to update")
-    item = await store.update_item(item_id, **fields)
+    item = await store.update_item(item_id, **fields) if fields else await store.get_item(item_id)
+    if item is None:
+        raise HTTPException(404, "Item not found")
+    if rank is not None:
+        try:
+            item = await store.move_item(item_id, rank)
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from e
+    return item
+
+
+class MoveRequest(BaseModel):
+    # 1 = top; past the end = last; null removes it from the priority list
+    position: int | None = Field(..., ge=1, le=999)
+
+
+@router.post("/{item_id}/move")
+async def move(item_id: uuid.UUID, body: MoveRequest):
+    """Set an open item's priority: insert at `position` (others shift), or unrank with null."""
+    try:
+        item = await store.move_item(item_id, body.position)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
     if item is None:
         raise HTTPException(404, "Item not found")
     return item

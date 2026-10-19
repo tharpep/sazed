@@ -147,6 +147,8 @@ async def update_item(item_id: uuid.UUID, **fields: Any) -> dict[str, Any] | Non
         f"WHERE id = ${len(args)} RETURNING id",
         *args,
     )
+    if rec and "status" in fields:
+        await normalize_ranks()  # leaving (or re-entering) the open views shifts the order
     return await get_item(item_id) if rec else None
 
 
@@ -159,3 +161,56 @@ async def mark_stale(days: int = 30) -> int:
         """
     )
     return int(result.split()[-1])
+
+
+# Priority (rank) is Pryce's saved pick-up order across open items: 1 = next. It changes only when
+# he moves something, and stays contiguous: items that leave the open views give up their rank.
+async def _renumber(conn, ordered_ids: list[uuid.UUID]) -> None:
+    await conn.execute(
+        """
+        UPDATE backlog_items SET rank = NULL
+        WHERE rank IS NOT NULL AND (status <> ALL($1::text[]) OR id <> ALL($2::uuid[]))
+        """,
+        list(OPEN),
+        ordered_ids,
+    )
+    for n, item_id in enumerate(ordered_ids, start=1):
+        await conn.execute(
+            "UPDATE backlog_items SET rank = $2, updated_at = NOW() WHERE id = $1 AND rank IS "
+            "DISTINCT FROM $2",
+            item_id,
+            n,
+        )
+
+
+async def _ranked_open(conn) -> list[uuid.UUID]:
+    rows = await conn.fetch(
+        """
+        SELECT id FROM backlog_items
+        WHERE rank IS NOT NULL AND status = ANY($1::text[])
+        ORDER BY rank, created_at
+        """,
+        list(OPEN),
+    )
+    return [r["id"] for r in rows]
+
+
+async def normalize_ranks() -> None:
+    """Close gaps after items are approved, done or dismissed."""
+    async with get_pool().acquire() as conn, conn.transaction():
+        await _renumber(conn, await _ranked_open(conn))
+
+
+async def move_item(item_id: uuid.UUID, position: int | None) -> dict[str, Any] | None:
+    """Put an open item at `position` (1 = top; past the end = last), or unrank it with None."""
+    async with get_pool().acquire() as conn, conn.transaction():
+        status = await conn.fetchval("SELECT status FROM backlog_items WHERE id = $1", item_id)
+        if status is None:
+            return None
+        if status not in OPEN:
+            raise ValueError(f"item is {status}; only open items have a priority")
+        order = [i for i in await _ranked_open(conn) if i != item_id]
+        if position is not None:
+            order.insert(max(0, min(position - 1, len(order))), item_id)
+        await _renumber(conn, order)
+    return await get_item(item_id)
