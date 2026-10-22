@@ -3107,6 +3107,7 @@ async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
                 client, "DELETE", url, headers=headers, timeout=timeout
             )
             if resp.status_code == 204:
+                _TOOL_CACHE.clear()  # same reason as after other writes, below
                 return _ok("Deleted successfully.")
         else:
             return _err(f"Unsupported method: {tool.method}")
@@ -3117,6 +3118,13 @@ async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
 
     if not resp.is_success:
         return _err(_format_gateway_error(resp.status_code, resp.text))
+
+    if tool.method != "GET":
+        # A write makes cached reads stale: get_events straight after create_event returned
+        # the old calendar for up to the TTL. Clearing everything is cruder than mapping each
+        # write to the reads it affects, but writes are rare next to reads and the cache
+        # refills in one call.
+        _TOOL_CACHE.clear()
 
     try:
         result = _ok(json.dumps(resp.json()))
@@ -3144,15 +3152,33 @@ async def _execute_internal(name: str, args: dict[str, Any], t0: float) -> ToolR
         return int((time.perf_counter() - t0) * 1000)
 
     if name == "memory_update":
+        # The model wrote this, so it is never labelled user_explicit (that label always won and
+        # read as Pryce's own words). How much it counts depends on who was there: in his chat
+        # he sees the call, so it keeps full confidence and can correct an older fact. In think
+        # or an automation, text the model just read (an email, a web page) may be what asked,
+        # so it may add a fact but never replace one, and never an instruction, which goes into
+        # every system prompt.
+        requester = job_tools.current_session.get() or ""
+        attended = requester.startswith("session:")
+        if not attended and args.get("fact_type") == "instruction":
+            msg = "Instruction facts can only be saved from chat."
+            return ToolResult(content=msg, status="error", error=msg, duration_ms=_ms())
         try:
             fact = await upsert_fact(
                 fact_type=args["fact_type"],
                 key=args["key"],
                 value=args["value"],
-                confidence=1.0,
-                source="user_explicit",
+                confidence=1.0 if attended else 0.5,
+                source="memory_update" if attended else f"memory_update:{requester or 'unknown'}",
             )
-            content = f"Remembered: [{fact['fact_type']}] {fact['key']} = {fact['value']}"
+            if fact["value"] != args["value"]:
+                # upsert_fact returns the existing row unchanged when the new value loses.
+                content = (
+                    f"Not changed: [{fact['fact_type']}] {fact['key']} stays "
+                    f"{fact['value']!r} (source {fact['source']})."
+                )
+            else:
+                content = f"Remembered: [{fact['fact_type']}] {fact['key']} = {fact['value']}"
             return ToolResult(content=content, status="success", error=None, duration_ms=_ms())
         except Exception as e:
             logger.exception("memory_update failed")

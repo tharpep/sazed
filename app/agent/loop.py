@@ -40,7 +40,13 @@ from app.jobs.tools import current_session
 
 logger = logging.getLogger(__name__)
 
-_AFFIRMATIVE_RE = re.compile(r'^\s*(yes|confirm|do\s+it|go\s+ahead|approved?)\b', re.I)
+# Whole-message matches only. The old pattern matched the first word, so "yes, but send it to
+# Alice" ran the original action, to the original recipient, without asking anything.
+# Anything that isn't a bare yes or no goes to the classifier.
+_AFFIRMATIVE_RE = re.compile(
+    r'^\s*(yes|confirm(ed)?|do\s+it|go\s+ahead|approved?)\s*[.!]*\s*$', re.I
+)
+_NEGATIVE_RE = re.compile(r'^\s*(no|nope|cancel|stop|don\'?t|never\s*mind)\s*[.!]*\s*$', re.I)
 
 _CONFIRMATION_PROMPT = (
     "CONFIRMATION REQUIRED: Describe exactly what you are about to do and ask the user to confirm. "
@@ -48,8 +54,14 @@ _CONFIRMATION_PROMPT = (
 )
 
 
-async def _classify_affirmative(msg: str, session_id: uuid.UUID | None = None) -> bool:
-    """Ask Haiku whether a message expresses confirmation. Defaults to False on any failure."""
+async def _classify_affirmative(
+    msg: str, actions: list[str], session_id: uuid.UUID | None = None
+) -> bool:
+    """Ask Haiku whether a message approves the pending actions exactly as proposed.
+
+    A reply that changes, conditions or questions the action is not an approval: the caller
+    cancels it and lets the agent re-propose. Defaults to False on any failure.
+    """
     try:
         resp = await get_client().messages.create(
             model=settings.haiku_model,
@@ -58,9 +70,11 @@ async def _classify_affirmative(msg: str, session_id: uuid.UUID | None = None) -
             messages=[{
                 "role": "user",
                 "content": (
-                    "Does this message confirm agreement to proceed with an action?\n\n"
-                    f'Message: "{msg}"\n\n'
-                    "Reply with only YES or NO."
+                    "An assistant proposed these actions and asked the user to confirm:\n"
+                    + "\n".join(f"- {a}" for a in actions)
+                    + f'\n\nUser reply: "{msg}"\n\n'
+                    "Does the reply approve the actions exactly as proposed, with no changes, "
+                    "conditions or questions? Reply with only YES or NO."
                 ),
             }],
         )
@@ -75,10 +89,15 @@ async def _classify_affirmative(msg: str, session_id: uuid.UUID | None = None) -
         return False
 
 
-async def _handle_pending_actions(pool, sid: uuid.UUID, user_message: str) -> str | None:
+async def _handle_pending_actions(
+    pool, sid: uuid.UUID, user_message: str
+) -> tuple[str | None, str | None]:
     """Check for pending confirmations for this session and execute or reject them.
 
-    Returns a response string if a pending action was handled, else None.
+    Returns (reply, note). A reply means the turn is finished and the reply is its answer. A
+    note means the pending actions were cancelled because the message wasn't a plain approval
+    ("yes, but to Alice", "which calendar?"): the agent loop then runs on the message, with the
+    note telling the model that nothing ran, so it can re-propose with the change.
     A misclassified affirmative is worse than a missed one — we default to rejection on any error.
     """
     # Expire stale pending actions (older than 10 min)
@@ -95,29 +114,47 @@ async def _handle_pending_actions(pool, sid: uuid.UUID, user_message: str) -> st
         sid,
     )
     if not rows:
-        return None
+        return None, None
 
+    bare_no = bool(_NEGATIVE_RE.match(user_message))
     is_affirmative = bool(_AFFIRMATIVE_RE.match(user_message))
-    if not is_affirmative:
-        is_affirmative = await _classify_affirmative(user_message, session_id=sid)
+    if not is_affirmative and not bare_no:
+        actions = [f"{r['tool_name']} {r['tool_input']}" for r in rows]
+        is_affirmative = await _classify_affirmative(user_message, actions, session_id=sid)
 
     if not is_affirmative:
-        ids = [row["id"] for row in rows]
-        await pool.execute(
-            "UPDATE pending_actions SET status = 'rejected' WHERE id = ANY($1::uuid[])",
-            ids,
+        # Conditional on status: a concurrent turn may have confirmed some of these already.
+        rejected = await pool.fetch(
+            "UPDATE pending_actions SET status = 'rejected' "
+            "WHERE id = ANY($1::uuid[]) AND status = 'pending' RETURNING tool_name",
+            [row["id"] for row in rows],
         )
-        logger.info(f"session {sid}: {len(rows)} pending action(s) rejected")
-        return "Action cancelled."
+        if not rejected:
+            return None, None
+        logger.info(f"session {sid}: {len(rejected)} pending action(s) rejected")
+        if bare_no:
+            return "Action cancelled.", None
+        names = ", ".join(r["tool_name"] for r in rejected)
+        return None, (
+            f"[System note: the proposed {names} did not run. The reply above was not a plain "
+            "approval, so it was cancelled. If the user still wants it, apply their changes and "
+            "call the tool again; they will be asked to confirm.]"
+        )
 
     parts = []
     for row in rows:
         tool_name = row["tool_name"]
+        # Claim the row before running it. Two requests on the same session (a double tap, a
+        # retry) both read it as pending, and with a plain UPDATE both executed it.
+        claimed = await pool.fetchval(
+            "UPDATE pending_actions SET status = 'confirmed' "
+            "WHERE id = $1 AND status = 'pending' RETURNING id",
+            row["id"],
+        )
+        if claimed is None:
+            continue
         # asyncpg returns JSONB as a str (no codec registered in init_pool)
         tool_input = json.loads(row["tool_input"])
-        await pool.execute(
-            "UPDATE pending_actions SET status = 'confirmed' WHERE id = $1", row["id"]
-        )
         result = await execute_tool(tool_name, tool_input)
         await pool.execute(
             "INSERT INTO action_logs"
@@ -127,9 +164,21 @@ async def _handle_pending_actions(pool, sid: uuid.UUID, user_message: str) -> st
             result.status, result.error, result.duration_ms,
         )
         logger.info(f"session {sid}: confirmed pending action '{tool_name}' → {result.status}")
-        parts.append(result.content)
+        parts.append(f"{tool_name}: {result.content}")
 
-    return "Confirmed. " + " | ".join(parts)
+    if not parts:
+        return "Already confirmed in another request.", None
+    return "Confirmed. " + " | ".join(parts), None
+
+
+def _append_to_user_turn(messages: list[dict[str, Any]], note: str) -> None:
+    """Add a note to this turn's user message, in memory only: the saved history keeps what
+    the user typed, and the note only has to steer this turn."""
+    last = messages[-1]
+    if isinstance(last["content"], str):
+        messages[-1] = {**last, "content": f"{last['content']}\n\n{note}"}
+    else:
+        messages[-1] = {**last, "content": [*last["content"], {"type": "text", "text": note}]}
 
 
 async def _generate_session_title(pool, sid: uuid.UUID, user_message: str) -> None:
@@ -418,9 +467,9 @@ async def _setup_turn(
     messages = await _apply_context_window(pool, sid, messages)
 
     try:
-        tz = ZoneInfo(timezone) if timezone else ZoneInfo("UTC")
+        tz = ZoneInfo(timezone or settings.default_timezone)
     except ZoneInfoNotFoundError:
-        tz = ZoneInfo("UTC")
+        tz = ZoneInfo(settings.default_timezone)
     now = datetime.now(tz)
     tz_prefix = f"[{now.strftime('%A, %B %d, %Y')} {now.strftime('%I:%M %p')} {tz.key}]\n"
     prefixed_message = tz_prefix + user_message
@@ -640,13 +689,15 @@ async def run_turn(
 
     # Layer A: resolve any pending confirmation before running the agent loop
     if interactive and settings.confirmation_required:
-        pending_response = await _handle_pending_actions(pool, sid, user_message)
+        pending_response, pending_note = await _handle_pending_actions(pool, sid, user_message)
         if pending_response is not None:
             await _save_message(
                 pool, sid, "assistant", [{"type": "text", "text": pending_response}]
             )
             await _finalize_turn(pool, sid)
             return session_id, pending_response
+        if pending_note:
+            _append_to_user_turn(messages, pending_note)
 
     client = get_client()
     final_content: list[dict[str, Any]] = []
@@ -853,7 +904,9 @@ async def run_turn_stream(
 
         # Layer A: resolve any pending confirmation before running the agent loop
         if interactive and settings.confirmation_required:
-            pending_response = await _handle_pending_actions(pool, sid, user_message)
+            pending_response, pending_note = await _handle_pending_actions(
+                pool, sid, user_message
+            )
             if pending_response is not None:
                 await _save_message(
                     pool, sid, "assistant", [{"type": "text", "text": pending_response}]
@@ -862,6 +915,8 @@ async def run_turn_stream(
                 yield f"event: text_delta\ndata: {json.dumps({'text': pending_response})}\n\n"
                 yield f"event: done\ndata: {{}}\n\n"
                 return
+            if pending_note:
+                _append_to_user_turn(messages, pending_note)
 
         client = get_client()
         tool_call_counts: Counter = Counter()

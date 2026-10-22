@@ -23,7 +23,7 @@ No test suite yet.
 
 ## Architecture
 
-**Entry point:** `app/main.py` — FastAPI app with lifespan (DB pool init/close), CORS, API key auth when `API_KEY` is set. Health and tools are public; all other routes require `X-API-Key` when `API_KEY` is set.
+**Entry point:** `app/main.py` — FastAPI app with lifespan (DB pool init/close), CORS, API key auth. Health is public and `/worker` checks its own key; every other route requires `X-API-Key`. Startup refuses an empty `API_KEY` unless `ALLOW_NO_AUTH=true` (local dev only).
 
 **Configuration:** `app/config.py` — pydantic-settings from `.env`. Key vars: `GATEWAY_URL`, `GATEWAY_API_KEY`, `ANTHROPIC_API_KEY`, `DATABASE_URL`, `haiku_model`, `sonnet_model`, `session_summarization`, `session_kb_ingest_enabled`, `session_window_size`.
 

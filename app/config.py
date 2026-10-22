@@ -9,8 +9,14 @@ class Settings(BaseSettings):
     # App
     debug: bool = False
     allowed_origins: list[str] = ["https://sazed-frontend.vercel.app", "http://localhost:3000", "http://localhost:3001"]
-    # API key (optional): if set, required on all routes except /health
+    # API key, required on every route except /health (/worker has its own key). Sazed
+    # refuses to start without one unless ALLOW_NO_AUTH=true (local dev only): an unset secret
+    # used to turn auth off silently, which on a public deploy meant an open agent.
     api_key: str = ""
+    allow_no_auth: bool = False
+    # Zone for turns whose caller sends none (sazed-mcp, curl). Chat used to fall back to UTC
+    # and think to New York, so the same question got two different "today"s.
+    default_timezone: str = "America/Indiana/Indianapolis"
 
     # Upstream gateway — single URL, single key for all integrations
     gateway_url: str = ""
