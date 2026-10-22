@@ -19,9 +19,10 @@ from app.agent.client import (
 )
 from app.agent.memory import format_for_prompt, load_memory
 from app.agent.session import compress_context
-from app.agent.tools import execute_tool, get_think_tool_schemas
+from app.agent.tools import THINK_TOOLS, ToolResult, execute_tool, get_think_tool_schemas
 from app.config import settings
 from app.db import get_pool
+from app.jobs.tools import current_session
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,21 @@ def _content_to_dicts(content: list) -> list[dict[str, Any]]:
     return result
 
 
+async def _execute_think_tool(name: str, args: dict[str, Any]) -> ToolResult:
+    """Run a tool only if think mode offers it.
+
+    The schema list limits what the model is shown, not what it can name, and execute_tool
+    runs anything registered. Think reads untrusted email and web text with nobody watching
+    and has no confirmation gate, so a name outside THINK_TOOLS (send_email,
+    delegate_code_task) is refused here rather than trusted to the schema list.
+    """
+    if name not in THINK_TOOLS:
+        logger.warning(f"  think: refused '{name}', not a think-mode tool")
+        msg = f"Tool '{name}' is not available in think mode."
+        return ToolResult(content=msg, status="error", error=msg, duration_ms=0)
+    return await execute_tool(name, args)
+
+
 def _extract_text(content: list[dict[str, Any]]) -> str:
     for block in content:
         if block.get("type") == "text":
@@ -187,6 +203,9 @@ async def run_think(
 
     pool = get_pool()
     sid = uuid.UUID(session_id)
+    # Tools that record who asked (jobs, memory_update) read this. Unset, think's calls were
+    # recorded as "sazed" and memory writes looked like Pryce's own chat.
+    current_session.set(f"think:{session_id}")
 
     await pool.execute(
         "INSERT INTO sessions (id, session_type) VALUES ($1, 'think') ON CONFLICT DO NOTHING",
@@ -204,9 +223,9 @@ async def run_think(
     messages = await _apply_context_window(pool, sid, messages)
 
     try:
-        tz = ZoneInfo(timezone) if timezone else ZoneInfo("America/New_York")
+        tz = ZoneInfo(timezone or settings.default_timezone)
     except ZoneInfoNotFoundError:
-        tz = ZoneInfo("America/New_York")
+        tz = ZoneInfo(settings.default_timezone)
     now = datetime.now(tz)
     tz_prefix = f"[{now.strftime('%A, %B %d, %Y')} {now.strftime('%I:%M %p')} {tz.key}]\n"
 
@@ -258,7 +277,9 @@ async def run_think(
             tool_blocks = [b for b in response.content if b.type == "tool_use"]
             logger.debug(f"  think turn {turn}: tool calls → {[b.name for b in tool_blocks]}")
 
-            raw_results = await asyncio.gather(*[execute_tool(b.name, b.input) for b in tool_blocks])
+            raw_results = await asyncio.gather(
+                *[_execute_think_tool(b.name, b.input) for b in tool_blocks]
+            )
 
             tool_results = []
             log_coros = []

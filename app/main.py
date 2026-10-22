@@ -71,9 +71,22 @@ def _configure_sentry() -> None:
     logger.info("Sentry error tracking enabled")
 
 
+def _require_api_key() -> None:
+    """Refuse to start without API_KEY unless ALLOW_NO_AUTH says this is local dev."""
+    if settings.api_key:
+        return
+    if settings.allow_no_auth:
+        logger.warning("API_KEY is empty and ALLOW_NO_AUTH=true: every route is open (dev only)")
+        return
+    raise RuntimeError(
+        "API_KEY is not set. Set it, or set ALLOW_NO_AUTH=true for local development."
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _configure_logging()
+    _require_api_key()
     _configure_sentry()
     await init_pool()
     await http_client_startup()

@@ -44,7 +44,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 DATABASE_URL=postgresql+asyncpg://...
 ```
 
-Leave `API_KEY` empty for local dev (auth is disabled when unset).
+For local dev without a key, leave `API_KEY` empty and set `ALLOW_NO_AUTH=true`. Without that flag Sazed refuses to start with an empty key.
 
 ---
 

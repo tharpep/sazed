@@ -387,9 +387,9 @@ async def process_session(
     When session_kb_ingest_enabled, writes a structured session summary directly into the KB.
     session_dt: last_activity timestamp used for the KB entry title; defaults to now if not provided.
     session_start: created_at timestamp used to compute session duration; omitted if unavailable.
-    session_type: only "chat" sessions run fact extraction and KB ingestion — other session
-    types are compress-only (summarization still runs if enabled) to avoid polluting memory
-    and the KB with non-conversational traffic.
+    session_type: only "chat" sessions run fact extraction, reflection and KB ingestion — other
+    session types are compress-only (summarization still runs if enabled) to avoid polluting
+    memory and the KB with non-conversational traffic.
     """
     if not messages:
         return {"session_id": session_id, "facts_extracted": 0, "summary": ""}
@@ -421,7 +421,10 @@ async def process_session(
                 not session_failed and write_tool_calls >= settings.procedure_min_write_tools
             )
 
-        if settings.reflection_enabled and action_logs:
+        # Chat only, like fact extraction: reflection writes instruction facts, which go into
+        # every system prompt, from tool inputs, and think/automation inputs come from text
+        # nobody reviewed.
+        if settings.reflection_enabled and action_logs and session_type == "chat":
             notable_logs = _notable_action_logs(action_logs)
             run_reflection = bool(notable_logs)
 
