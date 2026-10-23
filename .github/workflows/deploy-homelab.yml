@@ -1,13 +1,26 @@
+# Deploy on push to main, on the service's own CT (self-hosted runner, live checkout in the
+# runner's work dir). After the restart the service must answer /health within 90 s; if it
+# doesn't, the previous commit is checked out, reinstalled and restarted, and the job fails
+# (the gateway turns a failed "Deploy to Homelab" run into a Pushover).
 name: Deploy to Homelab
 
 on:
   push:
     branches: [main]
 
+concurrency:
+  group: deploy-homelab
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: [self-hosted, sazed]
     steps:
+      # The work dir is the live checkout, so its HEAD is what's running right now.
+      - name: Remember the running commit
+        id: prev
+        run: echo "sha=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
         with:
           clean: false
@@ -20,3 +33,24 @@ jobs:
 
       - name: Restart service
         run: sudo systemctl restart sazed
+
+      - name: Health check
+        run: |
+          for _ in $(seq 1 18); do
+            sleep 5
+            code=$(curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1:8000/health || true)
+            if [ "$code" = "200" ]; then echo "healthy"; exit 0; fi
+          done
+          echo "::error::sazed did not answer /health with 200 within 90 s (last: $code)"
+          exit 1
+
+      - name: Roll back to the previous commit
+        if: failure() && steps.prev.outputs.sha != ''
+        run: |
+          git checkout --force "${{ steps.prev.outputs.sha }}"
+          source $HOME/.local/bin/env
+          poetry install --no-interaction --no-ansi --only main --no-root
+          sudo systemctl restart sazed
+          sleep 15
+          code=$(curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1:8000/health || true)
+          echo "Rolled back to ${{ steps.prev.outputs.sha }}; /health now returns $code"
