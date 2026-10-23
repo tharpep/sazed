@@ -467,12 +467,23 @@ TOOLS: list[ToolDef] = [
     # -------------------------------------------------------------------------
     ToolDef(
         name="send_notification",
-        description="Send a push notification via Pushover.",
+        description=(
+            "Send something to Pryce's phone via Pushover: a short note, a link, or a long "
+            "document. Keep the title to a few words and the message to a sentence or two; "
+            "put links in url. Longer content goes in document and the notification opens it."
+        ),
         input_schema={
             "type": "object",
             "properties": {
-                "title": {"type": "string", "description": "Notification title."},
-                "message": {"type": "string", "description": "Notification body."},
+                "title": {"type": "string", "description": "A few words; must fit one line."},
+                "message": {"type": "string", "description": "A sentence or two."},
+                "document": {
+                    "type": "string",
+                    "description": (
+                        "Optional long content (markdown): notes, a plan, a report. Stored for "
+                        "30 days; the notification links to it."
+                    ),
+                },
                 "priority": {
                     "type": "integer",
                     "enum": [-2, -1, 0, 1],
