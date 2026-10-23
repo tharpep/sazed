@@ -728,10 +728,10 @@ async def run_turn(
 
             tools_used.extend(b.name for b in regular_blocks)
 
-            tool_results: list[dict[str, Any]] = [
-                {"type": "tool_result", "tool_use_id": bid, "content": msg}
+            result_by_id: dict[str, dict[str, Any]] = {
+                bid: {"type": "tool_result", "tool_use_id": bid, "content": msg}
                 for bid, msg in expand_results.items()
-            ]
+            }
 
             # Layer A: gate sensitive tools — insert pending rows, return confirmation prompt
             for block in pending_blocks:
@@ -741,11 +741,11 @@ async def run_turn(
                     sid, block.name, json.dumps(block.input),
                 )
                 logger.info(f"  turn {turn}: gated '{block.name}' — awaiting confirmation")
-                tool_results.append({
+                result_by_id[block.id] = {
                     "type": "tool_result",
                     "tool_use_id": block.id,
                     "content": _CONFIRMATION_PROMPT,
-                })
+                }
 
             results, stuck_msg = await _execute_regular_tools(
                 pool, sid, regular_blocks, tool_call_counts, turn
@@ -763,7 +763,10 @@ async def run_turn(
                 }
                 if tool_result.status == "error":
                     tr["is_error"] = True
-                tool_results.append(tr)
+                result_by_id[block.id] = tr
+
+            # Results go back in the same order the model issued its tool_use blocks.
+            tool_results = [result_by_id[b.id] for b in tool_blocks if b.id in result_by_id]
 
             messages.append({"role": "user", "content": tool_results})
             await _save_message(pool, sid, "user", tool_results)
@@ -974,10 +977,10 @@ async def run_turn_stream(
                 for block in regular_blocks:
                     yield f"event: tool_start\ndata: {json.dumps({'name': block.name})}\n\n"
 
-                tool_results: list[dict[str, Any]] = [
-                    {"type": "tool_result", "tool_use_id": bid, "content": msg}
+                tool_result_by_id: dict[str, dict[str, Any]] = {
+                    bid: {"type": "tool_result", "tool_use_id": bid, "content": msg}
                     for bid, msg in expand_results.items()
-                ]
+                }
 
                 # Layer A: gate sensitive tools — emit awaiting_confirmation events
                 for block in pending_blocks:
@@ -994,13 +997,12 @@ async def run_turn_stream(
                         "name": block.name, "status": "awaiting_confirmation", "error": None,
                     })
                     yield f"event: tool_done\ndata: {evt}\n\n"
-                    tool_results.append({
+                    tool_result_by_id[block.id] = {
                         "type": "tool_result",
                         "tool_use_id": block.id,
                         "content": _CONFIRMATION_PROMPT,
-                    })
+                    }
 
-                tool_result_by_id: dict[str, dict[str, Any]] = {}
                 stuck_msg = None
                 async for block, tool_result, maybe_stuck_msg in _execute_regular_tools_streaming(
                     pool, sid, regular_blocks, tool_call_counts, turn
@@ -1032,9 +1034,9 @@ async def run_turn_stream(
 
                 # tool_done events above stream in actual completion order; the message
                 # sent back to the model preserves the original tool_use block order.
-                tool_results.extend(
-                    tool_result_by_id[b.id] for b in regular_blocks if b.id in tool_result_by_id
-                )
+                tool_results = [
+                    tool_result_by_id[b.id] for b in tool_blocks if b.id in tool_result_by_id
+                ]
 
                 messages.append({"role": "user", "content": tool_results})
                 await _save_message(pool, sid, "user", tool_results)
