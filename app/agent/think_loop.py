@@ -151,6 +151,8 @@ async def _save_message(pool, session_id: uuid.UUID, role: str, content: Any) ->
 
 
 def _content_to_dicts(content: list) -> list[dict[str, Any]]:
+    """Thinking blocks (Opus 5.5 thinks on every call) are kept verbatim, signature included:
+    they must be passed back unchanged on the next turn of the same tool loop."""
     result = []
     for block in content:
         if block.type == "text":
@@ -162,6 +164,8 @@ def _content_to_dicts(content: list) -> list[dict[str, Any]]:
                 "name": block.name,
                 "input": block.input,
             })
+        elif block.type in ("thinking", "redacted_thinking"):
+            result.append(block.model_dump(exclude_none=True))
     return result
 
 
@@ -229,18 +233,19 @@ async def run_think(
 
     for turn in range(4):
         t0 = time.perf_counter()
-        logger.debug(f"  think turn {turn}: calling {settings.haiku_model}")
+        # Opus: this loop decides what Sazed does on its own initiative (plans/11 phase 1).
+        logger.debug(f"  think turn {turn}: calling {settings.opus_model}")
         response = await client.messages.create(
-            model=settings.haiku_model,
-            **model_params(settings.haiku_model),
+            model=settings.opus_model,
+            **model_params(settings.opus_model),
             system=system,
             messages=with_message_cache(messages),
             tools=tools,
-            max_tokens=2048,
+            max_tokens=16000,  # Opus always thinks; thinking counts toward max_tokens
         )
         duration_ms = int((time.perf_counter() - t0) * 1000)
         if settings.llm_cost_tracking:
-            schedule_llm_log(sid, turn, settings.haiku_model, "think", response, duration_ms)
+            schedule_llm_log(sid, turn, settings.opus_model, "think", response, duration_ms)
         logger.debug(
             f"  think turn {turn}: stop_reason={response.stop_reason} "
             f"in {time.perf_counter() - t0:.3f}s"

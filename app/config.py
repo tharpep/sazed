@@ -72,8 +72,11 @@ class Settings(BaseSettings):
     public_map_key: str = "homelab:map"
 
     # Per-model request settings (thinking, effort) live in agent/client.py:model_params
+    # Routing (plans/11 phase 1): Sonnet is the front door for every chat turn, Opus takes a
+    # turn over on request_escalation and runs the think loop, Haiku does background calls.
     haiku_model: str = "claude-haiku-5-5"
     sonnet_model: str = "claude-sonnet-5-5"
+    opus_model: str = "claude-opus-5-5"
 
     # Postgres (Cloud SQL or local)
     database_url: str = ""
@@ -88,6 +91,7 @@ class Settings(BaseSettings):
     # Feature flags
     session_summarization: bool = True  # Generate agent_memory summary after each session
     session_kb_ingest_enabled: bool = True  # Ingest each session's structured summary into the KB
+    idle_session_hours: int = 2  # Process a chat session (memory, KB) once idle this long
 
     # Context window
     session_window_size: int = 15  # Recent messages to keep verbatim; older messages are compressed
@@ -102,10 +106,9 @@ class Settings(BaseSettings):
     # Tool result cache
     tool_cache_ttl_seconds: int = 60  # TTL for read-only tool result cache (TOOL_CACHE_TTL_SECONDS in .env)
 
-    # Model routing — Haiku by default, escalate to Sonnet based on these signals
-    sonnet_turn_threshold: int = 2          # Turn index at which all remaining turns use Sonnet
-    sonnet_message_len_threshold: int = 500  # User message char count that signals Sonnet on turn 0
-    sonnet_write_tools: list[str] = [        # Any of these in prior turns forces Sonnet for all subsequent turns
+    # Write tools: a session that used at least procedure_min_write_tools of these (and no
+    # errors) gets a procedure proposal. The name predates routing; it no longer picks models.
+    sonnet_write_tools: list[str] = [
         # Calendar
         "create_event", "update_event", "delete_event",
         # Tasks

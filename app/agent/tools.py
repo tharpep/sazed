@@ -2539,9 +2539,10 @@ TOOLS: list[ToolDef] = [
     ToolDef(
         name="request_escalation",
         description=(
-            "Call this when the task requires complex reasoning, nuanced writing, or multi-step "
-            "synthesis that exceeds your current confidence. Switches to a more capable model "
-            "for all subsequent turns in this conversation turn."
+            "Call this before orchestration or high-stakes work: planning multi-step work, "
+            "starting or managing worker jobs (research, second opinions, code tasks), "
+            "decisions with real consequences, or reasoning that exceeds your confidence. "
+            "Switches to the most capable model for the rest of this turn."
         ),
         input_schema={"type": "object", "properties": {}},
         method="INTERNAL",

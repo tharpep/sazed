@@ -156,30 +156,16 @@ async def _generate_session_title(pool, sid: uuid.UUID, user_message: str) -> No
         logger.warning(f"Failed to generate session title for {sid}", exc_info=True)
 
 
-def _select_model(
-    turn: int,
-    user_message_long: bool,
-    tools_used: list[str],
-    force_sonnet: bool,
-) -> tuple[str, str]:
-    """Return (model_id, reason) for the current turn.
+def _select_model(escalated: bool) -> tuple[str, str]:
+    """Return (model_id, reason) for the current step of a chat turn.
 
-    Priority (highest first):
-      1. Haiku explicitly requested escalation via request_escalation tool
-      2. Turn index >= sonnet_turn_threshold — deep multi-step chain
-      3. A write tool was used in a prior turn — synthesis needs precision
-      4. User message is long — signals a complex ask
-      5. Default — Haiku
+    Sonnet is the front door for every step, so a turn stays on one model and keeps its prompt
+    cache (caches are per model). Opus takes over the rest of the turn once Sonnet calls
+    request_escalation: orchestration, multi-step planning, consequential decisions.
     """
-    if force_sonnet:
-        return settings.sonnet_model, "escalation_requested"
-    if turn >= settings.sonnet_turn_threshold:
-        return settings.sonnet_model, f"turn>={settings.sonnet_turn_threshold}"
-    if any(t in settings.sonnet_write_tools for t in tools_used):
-        return settings.sonnet_model, "write_tool_used"
-    if user_message_long:
-        return settings.sonnet_model, "long_message"
-    return settings.haiku_model, "default"
+    if escalated:
+        return settings.opus_model, "escalation_requested"
+    return settings.sonnet_model, "front_door"
 
 
 async def _build_system_prompt(mode: str = "chat", user_message: str = "", location=None) -> list[dict[str, Any]]:
@@ -265,8 +251,8 @@ async def _build_system_prompt(mode: str = "chat", user_message: str = "", locat
 def _content_to_dicts(content: list) -> list[dict[str, Any]]:
     """Convert SDK content blocks to plain dicts for the messages array.
 
-    Thinking blocks (Sonnet 5.5) are kept verbatim, signature included: they must be passed
-    back unchanged on the next turn of the same tool loop.
+    Thinking blocks (Sonnet and Opus 5.5) are kept verbatim, signature included: they must be
+    passed back unchanged on the next turn of the same tool loop.
     """
     result = []
     for block in content:
@@ -651,12 +637,10 @@ async def run_turn(
     client = get_client()
     final_content: list[dict[str, Any]] = []
     tool_call_counts: Counter = Counter()
-    force_sonnet = False
-    tools_used: list[str] = []
-    user_message_long = len(user_message) >= settings.sonnet_message_len_threshold
+    escalated = False
 
     for turn in range(settings.agent_max_turns):
-        model, model_reason = _select_model(turn, user_message_long, tools_used, force_sonnet)
+        model, model_reason = _select_model(escalated)
         t0 = time.perf_counter()
         logger.debug(f"  turn {turn}: calling {model} ({model_reason}) with {len(messages)} messages in context")
         try:
@@ -667,7 +651,7 @@ async def run_turn(
                     system=system,
                     messages=with_message_cache(messages),
                     tools=tools,
-                    max_tokens=16000,  # Sonnet thinks; thinking counts toward max_tokens
+                    max_tokens=16000,  # Sonnet/Opus think; thinking counts toward max_tokens
                 ),
                 timeout=settings.turn_timeout_seconds,
             )
@@ -718,15 +702,14 @@ async def run_turn(
                     expand_results[block.id] = msg
                     logger.debug(f"  turn {turn}: request_tools {categories} → {msg[:80]}")
                 elif block.name == "request_escalation":
-                    force_sonnet = True
+                    escalated = True
                     expand_results[block.id] = "Switching to enhanced reasoning mode."
-                    logger.debug(f"  turn {turn}: request_escalation → escalating to Sonnet")
+                    logger.debug(f"  turn {turn}: request_escalation → escalating to Opus")
                 elif interactive and settings.confirmation_required and is_sensitive(block.name):
                     pending_blocks.append(block)
                 else:
                     regular_blocks.append(block)
 
-            tools_used.extend(b.name for b in regular_blocks)
 
             result_by_id: dict[str, dict[str, Any]] = {
                 bid: {"type": "tool_result", "tool_use_id": bid, "content": msg}
@@ -777,16 +760,17 @@ async def run_turn(
     # If the loop exhausted turns mid-tool-use, final_content has no text.
     # Do one synthesis call (no tools) so the user gets an actual response.
     if not any(b.get("type") == "text" for b in final_content):
-        logger.debug(f"  synthesis: loop ended on tool_use, upgrading to {settings.sonnet_model}")
+        synth_model = _select_model(escalated)[0]
+        logger.debug(f"  synthesis: loop ended on tool_use, finishing on {synth_model}")
         synth_t0 = time.perf_counter()
         try:
             synth = await asyncio.wait_for(
                 client.messages.create(
-                    model=settings.sonnet_model,
-                    **model_params(settings.sonnet_model),
+                    model=synth_model,
+                    **model_params(synth_model),
                     system=system,
                     messages=with_message_cache(messages),
-                    max_tokens=16000,  # Sonnet thinks; thinking counts toward max_tokens
+                    max_tokens=16000,  # Sonnet/Opus think; thinking counts toward max_tokens
                 ),
                 timeout=settings.turn_timeout_seconds,
             )
@@ -796,7 +780,7 @@ async def run_turn(
             return session_id, "Request timed out during synthesis — please try again."
         if settings.llm_cost_tracking:
             synth_ms = int((time.perf_counter() - synth_t0) * 1000)
-            schedule_llm_log(sid, None, settings.sonnet_model, "synthesis", synth, synth_ms)
+            schedule_llm_log(sid, None, synth_model, "synthesis", synth, synth_ms)
         content_dicts = _content_to_dicts(synth.content)
         await _save_assistant(pool, sid, content_dicts)
         final_content = content_dicts
@@ -868,16 +852,14 @@ async def run_turn_stream(
 
         client = get_client()
         tool_call_counts: Counter = Counter()
-        force_sonnet = False
-        tools_used: list[str] = []
-        user_message_long = len(user_message) >= settings.sonnet_message_len_threshold
+        escalated = False
 
         for turn in range(settings.agent_max_turns):
             if request is not None and await request.is_disconnected():
                 logger.info(f"session {sid}: client disconnected — stopping before turn {turn}")
                 return
 
-            model, model_reason = _select_model(turn, user_message_long, tools_used, force_sonnet)
+            model, model_reason = _select_model(escalated)
             t0 = time.perf_counter()
             logger.debug(
                 f"  stream turn {turn}: calling {model} ({model_reason}) "
@@ -892,7 +874,7 @@ async def run_turn_stream(
                         system=system,
                         messages=with_message_cache(messages),
                         tools=tools,
-                        max_tokens=16000,  # Sonnet thinks; thinking counts toward max_tokens
+                        max_tokens=16000,  # Sonnet/Opus think; thinking counts toward max_tokens
                     ) as stream:
                         async for text in stream.text_stream:
                             yield f"event: text_delta\ndata: {json.dumps({'text': text})}\n\n"
@@ -958,10 +940,10 @@ async def run_turn_stream(
                             f"  stream turn {turn}: request_tools {categories} → {msg[:80]}"
                         )
                     elif block.name == "request_escalation":
-                        force_sonnet = True
+                        escalated = True
                         expand_results[block.id] = "Switching to enhanced reasoning mode."
                         logger.debug(
-                            f"  stream turn {turn}: request_escalation → escalating to Sonnet"
+                            f"  stream turn {turn}: request_escalation → escalating to Opus"
                         )
                     elif (
                         interactive
@@ -972,7 +954,6 @@ async def run_turn_stream(
                     else:
                         regular_blocks.append(block)
 
-                tools_used.extend(b.name for b in regular_blocks)
 
                 for block in regular_blocks:
                     yield f"event: tool_start\ndata: {json.dumps({'name': block.name})}\n\n"
@@ -1054,18 +1035,19 @@ async def run_turn_stream(
             and isinstance(last_content, list)
             and any(b.get("type") == "tool_result" for b in last_content)
         ):
+            synth_model = _select_model(escalated)[0]
             logger.debug(
-                f"  stream synthesis: loop ended on tool_use, upgrading to {settings.sonnet_model}"
+                f"  stream synthesis: loop ended on tool_use, finishing on {synth_model}"
             )
             synth_t0 = time.perf_counter()
             try:
                 async with asyncio.timeout(settings.turn_timeout_seconds):
                     async with client.messages.stream(
-                        model=settings.sonnet_model,
-                        **model_params(settings.sonnet_model),
+                        model=synth_model,
+                        **model_params(synth_model),
                         system=system,
                         messages=with_message_cache(messages),
-                        max_tokens=16000,  # Sonnet thinks; thinking counts toward max_tokens
+                        max_tokens=16000,  # Sonnet/Opus think; thinking counts toward max_tokens
                     ) as stream:
                         async for text in stream.text_stream:
                             yield f"event: text_delta\ndata: {json.dumps({'text': text})}\n\n"
@@ -1079,7 +1061,7 @@ async def run_turn_stream(
             else:
                 if settings.llm_cost_tracking:
                     synth_ms = int((time.perf_counter() - synth_t0) * 1000)
-                    schedule_llm_log(sid, None, settings.sonnet_model, "synthesis", synth, synth_ms)
+                    schedule_llm_log(sid, None, synth_model, "synthesis", synth, synth_ms)
                 content_dicts = _content_to_dicts(synth.content)
                 await _save_assistant(pool, sid, content_dicts)
 

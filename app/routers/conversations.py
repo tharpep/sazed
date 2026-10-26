@@ -8,7 +8,7 @@ from datetime import timezone
 from fastapi import APIRouter, HTTPException, Query
 
 from app.agent.loop import get_session, list_sessions
-from app.agent.session import process_session
+from app.agent.session import mark_processed, process_session
 from app.db import get_pool
 
 logger = logging.getLogger(__name__)
@@ -62,7 +62,9 @@ async def trigger_process_session(session_id: str):
     )
     session_type = (row["session_type"] if row else None) or "chat"
 
-    return await process_session(session_id, messages, session_type=session_type)
+    result = await process_session(session_id, messages, session_type=session_type)
+    await mark_processed(session_id)
+    return result
 
 
 @router.post("/archive")
@@ -85,7 +87,7 @@ async def archive_sessions(
             # Identify sessions to archive
             session_rows = await conn.fetch(
                 """
-                SELECT id, created_at, last_activity FROM sessions
+                SELECT id, created_at, last_activity, processed_at FROM sessions
                 WHERE last_activity < NOW() - ($1 || ' days')::INTERVAL
                 AND session_type = 'chat'
                 """,
@@ -98,6 +100,9 @@ async def archive_sessions(
             session_ids = [r["id"] for r in session_rows]
             session_timestamps = {r["id"]: r["last_activity"] for r in session_rows}
             session_created = {r["id"]: r["created_at"] for r in session_rows}
+            # The idle sweep already processed these; a second pass would add a duplicate
+            # KB summary and procedure proposal.
+            already_processed = {r["id"] for r in session_rows if r["processed_at"] is not None}
 
             # Copy sessions to archive
             await conn.execute(
@@ -143,6 +148,8 @@ async def archive_sessions(
     kb_failed = 0
     kb_errors: list[str] = []
     for sid in session_ids:
+        if sid in already_processed:
+            continue
         async with pool.acquire() as conn:
             msg_rows = await conn.fetch(
                 "SELECT role, content FROM archived_messages WHERE session_id = $1 ORDER BY timestamp ASC",

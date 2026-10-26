@@ -15,19 +15,20 @@ poetry install
 poetry run uvicorn app.main:app --reload   # dev server
 ruff check app/
 ruff format app/
+poetry run pytest -q                       # tests (also run in CI on every PR)
 ```
 
 Chat CLI: `python chat.py` (separate terminal, hits local agent).
 
-No test suite yet.
+Tests live in `tests/` (pytest, pytest-asyncio in auto mode). No DB or network: tests patch `get_pool`, `get_session` and friends. Add tests for new or changed logic.
 
 ## Architecture
 
 **Entry point:** `app/main.py` — FastAPI app with lifespan (DB pool init/close), CORS, API key auth when `API_KEY` is set. Health and tools are public; all other routes require `X-API-Key` when `API_KEY` is set.
 
-**Configuration:** `app/config.py` — pydantic-settings from `.env`. Key vars: `GATEWAY_URL`, `GATEWAY_API_KEY`, `ANTHROPIC_API_KEY`, `DATABASE_URL`, `haiku_model`, `sonnet_model`, `session_summarization`, `session_kb_ingest_enabled`, `session_window_size`.
+**Configuration:** `app/config.py` — pydantic-settings from `.env`. Key vars: `GATEWAY_URL`, `GATEWAY_API_KEY`, `ANTHROPIC_API_KEY`, `DATABASE_URL`, `haiku_model`, `sonnet_model`, `opus_model`, `session_summarization`, `session_kb_ingest_enabled`, `session_window_size`.
 
-**Flow:** `POST /chat` → agent loop in `app/agent/loop.py`: load memory and session history, apply context window compression if needed, call LLM (Haiku or Sonnet, escalating at turn 3), on `tool_use` execute tools via `app/agent/tools.py` (all tools call the gateway except `memory_update`), repeat up to 5 turns, then return final response and persist messages. Streaming via `GET /chat/stream` (SSE). Session processing in `app/agent/session.py` runs fact extraction, summarization, and optional KB ingestion after a conversation.
+**Flow:** `POST /chat` → agent loop in `app/agent/loop.py`: load memory and session history, apply context window compression if needed, call LLM (Sonnet, or Opus after `request_escalation`), on `tool_use` execute tools via `app/agent/tools.py` (all tools call the gateway except `memory_update`), repeat up to 5 turns, then return final response and persist messages. Streaming via `GET /chat/stream` (SSE). Session processing in `app/agent/session.py` runs fact extraction, summarization, and optional KB ingestion after a conversation.
 
 **Tools (`app/agent/tools.py`):** Registry of tool definitions (name, description, input_schema, method, endpoint). All gateway-backed tools use a single base URL and API key. Only `memory_update` is INTERNAL (writes to agent memory, no gateway call). Executor builds URL from `settings.gateway_url + endpoint`, sends request with `X-API-Key`, returns response body or error string. SSRF guard blocks private/loopback IPs on URL arguments.
 
@@ -98,7 +99,7 @@ No test suite yet.
 
 **Context window:** When a session exceeds `session_window_size` (default 15) messages, overflow is compressed into a rolling summary via Haiku and stored in the session row. The agent sees `[summary_pair] + recent_messages`.
 
-**Session processing (`session.py`):** After each turn, `process_session` runs in parallel: fact extraction (Haiku → upsert to `agent_memory`), optional summary, optional structured KB entry ingested directly via the KB service's `/kb/ingest/text` (no Drive round-trip). Controlled by `session_kb_ingest_enabled` and `session_summarization` settings. Fact extraction and KB ingestion only run when `session_type == "chat"` — other session types are compress-only, so think/automation traffic doesn't pollute memory or the KB.
+**Session processing (`session.py`):** `process_session` runs once per chat session, from `app/agent/idle_sessions.py` (homelab only, when `WORKER_KEY` is set): every 10 minutes it picks up chat sessions idle for `IDLE_SESSION_HOURS` (2) with `processed_at` null and stamps `processed_at`. Manual `POST /conversations/{id}/process` also stamps it, and `/conversations/archive` skips sessions already processed. Inside, the steps run in parallel: fact extraction (Haiku → upsert to `agent_memory`), optional summary, optional structured KB entry ingested directly via the KB service's `/kb/ingest/text` (no Drive round-trip). Controlled by `session_kb_ingest_enabled` and `session_summarization` settings. Fact extraction and KB ingestion only run when `session_type == "chat"` — other session types are compress-only, so think/automation traffic doesn't pollute memory or the KB.
 
 ## Module Layout
 
@@ -130,5 +131,5 @@ chat.py                — CLI for testing (calls local /chat)
 - Config: `from app.config import settings`.
 - Session and memory persistence: asyncpg when `DATABASE_URL` is set.
 - Streaming uses SSE via `StreamingResponse` in `routers/chat.py`; events: `session`, `tool_start`, `tool_done`, `text_delta`, `done`. `run_turn_stream` accepts an optional `request` and polls `is_disconnected()` between turns so a cancelled client stops the loop before the next LLM call.
-- Model selection: Haiku for turns 0–2, Sonnet from turn 3 onward (`_select_model` in `loop.py`).
+- Model selection (plans/11 phase 1, `_select_model` in `loop.py`): Sonnet 5.5 is the front door for every step of a chat turn, so a turn stays on one model and keeps its cache. When Sonnet calls `request_escalation` (orchestration, multi-step planning, consequential decisions), Opus 5.5 takes the rest of that turn, including the synthesis call. The think loop runs on Opus 5.5. Haiku 5.5 does background calls: confirm, titles, compression, session processing, procedures. Per-model thinking/effort params are in `client.model_params`.
 - Prompt caching: base system block, procedures block, and the last tool schema use `cache_control: ephemeral`; each loop LLM call also puts one on the last block of the latest message (`with_message_cache` in client.py, applied to a copy). Max 4 breakpoints per request — that's why the memory-facts block has none. Think mode: 2 system + last tool + last message = 4.

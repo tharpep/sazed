@@ -28,25 +28,26 @@ def get_client() -> anthropic.AsyncAnthropic:
     return _client
 
 
-# Sonnet 5.5 only: thinking blocks dropped (not 400'd) when earlier history or the tool list
-# changed since they were produced (the loop expands tools mid-request), plus server-side
+# Sonnet and Opus 5.5: thinking blocks dropped (not 400'd) when earlier history or the tool
+# list changed since they were produced (the loop expands tools mid-request), plus server-side
 # refusal fallback. Sent as raw headers/body because the pinned SDK (0.49) predates them.
-_SONNET_BETAS = "thinking-binding-controls-2026-08-01,server-side-fallback-2026-07-01"
+_THINKING_MODEL_BETAS = "thinking-binding-controls-2026-08-01,server-side-fallback-2026-07-01"
 
 
 def model_params(model: str) -> dict[str, Any]:
     """Per-model kwargs for messages.create / messages.stream.
 
-    Both 5.5 models think by default. Haiku runs with thinking off, matching Haiku 4.5's
+    All three 5.5 models think by default. Haiku runs with thinking off, matching Haiku 4.5's
     behaviour, so short utility calls (max_tokens=5 etc.) and `content[0].text` reads keep
-    working. Sonnet is the escalation path, so it keeps adaptive thinking at medium effort;
-    callers must size max_tokens for thinking and pass thinking blocks back within a request.
+    working. Sonnet (front door) and Opus (escalation, think loop) keep adaptive thinking at
+    medium effort; Opus 5.5 can't turn thinking off at all. Callers must size max_tokens for
+    thinking and pass thinking blocks back within a request.
     """
     if model == settings.haiku_model:
         return {"thinking": {"type": "disabled"}}
-    if model == settings.sonnet_model:
+    if model in (settings.sonnet_model, settings.opus_model):
         return {
-            "extra_headers": {"anthropic-beta": _SONNET_BETAS},
+            "extra_headers": {"anthropic-beta": _THINKING_MODEL_BETAS},
             "extra_body": {
                 "thinking": {
                     "type": "adaptive",

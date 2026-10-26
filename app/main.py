@@ -12,6 +12,7 @@ from sentry_sdk.integrations.logging import LoggingIntegration
 from app.activity import gateway_feed as activity_feed
 from app.activity import live as activity_live
 from app.activity import public_map
+from app.agent import idle_sessions
 from app.automations import runner as automation_runner
 from app.config import settings
 from app.db import close_pool, init_pool
@@ -79,6 +80,7 @@ async def lifespan(app: FastAPI):
     await http_client_startup()
     await automation_runner.start()
     await ci_watch.start()
+    await idle_sessions.start()
     await activity_live.start()
     await activity_feed.start()
     await public_map.start()
@@ -88,6 +90,7 @@ async def lifespan(app: FastAPI):
     await activity_live.stop()
     await automation_runner.stop()
     await ci_watch.stop()
+    await idle_sessions.stop()
     await http_client_shutdown()
     await close_pool()
 

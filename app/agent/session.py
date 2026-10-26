@@ -374,6 +374,13 @@ async def _ingest_session_to_kb(summary: str, session_dt: datetime) -> tuple[boo
     return True, ""
 
 
+async def mark_processed(session_id: str) -> None:
+    """Stamp processed_at so the idle sweep and archiving don't process the session again."""
+    await get_pool().execute(
+        "UPDATE sessions SET processed_at = NOW() WHERE id = $1", uuid.UUID(session_id)
+    )
+
+
 async def process_session(
     session_id: str,
     messages: list[dict[str, Any]],
