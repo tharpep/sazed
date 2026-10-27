@@ -157,6 +157,15 @@ async def _run_job(
     done = await jobs.wait_for(job["id"], timeout)
     if done is None:
         raise RuntimeError(f"job {job['id']} didn't finish within {timeout}s")
+    if done["status"] == "needs_input":
+        # The worker stopped to ask; the run waits on Pryce like an approval would.
+        question = (done.get("meta") or {}).get("question") or "(no question text)"
+        return (
+            "needs_approval",
+            f"Job {done['id']} ({done['title']}) is waiting for your answer: {question}",
+            "Waiting for your answer in Sazed (Jobs).",
+            None,
+        )
     if done["status"] != "succeeded":
         raise RuntimeError(f"job {done['id']} {done['status']}: {done.get('error') or ''}")
     result = done.get("result") or ""

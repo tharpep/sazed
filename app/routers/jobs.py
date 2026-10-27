@@ -38,6 +38,10 @@ async def get_job(job_id: uuid.UUID, events: bool = Query(True)):
         raise HTTPException(404, "Job not found")
     if events:
         job["events"] = await store.get_events(job_id)
+    # For the console and MCP clients: what a long job is doing, and what it asked.
+    job["recent_steps"] = service.recent_steps(await store.get_recent_events(job_id))
+    asking = job["status"] == "needs_input"
+    job["question"] = (job.get("meta") or {}).get("question") if asking else None
     return job
 
 
@@ -111,6 +115,8 @@ async def approve(job_id: uuid.UUID):
 
 @router.post("/{job_id}/cancel")
 async def cancel(job_id: uuid.UUID):
+    """Stop a job. Its agent session is kept when the worker reports it, so POST
+    /jobs/{id}/continue can redirect it with new directions."""
     job = await store.cancel_job(job_id)
     if job is None:
         raise HTTPException(409, "Job not found or already finished")

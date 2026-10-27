@@ -58,6 +58,53 @@ Reply in markdown:
 If you checked facts online, end with a "Sources:" list."""
 
 
+# Appended to every job prompt Sazed writes (plans/11 phase 1, job controls). A reply whose last
+# line matches becomes a needs_input job: paused, session kept, resumed by continue_job.
+_ASK_RULE = (
+    "\n\nIf you can't continue without a fact or a decision only Pryce can give, stop and make "
+    "the last line of your reply exactly: NEEDS_INPUT: <one short question>. Don't guess at "
+    "anything that matters."
+)
+_NEEDS_INPUT_RE = re.compile(r"^NEEDS_INPUT:\s*(\S.*?)\s*$")
+
+
+def needs_input_question(result: str | None) -> str | None:
+    """The question a worker asked, if its reply ends with a NEEDS_INPUT line."""
+    lines = [line.strip() for line in (result or "").splitlines() if line.strip()]
+    if not lines:
+        return None
+    match = _NEEDS_INPUT_RE.match(lines[-1].strip("*`_ "))  # tolerate markdown emphasis
+    return match.group(1)[:500] if match else None
+
+
+def _short(value: Any, limit: int = 60) -> str:
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def recent_steps(events: list[dict[str, Any]], limit: int = 5) -> list[str]:
+    """The last few tool calls in a job's event stream, as 'tool: first argument' lines.
+
+    Claude Code streams assistant messages with tool_use blocks; agy streams step_update events
+    with step_type "tool" (one per state change, so they're keyed by step index)."""
+    steps: dict[Any, str] = {}
+    for i, row in enumerate(events):
+        ev = row.get("event") or {}
+        update = ev.get("step_update") or {}
+        if update.get("step_type") == "tool" and update.get("tool_info"):
+            info = update["tool_info"]
+            params = info.get("parameters") or {}
+            first = next(iter(params.values()), "") if isinstance(params, dict) else params
+            steps[("agy", update.get("step_index", i))] = f"{info.get('name')}: {_short(first)}"
+        elif ev.get("type") == "assistant":
+            for j, block in enumerate((ev.get("message") or {}).get("content") or []):
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    args = block.get("input") or {}
+                    first = next(iter(args.values()), "") if isinstance(args, dict) else args
+                    steps[("claude", i, j)] = f"{block.get('name')}: {_short(first)}"
+    return list(steps.values())[-limit:]
+
+
 class JobError(ValueError):
     """A job request that breaks a rule (unknown model, cap reached, ...)."""
 
@@ -130,8 +177,11 @@ async def create_research(
     if depth not in RESEARCH_DEPTHS:
         raise JobError(f"depth must be one of: {', '.join(RESEARCH_DEPTHS)}")
     timeout_s, max_tools, shape = RESEARCH_DEPTHS[depth]
-    prompt = _RESEARCH_PROMPT.format(
-        question=question.strip(), context=_context_line(context), shape=shape
+    prompt = (
+        _RESEARCH_PROMPT.format(
+            question=question.strip(), context=_context_line(context), shape=shape
+        )
+        + _ASK_RULE
     )
     params = {
         "depth": depth,
@@ -146,7 +196,10 @@ async def create_research(
 async def create_second_opinion(
     subject: str, requested_by: str, model: str | None = None, context: str = ""
 ) -> dict[str, Any]:
-    prompt = _SECOND_OPINION_PROMPT.format(subject=subject.strip(), context=_context_line(context))
+    prompt = (
+        _SECOND_OPINION_PROMPT.format(subject=subject.strip(), context=_context_line(context))
+        + _ASK_RULE
+    )
     params = {"timeout_s": 300, "max_tool_calls": 20}
     return await _create_agy_job("second_opinion", subject, prompt, params, requested_by, model)
 
@@ -229,7 +282,7 @@ async def create_code_task(
         repo=info.get("full_name") or repo,
         instruction=instruction.strip(),
         context=_context_line(context),
-    )
+    ) + _ASK_RULE
     params = {
         "repo": repo,
         "mode": mode,
@@ -257,6 +310,9 @@ async def create_code_task(
     )
 
 
+_CONTINUABLE = ("succeeded", "needs_input", "cancelled", "timed_out")
+
+
 async def create_follow_up(
     parent_id: uuid.UUID,
     instruction: str,
@@ -271,8 +327,13 @@ async def create_follow_up(
     parent = await store.get_job(parent_id)
     if parent is None:
         raise JobError("no job with that id")
-    if parent["status"] != "succeeded" or not parent.get("agent_session_id"):
-        raise JobError("only a finished job with an agent session can be continued")
+    # needs_input: answering its question. cancelled / timed_out: stop and redirect, resuming
+    # the session the worker reported (store.keep_session).
+    if parent["status"] not in _CONTINUABLE or not parent.get("agent_session_id"):
+        raise JobError(
+            "only a finished, paused (needs_input) or stopped job with an agent session can be "
+            "continued"
+        )
     await _check_cap(parent["agent"], requested_by)
     params = dict(parent.get("params") or {}) | (extra_params or {})
     params.pop("save_to_kb", None)
@@ -295,11 +356,12 @@ async def create_follow_up(
 
 
 async def wait_for(job_id: uuid.UUID, seconds: float) -> dict[str, Any] | None:
-    """Poll until the job finishes or `seconds` pass. Returns the finished row, else None."""
+    """Poll until the job settles (finishes or pauses on a question) or `seconds` pass.
+    Returns the settled row, else None."""
     deadline = asyncio.get_running_loop().time() + seconds
     while True:
         job = await store.get_job(job_id)
-        if job and job["status"] in store.FINAL_STATUSES:
+        if job and job["status"] in store.SETTLED_STATUSES:
             return job
         if asyncio.get_running_loop().time() >= deadline:
             return None
@@ -363,7 +425,12 @@ async def notify_simple(
 async def _notify(job: dict[str, Any]) -> None:
     meta = job.get("meta") or {}
     label = _SHORT_LABEL.get(job["kind"], _label(job))
-    if job["status"] == "succeeded" and meta.get("pr_url"):
+    if job["status"] == "needs_input":
+        await notify_simple(
+            f"{label} needs your input",
+            f"{job['title']}\n{meta.get('question') or '(no question text)'}",
+        )
+    elif job["status"] == "succeeded" and meta.get("pr_url"):
         repo = (job.get("params") or {}).get("repo", "").split("/")[-1]
         verb = "updated" if meta.get("pr_updated") else "opened"
         await notify_simple(
@@ -380,8 +447,24 @@ async def _notify(job: dict[str, Any]) -> None:
         await notify_simple(f"{label} {status}", f"{job['title']}: {reason}")
 
 
+def session_note(job: dict[str, Any]) -> str:
+    """Sazed's own note for the conversation that asked. Never the worker's text: job output is
+    untrusted (it may quote web pages), so it stays in the job, read through job_status as data,
+    and doesn't enter the history as Sazed's words (plans/11 phase 1, job controls)."""
+    label, title, job_id = _label(job), job["title"], job["id"]
+    if job["status"] == "succeeded":
+        return f"**{label} finished:** {title}. The result is in job `{job_id}`; ask me for it."
+    if job["status"] == "needs_input":
+        return (
+            f"**{label} is waiting on you:** {title}. It asked a question (sent to your phone); "
+            f"ask me to show it, or answer and I'll continue job `{job_id}`."
+        )
+    status = job["status"].replace("_", " ")
+    return f"**{label} didn't finish** ({title}): {status}. Details are in job `{job_id}`."
+
+
 async def _post_to_session(job: dict[str, Any]) -> None:
-    """Append the outcome to the conversation that asked, so it's there when Pryce looks."""
+    """Add Sazed's note about the outcome to the conversation that asked."""
     kind, _, raw_id = (job.get("requested_by") or "").partition(":")
     if kind not in ("session", "automation", "claude", "think"):
         return
@@ -389,11 +472,7 @@ async def _post_to_session(job: dict[str, Any]) -> None:
         session_id = uuid.UUID(raw_id)
     except ValueError:
         return
-    if job["status"] == "succeeded":
-        text = f"**{_label(job)} finished:** {job['title']}\n\n{job.get('result') or ''}"
-    else:
-        reason = job.get("error") or job["status"].replace("_", " ")
-        text = f"**{_label(job)} didn't finish** ({job['title']}): {reason}"
+    text = session_note(job)
     # Content blocks so it merges cleanly with an adjacent assistant turn on the next load.
     await get_pool().execute(
         "INSERT INTO messages (session_id, role, content) VALUES ($1, 'assistant', $2)",
@@ -485,11 +564,25 @@ async def open_pull_request(job: dict[str, Any], changes: dict[str, str | None])
     return resp.json()
 
 
-async def on_finished(job: dict[str, Any]) -> None:
-    """Everything that follows a job reaching a final status; each step fails on its own."""
-    await _save_to_kb(job)
+def should_notify(job: dict[str, Any]) -> bool:
+    """Notify when the requester stopped waiting (notify was set at hand-off), or when a job
+    asks a question and nobody is waiting on the call: MCP, console and think jobs. A chat that's
+    still waiting reads the question from the tool result; automation runs alert on their own.
+    """
     if job.get("notify"):
-        # The requester stopped waiting: tell Pryce, and put the answer where it was asked.
+        return True
+    requested_by = job.get("requested_by") or ""
+    return job["status"] == "needs_input" and not requested_by.startswith(
+        ("session:", "automation")
+    )
+
+
+async def on_finished(job: dict[str, Any]) -> None:
+    """Everything that follows a job settling (final, or paused on a question); each step fails
+    on its own."""
+    await _save_to_kb(job)
+    if should_notify(job):
+        # Nobody is waiting on the call: tell Pryce, and leave Sazed's note where it was asked.
         await _notify(job)
         try:
             await _post_to_session(job)

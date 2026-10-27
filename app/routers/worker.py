@@ -112,18 +112,23 @@ async def _pr_outcome(
 
 @router.post("/jobs/{job_id}/finish")
 async def finish(job_id: uuid.UUID, body: FinishRequest):
-    result, meta = body.result, dict(body.meta)
-    if body.status == "succeeded":
+    result, meta, status = body.result, dict(body.meta), body.status
+    question = service.needs_input_question(result) if status == "succeeded" else None
+    if question:
+        # The agent stopped to ask Pryce something: pause the job (session kept) rather than
+        # finish it, and open no PR for a change it didn't complete.
+        status, meta["question"] = "needs_input", question
+    elif status == "succeeded":
         current = await store.get_job(job_id)
         if current and current["profile"] == "change" and current["status"] == "running":
             result, pr_meta = await _pr_outcome(current, result or "", body.changes or {})
             meta |= pr_meta
-    job = await store.finish_job(
-        job_id, body.status, result, body.error, body.agent_session_id, meta
-    )
+    job = await store.finish_job(job_id, status, result, body.error, body.agent_session_id, meta)
     if job is None:
         # Already cancelled or timed out on this side; the worker's result is dropped (a PR
-        # opened just above stays on GitHub for Pryce to close).
+        # opened just above stays on GitHub for Pryce to close). A cancelled job keeps the
+        # agent session the worker reports, so it can be redirected with continue_job.
+        await store.keep_session(job_id, body.agent_session_id)
         return {"recorded": False}
     logger.info("Job %s finished: %s", job_id, body.status)
     await service.on_finished(job)
