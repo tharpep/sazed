@@ -30,7 +30,8 @@ def get_client() -> anthropic.AsyncAnthropic:
 
 # Sonnet and Opus 5.5: thinking blocks dropped (not 400'd) when earlier history or the tool
 # list changed since they were produced (the loop expands tools mid-request), plus server-side
-# refusal fallback. Sent as raw headers/body because the pinned SDK (0.49) predates them.
+# refusal fallback. Sent as raw headers/body, which the SDK forwards unchanged (checked on
+# anthropic 1.17); moving them to the SDK's typed beta parameters is a separate change.
 _THINKING_MODEL_BETAS = "thinking-binding-controls-2026-08-01,server-side-fallback-2026-07-01"
 
 
