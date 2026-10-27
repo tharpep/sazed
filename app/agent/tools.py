@@ -2112,7 +2112,7 @@ TOOLS: list[ToolDef] = [
         description=(
             "Health of everything running in Pryce's homelab: the Sazed system (Sazed, gateway, "
             "knowledge base, automations, console), apps (Jellyfin, *arr stack, qBittorrent, "
-            "Kavita, Suwayomi, SillyTavern) and infra (Proxmox host, Postgres). Returns an "
+            "Kavita, Suwayomi and others) and infra (Proxmox host, Postgres). Returns an "
             "up/down summary and, per service, up, detail, since when, container VMID, and "
             "maintenance/mute state. Checked every 60 seconds. Start here for 'is everything "
             "up?', 'is Jellyfin down?', or before suggesting a restart."
@@ -2775,7 +2775,7 @@ _CATEGORY_PATTERNS: dict[str, re.Pattern] = {
     "homelab":  re.compile(
         r'\b(homelab|home lab|proxmox|server|container|lxc|vmid|uptime|outage'
         r'|jellyfin|jellyseerr|radarr|sonarr|prowlarr|qbittorrent|torrent|kavita|suwayomi'
-        r'|sillytavern|postgres|gateway|restart|reboot|maintenance'
+        r'|postgres|gateway|restart|reboot|maintenance'
         r'|(is|are) (it|everything|anything|things|the \w+) (up|down|running|working|broken)'
         r'|what.s (down|broken)|services? (down|status|health))\b', re.I),
     "research": re.compile(

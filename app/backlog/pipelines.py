@@ -41,7 +41,7 @@ self-hosted runners on push to main):
   for research, second opinions, code reviews and change PRs, on its own container with an
   egress allowlist.
 - sazed-mcp: exposes Sazed to Claude Desktop as one tool.
-Other homelab services: Jellyfin and the *arr stack, Kavita, Suwayomi, SillyTavern, Postgres.
+Other homelab services: Jellyfin and the *arr stack, Kavita, Suwayomi, Postgres.
 Solo developer, no test suites yet, CI is ruff on changed lines.
 Already in place (an idea that extends one of these must say what's new): prompt caching on the
 system prompt and tool schemas; context-window compression of old turns; Pushover alerts for
