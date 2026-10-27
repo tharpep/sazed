@@ -8,6 +8,9 @@ from app.db import get_pool
 
 _JSON_FIELDS = ("params", "meta", "event")
 FINAL_STATUSES = ("succeeded", "failed", "cancelled", "timed_out")
+# needs_input: the worker stopped to ask Pryce something (plans/11 phase 1, job controls). Not
+# final, since continue_job resumes it, but waiters stop waiting: there's nothing more to wait for.
+SETTLED_STATUSES = (*FINAL_STATUSES, "needs_input")
 
 # A running job whose worker hasn't reported in this long is presumed dead.
 _HEARTBEAT_GRACE_S = 120
@@ -83,6 +86,16 @@ async def get_events(job_id: uuid.UUID, limit: int = 500) -> list[dict[str, Any]
         limit,
     )
     return [_row(r) for r in rows]
+
+
+async def get_recent_events(job_id: uuid.UUID, limit: int = 200) -> list[dict[str, Any]]:
+    """The latest events, oldest first (for a 'what is it doing' summary of a long job)."""
+    rows = await get_pool().fetch(
+        "SELECT at, event FROM job_events WHERE job_id = $1 ORDER BY id DESC LIMIT $2",
+        job_id,
+        limit,
+    )
+    return [_row(r) for r in reversed(rows)]
 
 
 async def count_recent(agent: str) -> int:
@@ -179,11 +192,26 @@ async def finish_job(
     return _row(rec) if rec else None
 
 
+async def keep_session(job_id: uuid.UUID, agent_session_id: str | None) -> None:
+    """A cancelled job's late finish report still carries its agent session: keep it, so
+    continue_job can resume the job with new directions (stop and redirect)."""
+    if not agent_session_id:
+        return
+    await get_pool().execute(
+        """
+        UPDATE jobs SET agent_session_id = $2
+        WHERE id = $1 AND status = 'cancelled' AND agent_session_id IS NULL
+        """,
+        job_id,
+        agent_session_id,
+    )
+
+
 async def cancel_job(job_id: uuid.UUID) -> dict[str, Any] | None:
     rec = await get_pool().fetchrow(
         """
-        UPDATE jobs SET status = 'cancelled', finished_at = NOW()
-        WHERE id = $1 AND status IN ('queued', 'needs_approval', 'running')
+        UPDATE jobs SET status = 'cancelled', finished_at = COALESCE(finished_at, NOW())
+        WHERE id = $1 AND status IN ('queued', 'needs_approval', 'running', 'needs_input')
         RETURNING *
         """,
         job_id,
