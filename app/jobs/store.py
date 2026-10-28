@@ -5,6 +5,7 @@ import uuid
 from typing import Any
 
 from app.db import get_pool
+from app.policy import counts_toward_cap
 
 _JSON_FIELDS = ("params", "meta", "event")
 FINAL_STATUSES = ("succeeded", "failed", "cancelled", "timed_out")
@@ -14,6 +15,17 @@ SETTLED_STATUSES = (*FINAL_STATUSES, "needs_input")
 
 # A running job whose worker hasn't reported in this long is presumed dead.
 _HEARTBEAT_GRACE_S = 120
+
+
+# Claim order (plans/10 P1.3, migration 011): lower runs first, then oldest.
+PRIORITY_PRYCE = 0  # console, his chats, MCP, backlog Approve
+PRIORITY_SAZED = 5  # automations, think runs, CI fix-ups, Sazed on its own
+# Autopilot (plans/10 A1) will use 9, below both.
+
+
+def claim_priority(requested_by: str) -> int:
+    """Jobs Pryce starts go before jobs Sazed starts itself; the same split as the daily cap."""
+    return PRIORITY_SAZED if counts_toward_cap(requested_by) else PRIORITY_PRYCE
 
 
 def _row(rec) -> dict[str, Any]:
@@ -40,8 +52,8 @@ async def create_job(
     rec = await get_pool().fetchrow(
         """
         INSERT INTO jobs (kind, agent, model, profile, title, prompt, params, status,
-                          parent_id, requested_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10)
+                          parent_id, requested_by, priority)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11)
         RETURNING *
         """,
         kind,
@@ -54,6 +66,7 @@ async def create_job(
         status,
         parent_id,
         requested_by,
+        claim_priority(requested_by),
     )
     return _row(rec)
 
@@ -130,14 +143,16 @@ async def expire_stale() -> list[dict[str, Any]]:
 
 
 async def claim_next(agents: list[str]) -> dict[str, Any] | None:
-    """Hand the oldest queued job for one of these agents to the worker (one claimant wins)."""
+    """Hand the next queued job for one of these agents to the worker: lowest priority number
+    first, then oldest (one claimant wins). Keep this one query; per-kind exclusions (plans/11's
+    one browse job at a time) belong in its WHERE clause."""
     rec = await get_pool().fetchrow(
         """
         UPDATE jobs SET status = 'running', started_at = NOW(), heartbeat_at = NOW()
         WHERE id = (
             SELECT id FROM jobs
             WHERE status = 'queued' AND agent = ANY($1::text[])
-            ORDER BY created_at
+            ORDER BY priority, created_at
             FOR UPDATE SKIP LOCKED
             LIMIT 1
         )
