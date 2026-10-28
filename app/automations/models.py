@@ -7,16 +7,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from apscheduler.triggers.cron import CronTrigger as _ApsCron
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-DEFAULT_TIMEZONE = "America/New_York"
+from app.policy import GatewayWrite, decide
 
-# Direct gateway calls skip Sazed's approval gate, so writes are limited to harmless endpoints.
-# Anything else (email, deletes, container power) must go through a sazed_prompt action, where
-# sensitive tools become pending approvals instead of running unattended.
-GATEWAY_WRITE_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
-    {
-        ("POST", "/notify"),
-    }
-)
+DEFAULT_TIMEZONE = "America/New_York"
 
 
 # Index = standard cron weekday number; cron allows both 0 and 7 for Sunday.
@@ -106,12 +99,9 @@ class GatewayAction(BaseModel):
     def _safe_path(self):
         if not self.path.startswith("/") or "://" in self.path or ".." in self.path:
             raise ValueError("path must be a gateway path like '/homelab/services'")
-        if self.method != "GET" and (self.method, self.path) not in GATEWAY_WRITE_ALLOWLIST:
-            allowed = ", ".join(f"{m} {p}" for m, p in sorted(GATEWAY_WRITE_ALLOWLIST))
-            raise ValueError(
-                f"direct gateway writes are limited to: {allowed}. "
-                "Use a sazed_prompt action for anything else (it goes through approvals)."
-            )
+        decision = decide(GatewayWrite(self.method, self.path))
+        if decision.verdict != "allow":
+            raise ValueError(decision.reason)
         return self
 
 
