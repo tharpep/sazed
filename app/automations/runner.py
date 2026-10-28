@@ -52,7 +52,24 @@ async def trigger_run(automation: dict[str, Any], triggered_by: str) -> uuid.UUI
     return run_id
 
 
-async def _execute(automation: dict[str, Any], run_id: uuid.UUID) -> None:
+async def trigger_resume(approval: dict[str, Any]) -> uuid.UUID | None:
+    """Continue an agent run Pryce approved (approvals table). Returns its run id, or None if
+    the automation is gone or already running."""
+    run_id = uuid.UUID(approval["payload"]["run_id"])
+    automation = await store.automation_for_run(run_id)
+    if automation is None or automation["id"] in _running:
+        return None
+    await store.reopen_run(run_id)
+    _running.add(automation["id"])
+    task = asyncio.create_task(_execute(automation, run_id, resume=approval))
+    _run_tasks.add(task)
+    task.add_done_callback(_run_tasks.discard)
+    return run_id
+
+
+async def _execute(
+    automation: dict[str, Any], run_id: uuid.UUID, resume: dict[str, Any] | None = None
+) -> None:
     name = automation["name"]
     outputs = automation["outputs"] or {}
     try:
@@ -63,12 +80,15 @@ async def _execute(automation: dict[str, Any], run_id: uuid.UUID) -> None:
         elif automation["action"]["type"] == "job":
             status, text, notify_text, notify_url = await _run_job(automation["action"], run_id)
             session_id = None
-        elif automation["action"]["type"] == "pipeline":
-            from app.backlog import pipelines  # lazy, like the job import below
+        elif automation["action"]["type"] == "agent":
+            from app.agents import runner as agents  # lazy, like the job import below
 
-            status, text, notify_text, notify_url = await pipelines.run(
-                automation["action"], run_id
-            )
+            if resume:
+                outcome = await agents.resume(resume)
+            else:
+                outcome = await agents.run(automation["action"], run_id)
+            status, text = outcome.status, outcome.text
+            notify_text, notify_url = outcome.notify_text, outcome.notify_url
             session_id = None
         else:
             status, text = await _run_gateway_call(automation["action"])

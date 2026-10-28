@@ -47,7 +47,7 @@ class Settings(BaseSettings):
         "tharpep/gotenberg-fork",
     ]
 
-    # Backlog pipelines (app/backlog/pipelines.py, plans/07 section 9b)
+    # Scout and triage agents (app/agents/scout.py, app/backlog/pipelines.py; plans/07 9b, 12)
     console_url: str = "https://sazed.tail77c590.ts.net"  # link target in Pushover messages
     # Repos the scout thinks about and approved ideas may target
     scout_repos: list[str] = [

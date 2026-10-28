@@ -8,7 +8,7 @@ from typing import Any
 from app.automations.models import AutomationCreate, AutomationUpdate, CronSchedule
 from app.db import get_pool
 
-_JSON_FIELDS = ("trigger", "action", "outputs", "delivered")
+_JSON_FIELDS = ("trigger", "action", "outputs", "delivered", "steps")
 
 
 def _row(rec) -> dict[str, Any]:
@@ -166,6 +166,31 @@ async def finish_run(
         error,
         session_id,
         json.dumps(delivered or []),
+    )
+
+
+async def set_steps(run_id: uuid.UUID, steps: list[dict[str, Any]]) -> None:
+    """An agent run's step record so far (migration 009), rewritten after every step."""
+    await get_pool().execute(
+        "UPDATE automation_runs SET steps = $2::jsonb WHERE id = $1",
+        run_id,
+        json.dumps(steps, default=str),
+    )
+
+
+async def automation_for_run(run_id: uuid.UUID) -> dict[str, Any] | None:
+    rec = await get_pool().fetchrow(
+        "SELECT a.* FROM automations a JOIN automation_runs r ON r.automation_id = a.id "
+        "WHERE r.id = $1",
+        run_id,
+    )
+    return _row(rec) if rec else None
+
+
+async def reopen_run(run_id: uuid.UUID) -> None:
+    """A paused run that Pryce approved goes back to running."""
+    await get_pool().execute(
+        "UPDATE automation_runs SET status = 'running', finished_at = NULL WHERE id = $1", run_id
     )
 
 

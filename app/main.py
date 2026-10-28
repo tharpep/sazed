@@ -22,6 +22,7 @@ from app.http_client import startup as http_client_startup
 from app.jobs import ci_watch
 from app.routers import (
     activity,
+    approvals,
     audit,
     automations,
     backlog,
@@ -150,6 +151,12 @@ app.include_router(
 )
 app.include_router(
     activity.router, prefix="/activity", tags=["activity"], dependencies=[Depends(verify_api_key)]
+)
+app.include_router(
+    approvals.router,
+    prefix="/approvals",
+    tags=["approvals"],
+    dependencies=[Depends(verify_api_key)],
 )
 app.include_router(
     backlog.router, prefix="/backlog", tags=["backlog"], dependencies=[Depends(verify_api_key)]
