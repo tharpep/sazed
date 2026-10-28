@@ -2910,11 +2910,6 @@ def expand_tools(current_tools: list[dict], categories: list[str]) -> tuple[list
     return expanded, msg
 
 
-def is_sensitive(name: str) -> bool:
-    """Return True if a tool requires user confirmation before execution."""
-    return name in settings.sensitive_tools
-
-
 def _in_allowlist(to: str, allowlist: list[str]) -> bool:
     """Return True if `to` matches any entry in the allowlist (exact or @domain suffix)."""
     for entry in allowlist:

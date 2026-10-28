@@ -29,7 +29,6 @@ from app.agent.tools import (
     execute_tool,
     expand_tools,
     get_tool_schemas,
-    is_sensitive,
     select_categories,
     select_tools,
     tools_from_names,
@@ -37,6 +36,7 @@ from app.agent.tools import (
 from app.config import settings
 from app.db import get_pool
 from app.jobs.tools import current_session
+from app.policy import ToolCall, decide
 
 logger = logging.getLogger(__name__)
 
@@ -708,7 +708,7 @@ async def run_turn(
                     escalated = True
                     expand_results[block.id] = "Switching to enhanced reasoning mode."
                     logger.debug(f"  turn {turn}: request_escalation → escalating to Opus")
-                elif interactive and settings.confirmation_required and is_sensitive(block.name):
+                elif decide(ToolCall(block.name, interactive)).verdict == "pause":
                     pending_blocks.append(block)
                 else:
                     regular_blocks.append(block)
@@ -948,11 +948,7 @@ async def run_turn_stream(
                         logger.debug(
                             f"  stream turn {turn}: request_escalation → escalating to Opus"
                         )
-                    elif (
-                        interactive
-                        and settings.confirmation_required
-                        and is_sensitive(block.name)
-                    ):
+                    elif decide(ToolCall(block.name, interactive)).verdict == "pause":
                         pending_blocks.append(block)
                     else:
                         regular_blocks.append(block)

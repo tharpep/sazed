@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from app import policy
 from app.config import settings
 from app.db import get_pool
 from app.http_client import get_client
@@ -109,32 +110,22 @@ class JobError(ValueError):
     """A job request that breaks a rule (unknown model, cap reached, ...)."""
 
 
+def _require(action: policy.StartJob) -> None:
+    """Raise JobError with the policy's reason if it blocks this job."""
+    decision = policy.decide(action)
+    if decision.verdict != "allow":
+        raise JobError(decision.reason)
+
+
 def _check_model(agent: str, model: str) -> None:
-    allowed = settings.agy_models if agent == "agy" else settings.claude_models
-    if model not in allowed:
-        raise JobError(f"model '{model}' is not allowed for {agent}. Allowed: {', '.join(allowed)}")
-
-
-# Jobs started by automations, think runs, CI fix-ups or Sazed with no conversation count against
-# the daily cap (it protects Pryce's subscription limits from runaway loops). Jobs he starts from
-# the console, a chat he's in, or MCP don't: Claude's and Google's own limits are the backstop.
-_CAPPED_PREFIXES = ("automation", "think:", "ci-fix", "sazed")
-
-
-def counts_toward_cap(requested_by: str) -> bool:
-    return requested_by.startswith(_CAPPED_PREFIXES)
+    _require(policy.StartJob(agent, requested_by="", model=model))
 
 
 async def _check_cap(agent: str, requested_by: str) -> None:
-    if not counts_toward_cap(requested_by):
+    if not policy.counts_toward_cap(requested_by):
         return
-    cap = settings.jobs_daily_cap_agy if agent == "agy" else settings.jobs_daily_cap_claude
     used = await store.count_recent(agent)
-    if used >= cap:
-        raise JobError(
-            f"daily cap reached for {agent} ({used}/{cap} jobs in the last 24 hours). "
-            "It frees up as older jobs age out."
-        )
+    _require(policy.StartJob(agent, requested_by, used_today=used))
 
 
 def _title(text: str, limit: int = 80) -> str:
@@ -271,8 +262,7 @@ async def create_code_task(
         repo = f"{DEFAULT_GITHUB_OWNER}/{repo}"
     if not _REPO_RE.match(repo):
         raise JobError(f"'{repo}' isn't a repo name like owner/name")
-    if repo.lower() in {r.lower() for r in settings.code_task_excluded_repos}:
-        raise JobError(f"{repo} is excluded from code tasks")
+    _require(policy.StartJob("claude", requested_by, repo=repo))
     info = await _repo_info(repo)
     model = model or DEFAULT_CLAUDE_MODEL
     _check_model("claude", model)
