@@ -1,7 +1,7 @@
 """Automation shapes: a trigger (when), an action (what), and outputs (where results go)."""
 
 from datetime import datetime, timedelta
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.triggers.cron import CronTrigger as _ApsCron
@@ -128,18 +128,26 @@ class JobAction(BaseModel):
         return self
 
 
-class PipelineAction(BaseModel):
-    """A built-in multi-step pipeline (app/backlog/pipelines.py): the daily scout that files new
-    ideas, the weekly triage that ranks them, or the weekly architecture map check
-    (app/activity/map_report.py). Code drives the steps; models only write text."""
+class AgentAction(BaseModel):
+    """A multi-step agent run by the step runner (app/agents, plans/12): the daily scout that
+    files new ideas, the weekly triage that ranks them, or the weekly architecture map check.
+    Code does every step it can; models only judge and write."""
 
-    type: Literal["pipeline"] = "pipeline"
+    type: Literal["agent"] = "agent"
     name: Literal["scout", "triage", "map"]
-    max_ideas: int = Field(3, ge=1, le=5)  # scout only
+    params: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _scout_params(self):
+        if self.name == "scout" and "max_ideas" in self.params:
+            max_ideas = self.params["max_ideas"]
+            if not isinstance(max_ideas, int) or not 1 <= max_ideas <= 5:
+                raise ValueError("scout max_ideas must be a whole number from 1 to 5")
+        return self
 
 
 Action = Annotated[
-    PromptAction | GatewayAction | JobAction | PipelineAction, Field(discriminator="type")
+    PromptAction | GatewayAction | JobAction | AgentAction, Field(discriminator="type")
 ]
 
 
