@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.jobs import service, store
+from app.jobs import change_result, service, store
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +113,13 @@ async def _pr_outcome(
 @router.post("/jobs/{job_id}/finish")
 async def finish(job_id: uuid.UUID, body: FinishRequest):
     result, meta, status = body.result, dict(body.meta), body.status
-    question = service.needs_input_question(result) if status == "succeeded" else None
+    # A change job's reply ends with a JSON block, so a question written just before the block
+    # still counts as the last line.
+    question = (
+        service.needs_input_question(change_result.without_trailing_block(result or ""))
+        if status == "succeeded"
+        else None
+    )
     if question:
         # The agent stopped to ask Pryce something: pause the job (session kept) rather than
         # finish it, and open no PR for a change it didn't complete.
@@ -121,6 +127,13 @@ async def finish(job_id: uuid.UUID, body: FinishRequest):
     elif status == "succeeded":
         current = await store.get_job(job_id)
         if current and current["profile"] == "change" and current["status"] == "running":
+            # The PR description is rendered from the reply's fields; a reply that doesn't fit
+            # (after the worker's repair round) keeps its prose so the work isn't lost.
+            fields = change_result.parse(result or "")
+            if fields:
+                result, meta["change_result"] = change_result.render(fields), fields.model_dump()
+            else:
+                meta["result_format"] = "prose"
             result, pr_meta = await _pr_outcome(current, result or "", body.changes or {})
             meta |= pr_meta
     job = await store.finish_job(job_id, status, result, body.error, body.agent_session_id, meta)
