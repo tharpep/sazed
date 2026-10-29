@@ -147,6 +147,12 @@ async def _loop() -> None:
                 await _check(job)
         except Exception:
             logger.exception("CI watcher tick failed")
+        # Jobs paused by Pryce's plan limit resume once it resets (plans/10 P1.2).
+        try:
+            if resumed := await service.resume_rate_limited():
+                logger.info("Resumed %d job(s) after the plan limit reset", resumed)
+        except Exception:
+            logger.exception("Plan-limit resume tick failed")
         # Merged or closed PRs move their backlog items along; minutes of lag are fine.
         if tick % PR_SYNC_EVERY == 0:
             try:
