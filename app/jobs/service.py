@@ -462,6 +462,14 @@ async def _notify(job: dict[str, Any]) -> None:
             meta.get("pr_url"),
             f"Open draft PR #{meta.get('pr_number')}" if meta.get("pr_url") else None,
         )
+    elif job["status"] == "succeeded" and meta.get("pr_url") and meta.get("pr_draft"):
+        repo = (job.get("params") or {}).get("repo", "").split("/")[-1]
+        await notify_simple(
+            f"Draft PR #{meta.get('pr_number')} · {repo}",
+            f"{job['title']}. The repo's tests still fail with the change, so it's a draft.",
+            meta["pr_url"],
+            f"Open draft PR #{meta.get('pr_number')} on GitHub",
+        )
     elif job["status"] == "succeeded" and meta.get("pr_url"):
         repo = (job.get("params") or {}).get("repo", "").split("/")[-1]
         verb = "updated" if meta.get("pr_updated") else "opened"
@@ -558,6 +566,16 @@ async def clone_token(repo: str) -> str | None:
         return None
 
 
+def failing_tests_section(failing: list[str]) -> str:
+    """The PR description's note when the worker's test run still fails after the fix round."""
+    lines = "\n".join(f"- {line.removeprefix('tests: ')}" for line in failing)
+    return (
+        "\n\n### Tests still failing\n"
+        "The worker ran the repo's tests: these pass without this change and fail with it, so "
+        f"the PR is a draft.\n{lines}"
+    )
+
+
 async def _parent_meta(job: dict[str, Any]) -> dict[str, Any]:
     if not job.get("parent_id"):
         return {}
@@ -580,8 +598,8 @@ async def open_pull_request(
     parent = await _parent_meta(job)
     # A follow-up's commit describes the follow-up; the PR keeps the original title.
     commit_title = _title(job["prompt"], 70) if job.get("parent_id") else title
-    if draft:
-        reason = ((job.get("meta") or {}).get("pause_reason") or "stopped").replace("_", " ")
+    if draft and (job.get("meta") or {}).get("pause_reason"):
+        reason = (job.get("meta") or {})["pause_reason"].replace("_", " ")
         text = (
             f"**Draft: paused before it finished** ({reason}). This is the work so far; resuming "
             "the job continues it here and marks the PR ready."

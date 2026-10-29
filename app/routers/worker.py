@@ -138,7 +138,14 @@ async def finish(job_id: uuid.UUID, body: FinishRequest):
                 result, meta["change_result"] = change_result.render(fields), fields.model_dump()
             else:
                 meta["result_format"] = "prose"
-            result, pr_meta = await _pr_outcome(current, result or "", body.changes or {})
+            # The worker ran the repo's tests (sazed_worker/tests.py): if new failures remain
+            # after its fix round, the PR opens as a draft that lists them.
+            failing = (meta.get("tests") or {}).get("left") or []
+            draft: dict[str, bool] = {}
+            if failing:
+                result = (result or "") + service.failing_tests_section(failing)
+                draft = {"draft": True}
+            result, pr_meta = await _pr_outcome(current, result or "", body.changes or {}, **draft)
             meta |= pr_meta
     elif meta.get("stop_reason") in service.PAUSING_STOPS and body.agent_session_id:
         # Stopped, not given up (plans/10 P1.7): a change job pauses, its work so far saved as a
