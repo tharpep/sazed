@@ -136,7 +136,7 @@ class Settings(BaseSettings):
     confirmation_required: bool = True
     sensitive_tools: list[str] = [
         # Worker code tasks spend Claude Pro limits and (later) open PRs
-        "delegate_code_task",
+        "delegate_code_task", "resume_job",
         "draft_email", "send_email", "reply_to_email",
         "delete_event", "delete_task", "delete_file",
         "delete_kb_source", "delete_journal_entry", "delete_subscription",

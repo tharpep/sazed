@@ -203,7 +203,7 @@ async def summary() -> dict[str, Any]:
         SELECT
           (SELECT count(*) FROM jobs WHERE status = 'running') AS jobs_running,
           (SELECT count(*) FROM jobs WHERE status = 'queued') AS jobs_queued,
-          (SELECT count(*) FROM jobs WHERE status IN ('needs_approval', 'needs_input'))
+          (SELECT count(*) FROM jobs WHERE status IN ('needs_approval', 'needs_input', 'paused'))
             AS jobs_waiting,
           (SELECT count(*) FROM automation_runs WHERE status = 'running') AS runs_running,
           (SELECT count(*) FROM pending_actions WHERE status = 'pending')

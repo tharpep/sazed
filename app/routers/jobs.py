@@ -105,6 +105,19 @@ async def continue_job(job_id: uuid.UUID, body: FollowUpRequest):
     return job
 
 
+class ResumeRequest(BaseModel):
+    requested_by: Literal["console", "mcp"] = "console"
+
+
+@router.post("/{job_id}/resume", status_code=201)
+async def resume_job(job_id: uuid.UUID, body: ResumeRequest | None = None):
+    """Carry on with a paused change job (plans/10 P1.7); it queues without re-approval."""
+    try:
+        return await service.resume_job(job_id, (body or ResumeRequest()).requested_by)
+    except service.JobError as e:
+        raise HTTPException(422, str(e)) from e
+
+
 @router.post("/{job_id}/approve")
 async def approve(job_id: uuid.UUID):
     job = await store.approve_job(job_id)

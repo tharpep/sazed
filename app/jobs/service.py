@@ -302,7 +302,16 @@ async def create_code_task(
     )
 
 
-_CONTINUABLE = ("succeeded", "needs_input", "cancelled", "timed_out")
+# Worker stops that don't mean "give up" (sazed_worker.jobs.PAUSING_STOPS): a change job stopped
+# this way is paused with its work so far on a draft PR (plans/10 P1.7).
+PAUSING_STOPS = ("timed_out", "tool_cap", "shutdown")
+
+_CONTINUABLE = ("succeeded", "needs_input", "cancelled", "timed_out", "paused")
+
+_RESUME_INSTRUCTION = (
+    "You were stopped before finishing ({reason}). Your edits so far are still in the working "
+    "copy. Carry on with the task from where you left off."
+)
 
 
 async def create_follow_up(
@@ -310,17 +319,19 @@ async def create_follow_up(
     instruction: str,
     requested_by: str,
     extra_params: dict[str, Any] | None = None,
+    approved: bool = False,
 ) -> dict:
     """A child job that resumes the parent's agent session with a new instruction.
 
-    A follow-up on a change job needs approval again, except CI fix-ups: they fix a PR Pryce
-    already approved and are bounded (ci_watch.MAX_FIX_ATTEMPTS, daily cap).
+    A follow-up on a change job needs approval again, except CI fix-ups (they fix a PR Pryce
+    already approved and are bounded: ci_watch.MAX_FIX_ATTEMPTS, daily cap) and resumes of a
+    paused job (`approved`: the same task, carried on).
     """
     parent = await store.get_job(parent_id)
     if parent is None:
         raise JobError("no job with that id")
-    # needs_input: answering its question. cancelled / timed_out: stop and redirect, resuming
-    # the session the worker reported (store.keep_session).
+    # needs_input: answering its question. cancelled / timed_out / paused: stop and redirect,
+    # resuming the session the worker reported (store.keep_session).
     if parent["status"] not in _CONTINUABLE or not parent.get("agent_session_id"):
         raise JobError(
             "only a finished, paused (needs_input) or stopped job with an agent session can be "
@@ -342,9 +353,25 @@ async def create_follow_up(
         parent_id=parent["id"],
         status=(
             "needs_approval"
-            if parent["profile"] == "change" and not requested_by.startswith("ci-fix")
+            if parent["profile"] == "change"
+            and not approved
+            and not requested_by.startswith("ci-fix")
             else "queued"
         ),
+    )
+
+
+async def resume_job(job_id: uuid.UUID, requested_by: str) -> dict:
+    """Carry on with a paused job: same session, same working copy, same draft PR (plans/10
+    P1.7). Pryce approved the task already, so it queues without asking again."""
+    job = await store.get_job(job_id)
+    if job is None:
+        raise JobError("no job with that id")
+    if job["status"] != "paused":
+        raise JobError("only a paused job can be resumed")
+    reason = ((job.get("meta") or {}).get("pause_reason") or "stopped").replace("_", " ")
+    return await create_follow_up(
+        job_id, _RESUME_INSTRUCTION.format(reason=reason), requested_by, approved=True
     )
 
 
@@ -423,6 +450,18 @@ async def _notify(job: dict[str, Any]) -> None:
             f"{label} needs your input",
             f"{job['title']}\n{meta.get('question') or '(no question text)'}",
         )
+    elif job["status"] == "paused":
+        reason = (meta.get("pause_reason") or "stopped").replace("_", " ")
+        if meta.get("pr_url"):
+            saved = f"Draft PR #{meta.get('pr_number')} has the work so far"
+        else:
+            saved = "No files were changed yet"
+        await notify_simple(
+            f"{label} paused ({reason})",
+            f"{job['title']}. {saved}; resume it from Sazed (Jobs).",
+            meta.get("pr_url"),
+            f"Open draft PR #{meta.get('pr_number')}" if meta.get("pr_url") else None,
+        )
     elif job["status"] == "succeeded" and meta.get("pr_url"):
         repo = (job.get("params") or {}).get("repo", "").split("/")[-1]
         verb = "updated" if meta.get("pr_updated") else "opened"
@@ -451,6 +490,12 @@ def session_note(job: dict[str, Any]) -> str:
         return (
             f"**{label} is waiting on you:** {title}. It asked a question (sent to your phone); "
             f"ask me to show it, or answer and I'll continue job `{job_id}`."
+        )
+    if job["status"] == "paused":
+        reason = ((job.get("meta") or {}).get("pause_reason") or "stopped").replace("_", " ")
+        return (
+            f"**{label} paused** ({reason}): {title}. Its work so far is saved; ask me to resume "
+            f"job `{job_id}`."
         )
     status = job["status"].replace("_", " ")
     return f"**{label} didn't finish** ({title}): {status}. Details are in job `{job_id}`."
@@ -513,25 +558,38 @@ async def clone_token(repo: str) -> str | None:
         return None
 
 
-async def _pr_branch(job: dict[str, Any]) -> str:
-    """A follow-up keeps working on its parent's PR branch; a new change gets sazed/<job id>."""
-    if job.get("parent_id"):
-        parent = await store.get_job(job["parent_id"])
-        branch = ((parent or {}).get("meta") or {}).get("branch")
-        if branch:
-            return branch
-    return f"sazed/{job['id']}"
+async def _parent_meta(job: dict[str, Any]) -> dict[str, Any]:
+    if not job.get("parent_id"):
+        return {}
+    parent = await store.get_job(job["parent_id"])
+    return (parent or {}).get("meta") or {}
 
 
-async def open_pull_request(job: dict[str, Any], changes: dict[str, str | None]) -> dict:
-    """Have the gateway's bot commit the changed files and open (or update) the PR."""
+async def open_pull_request(
+    job: dict[str, Any], changes: dict[str, str | None], draft: bool = False
+) -> dict:
+    """Have the gateway's bot commit the changed files and open (or update) the PR.
+
+    A follow-up keeps working on its parent's PR branch; a new change gets sazed/<job id>.
+    `draft`: a paused job's work so far (plans/10 P1.7). When a resume of a draft finishes, the
+    draft gets this job's description and is marked ready.
+    """
     params = job.get("params") or {}
     instruction = params.get("instruction") or job["title"]
     title = _title(instruction, 70)
+    parent = await _parent_meta(job)
     # A follow-up's commit describes the follow-up; the PR keeps the original title.
     commit_title = _title(job["prompt"], 70) if job.get("parent_id") else title
+    if draft:
+        reason = ((job.get("meta") or {}).get("pause_reason") or "stopped").replace("_", " ")
+        text = (
+            f"**Draft: paused before it finished** ({reason}). This is the work so far; resuming "
+            "the job continues it here and marks the PR ready."
+        )
+    else:
+        text = job.get("result") or ""
     body = (
-        f"{job.get('result') or ''}\n\n---\n"
+        f"{text}\n\n---\n"
         f"Opened by Sazed's worker (Claude Code, `{job['model']}`) for job `{job['id']}`.\n"
         f"Task: {instruction}"
     )
@@ -539,11 +597,13 @@ async def open_pull_request(job: dict[str, Any], changes: dict[str, str | None])
         f"{settings.gateway_url}/github/app/pull-request",
         json={
             "repo": params["repo"],
-            "branch": await _pr_branch(job),
+            "branch": parent.get("branch") or f"sazed/{job['id']}",
             "title": title,
             "body": body[:60_000],
             "commit_message": f"{commit_title}\n\nSazed job {job['id']}",
             "files": changes,
+            "draft": draft,
+            "ready": not draft and bool(parent.get("pr_draft")),
         },
         headers={"X-API-Key": settings.gateway_api_key},
         timeout=120.0,
@@ -559,13 +619,14 @@ async def open_pull_request(job: dict[str, Any], changes: dict[str, str | None])
 
 def should_notify(job: dict[str, Any]) -> bool:
     """Notify when the requester stopped waiting (notify was set at hand-off), or when a job
-    asks a question and nobody is waiting on the call: MCP, console and think jobs. A chat that's
-    still waiting reads the question from the tool result; automation runs alert on their own.
+    asks a question or pauses and nobody is waiting on the call: MCP, console and think jobs.
+    A chat that's still waiting reads the question from the tool result; automation runs alert
+    on their own.
     """
     if job.get("notify"):
         return True
     requested_by = job.get("requested_by") or ""
-    return job["status"] == "needs_input" and not requested_by.startswith(
+    return job["status"] in ("needs_input", "paused") and not requested_by.startswith(
         ("session:", "automation")
     )
 

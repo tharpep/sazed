@@ -11,7 +11,9 @@ _JSON_FIELDS = ("params", "meta", "event")
 FINAL_STATUSES = ("succeeded", "failed", "cancelled", "timed_out")
 # needs_input: the worker stopped to ask Pryce something (plans/11 phase 1, job controls). Not
 # final, since continue_job resumes it, but waiters stop waiting: there's nothing more to wait for.
-SETTLED_STATUSES = (*FINAL_STATUSES, "needs_input")
+# paused (plans/10 P1.7): a change job stopped by its timeout, tool cap or a worker restart, its
+# work so far on a draft PR; resume_job continues it. Not final either.
+SETTLED_STATUSES = (*FINAL_STATUSES, "needs_input", "paused")
 
 # A running job whose worker hasn't reported in this long is presumed dead.
 _HEARTBEAT_GRACE_S = 120
@@ -226,7 +228,8 @@ async def cancel_job(job_id: uuid.UUID) -> dict[str, Any] | None:
     rec = await get_pool().fetchrow(
         """
         UPDATE jobs SET status = 'cancelled', finished_at = COALESCE(finished_at, NOW())
-        WHERE id = $1 AND status IN ('queued', 'needs_approval', 'running', 'needs_input')
+        WHERE id = $1
+          AND status IN ('queued', 'needs_approval', 'running', 'needs_input', 'paused')
         RETURNING *
         """,
         job_id,

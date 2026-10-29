@@ -186,6 +186,16 @@ async def _run_job(
             "Waiting for your answer in Sazed (Jobs).",
             None,
         )
+    if done["status"] == "paused":
+        # Stopped before finishing with its work saved (plans/10 P1.7): the run waits on a resume.
+        reason = ((done.get("meta") or {}).get("pause_reason") or "stopped").replace("_", " ")
+        return (
+            "needs_approval",
+            f"Job {done['id']} ({done['title']}) paused ({reason}); its work so far is saved. "
+            "Resume it in Sazed (Jobs).",
+            "Paused; resume it in Sazed (Jobs).",
+            None,
+        )
     if done["status"] != "succeeded":
         raise RuntimeError(f"job {done['id']} {done['status']}: {done.get('error') or ''}")
     result = done.get("result") or ""
