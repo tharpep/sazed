@@ -604,6 +604,8 @@ async def open_pull_request(
             "files": changes,
             "draft": draft,
             "ready": not draft and bool(parent.get("pr_draft")),
+            # A follow-up continues its parent's PR; the gateway refuses if it was closed.
+            "pr_number": parent.get("pr_number"),
         },
         headers={"X-API-Key": settings.gateway_api_key},
         timeout=120.0,

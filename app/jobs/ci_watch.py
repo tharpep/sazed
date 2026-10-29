@@ -1,7 +1,9 @@
 """CI watcher for bot PRs (plans/07): wait for checks, notify when green, fix when red.
 
-Every POLL_SECONDS it looks at recent change jobs whose PR is waiting on CI. Results come from
-the gateway (`/github/repos/{owner}/{repo}/ci?sha=`, Pryce's token, which can read Actions):
+Every POLL_SECONDS it looks at recent change jobs whose PR is waiting on CI. A PR that was closed
+or merged meanwhile is left alone for good (ci_state closed or merged): no notice, no fix-up.
+Results come from the gateway (`/github/repos/{owner}/{repo}/ci?sha=`, Pryce's token, which can
+read Actions):
 - success: mark the job and send one "PR ready" Pushover.
 - failure: start a fix-up follow-up on the same branch with the failing log tails, up to
   MAX_FIX_ATTEMPTS per PR (fix-ups count against the daily cap); after that, notify and stop.
@@ -45,11 +47,28 @@ async def _ci(repo: str, sha: str) -> dict[str, Any] | None:
         return None
 
 
+async def _pr(repo: str, number: int) -> dict[str, Any] | None:
+    owner, name = repo.split("/", 1)
+    try:
+        resp = await get_client().get(
+            f"{settings.gateway_url}/github/repos/{owner}/{name}/pulls/{number}",
+            headers={"X-API-Key": settings.gateway_api_key},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.HTTPError:
+        logger.warning("PR state check failed for %s#%s", repo, number, exc_info=True)
+        return None
+
+
 def _fix_instruction(ci: dict[str, Any], attempt: int) -> str:
+    # The reply format (the JSON block) comes from the follow-up rule create_follow_up appends;
+    # whether tests can run comes from the worker's shell note.
     parts = [
         f"CI failed on the pull request you opened (fix attempt {attempt} of {MAX_FIX_ATTEMPTS}). "
-        "Fix the cause in the files, touching only what's needed. You still can't run anything, "
-        "so read the errors carefully. Then reply with the complete, updated PR description.",
+        "Fix the cause in the files, touching only what's needed. Read the errors carefully, and "
+        "if a note at the top says you can run tests, run the ones that failed.",
     ]
     for f in ci.get("failures", [])[:3]:
         steps = ", ".join(f.get("failed_steps") or []) or "unknown step"
@@ -61,6 +80,15 @@ def _fix_instruction(ci: dict[str, Any], attempt: int) -> str:
 async def _check(job: dict[str, Any]) -> None:
     meta = job.get("meta") or {}
     params = job.get("params") or {}
+    if meta.get("pr_number"):
+        pr = await _pr(params["repo"], int(meta["pr_number"]))
+        if pr is None:
+            return  # try again next tick
+        if pr.get("state") != "open":
+            # Closed or merged: nothing to report or fix (a fix-up would only reopen the work).
+            state = "merged" if pr.get("merged") else "closed"
+            await store.update_outcome(job["id"], None, {"ci_state": state})
+            return
     ci = await _ci(params["repo"], meta["head_sha"])
     if ci is None:
         return
