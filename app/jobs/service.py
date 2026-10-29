@@ -16,7 +16,7 @@ from app import policy
 from app.config import settings
 from app.db import get_pool
 from app.http_client import get_client
-from app.jobs import store
+from app.jobs import change_result, store
 
 logger = logging.getLogger(__name__)
 
@@ -212,9 +212,11 @@ reviews and merges himself.
 Task: {instruction}
 {context}
 Keep the change focused: only what the task needs, matching the repo's existing style. Don't
-edit .github/workflows (it will be rejected). When done, reply in markdown with a PR
-description: what you changed and why, file by file, and anything Pryce should check or test.
-If the task can't or shouldn't be done, change nothing and explain why."""
+edit .github/workflows (it will be rejected).
+
+"""
+# The format rule is part of the template: its braces are doubled for .format().
+_CHANGE_PROMPT += change_result.FORMAT_RULE
 
 _REVIEW_PROMPT = """You are reviewing the GitHub repository {repo} for Pryce. It is checked out
 in the current directory (default branch, last 50 commits). You can read and search files and use
@@ -333,7 +335,8 @@ async def create_follow_up(
         model=parent["model"],
         profile=parent["profile"],
         title=_title(f"Follow-up: {instruction}"),
-        prompt=instruction.strip(),
+        prompt=instruction.strip()
+        + (change_result.FOLLOW_UP_RULE if parent["profile"] == "change" else ""),
         params=params,
         requested_by=requested_by,
         parent_id=parent["id"],
