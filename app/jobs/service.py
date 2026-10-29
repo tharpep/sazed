@@ -206,8 +206,8 @@ CODE_MODES: dict[str, tuple[str, int, int]] = {
 
 _CHANGE_PROMPT = """You are making a change to the GitHub repository {repo} for Pryce. A copy of its
 default branch is in the current directory (no .git). You can read, search, edit and create
-files here. You cannot run commands, tests or git; your edits become a pull request that Pryce
-reviews and merges himself.
+files here. You can't use git or the network, and you can run commands only if a note at the top
+says so; your edits become a pull request that Pryce reviews and merges himself.
 
 Task: {instruction}
 {context}
