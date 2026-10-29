@@ -2350,8 +2350,9 @@ TOOLS: list[ToolDef] = [
             "Follow up on a worker job (research, second opinion or code task) by job_id: the "
             "same agent resumes with its context and does the new instruction. Works on a "
             "finished job ('now also check the tests'), a job waiting on a question "
-            "(status needs_input: pass Pryce's answer), or a stopped job (cancelled or timed "
-            "out: pass the new directions, to redirect it)."
+            "(status needs_input: pass Pryce's answer), or a stopped job (cancelled, timed "
+            "out or paused: pass the new directions, to redirect it). To just carry on with a "
+            "paused job, use resume_job."
         ),
         input_schema={
             "type": "object",
@@ -2360,6 +2361,22 @@ TOOLS: list[ToolDef] = [
                 "instruction": {"type": "string"},
             },
             "required": ["job_id", "instruction"],
+        },
+        method="INTERNAL",
+        endpoint="",
+    ),
+    ToolDef(
+        name="resume_job",
+        description=(
+            "Resume a paused code task by job_id: a change job stopped by its timeout, tool "
+            "cap or a worker restart, with its work so far on a draft PR. The same session "
+            "carries on in the same working copy, and the draft is marked ready when it "
+            "finishes."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"job_id": {"type": "string"}},
+            "required": ["job_id"],
         },
         method="INTERNAL",
         endpoint="",
@@ -2683,7 +2700,7 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
     "automations": ["list_automations", "create_automation", "update_automation",
                     "delete_automation", "run_automation"],
     "research": ["research", "second_opinion", "delegate_code_task", "continue_job",
-                 "job_status", "cancel_job"],
+                 "resume_job", "job_status", "cancel_job"],
     "backlog":  ["list_backlog", "add_backlog_item"],
 }
 

@@ -88,25 +88,29 @@ async def events(job_id: uuid.UUID, body: EventsRequest):
 
 
 async def _pr_outcome(
-    job: dict[str, Any], result: str, changes: dict[str, str | None]
+    job: dict[str, Any], result: str, changes: dict[str, str | None], draft: bool = False
 ) -> tuple[str, dict[str, Any]]:
-    """Turn a change job's files into a PR (as the bot). Returns the result text with a PR line
-    added, and the meta to record. Runs before the job is marked finished, so a succeeded job
-    always already has its PR link."""
+    """Turn a change job's files into a PR (as the bot), or a draft for a paused job's work so
+    far. Returns the result text with a PR line added, and the meta to record. Runs before the
+    job is marked finished, so a finished or paused job already has its PR link."""
     if not changes:
+        if draft:
+            return result + "\n\n_Paused before any files were changed._", {}
         return result + "\n\n_No files were changed, so no PR was opened._", {}
     try:
-        pr = await service.open_pull_request({**job, "result": result}, changes)
+        pr = await service.open_pull_request({**job, "result": result}, changes, draft=draft)
     except service.JobError as e:
         logger.warning("Job %s: %s", job["id"], e)
         return result + f"\n\n**The change was made but the PR failed:** {e}", {"pr_error": str(e)}
     verb = "updated" if pr.get("updated") else "opened"
-    return result + f"\n\n**Pull request ({verb}):** {pr['url']}", {
+    label = "Draft pull request" if pr.get("draft") else "Pull request"
+    return result + f"\n\n**{label} ({verb}):** {pr['url']}", {
         "pr_url": pr["url"],
         "pr_number": pr["number"],
         "branch": pr["branch"],
         "head_sha": pr.get("head_sha"),
         "pr_updated": bool(pr.get("updated")),
+        "pr_draft": bool(pr.get("draft")),
     }
 
 
@@ -135,6 +139,16 @@ async def finish(job_id: uuid.UUID, body: FinishRequest):
             else:
                 meta["result_format"] = "prose"
             result, pr_meta = await _pr_outcome(current, result or "", body.changes or {})
+            meta |= pr_meta
+    elif meta.get("stop_reason") in service.PAUSING_STOPS and body.agent_session_id:
+        # Stopped, not given up (plans/10 P1.7): a change job pauses, its work so far saved as a
+        # draft PR, so resume_job can carry on in the same session and working copy.
+        current = await store.get_job(job_id)
+        if current and current["profile"] == "change" and current["status"] == "running":
+            status, meta["pause_reason"] = "paused", meta["stop_reason"]
+            result, pr_meta = await _pr_outcome(
+                {**current, "meta": meta}, result or "", body.changes or {}, draft=True
+            )
             meta |= pr_meta
     job = await store.finish_job(job_id, status, result, body.error, body.agent_session_id, meta)
     if job is None:
