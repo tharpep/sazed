@@ -1,5 +1,5 @@
 def add(a, b):
-    return a - b  # deliberate bug for the CI auto-fix test
+    return a + b
 
 
 def test_add():
