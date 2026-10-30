@@ -206,7 +206,10 @@ async def summary() -> dict[str, Any]:
           (SELECT count(*) FROM jobs WHERE status IN ('needs_approval', 'needs_input', 'paused'))
             AS jobs_waiting,
           (SELECT count(*) FROM automation_runs WHERE status = 'running') AS runs_running,
-          (SELECT count(*) FROM pending_actions WHERE status = 'pending')
+          -- A request older than 10 minutes has expired; its row only says so once that session
+          -- gets another message.
+          (SELECT count(*) FROM pending_actions
+           WHERE status = 'pending' AND created_at > NOW() - INTERVAL '10 minutes')
             + (SELECT count(*) FROM approvals WHERE status = 'pending') AS approvals_pending,
           (SELECT count(*) FROM jobs WHERE created_at > NOW() - INTERVAL '24 hours') AS jobs_24h
         """

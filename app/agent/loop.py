@@ -40,7 +40,14 @@ from app.policy import ToolCall, decide
 
 logger = logging.getLogger(__name__)
 
-_AFFIRMATIVE_RE = re.compile(r'^\s*(yes|confirm|do\s+it|go\s+ahead|approved?)\b', re.I)
+# What a reply must be, as a whole, to run a sensitive action (plans/10 P4.2). Code decides, never a
+# model, and only an unqualified yes counts: "go ahead and delete the other one instead" doesn't.
+_CONFIRM_RE = re.compile(
+    r"^\s*(?:y|yes|yep|yup|yeah|ya|sure|ok|okay|confirm(?:ed)?|approved?|do\s+it|go\s+ahead"
+    r"|go\s+for\s+it|proceed|sounds\s+good)(?:[\s,]+(?:please|thanks|thank\s+you))?[\s.!]*$",
+    re.I,
+)
+_CANCEL_RE = re.compile(r"^\s*(?:n|no|nope|nah|cancel|stop|never\s*mind)[\s.!]*$", re.I)
 
 _CONFIRMATION_PROMPT = (
     "CONFIRMATION REQUIRED: Describe exactly what you are about to do and ask the user to confirm. "
@@ -48,38 +55,14 @@ _CONFIRMATION_PROMPT = (
 )
 
 
-async def _classify_affirmative(msg: str, session_id: uuid.UUID | None = None) -> bool:
-    """Ask Haiku whether a message expresses confirmation. Defaults to False on any failure."""
-    try:
-        resp = await get_client().messages.create(
-            model=settings.haiku_model,
-            **model_params(settings.haiku_model),
-            max_tokens=5,
-            messages=[{
-                "role": "user",
-                "content": (
-                    "Does this message confirm agreement to proceed with an action?\n\n"
-                    f'Message: "{msg}"\n\n'
-                    "Reply with only YES or NO."
-                ),
-            }],
-        )
-        if settings.llm_cost_tracking:
-            schedule_llm_log(session_id, None, settings.haiku_model, "confirm", resp)
-        return resp.content[0].text.strip().upper().startswith("YES")
-    except Exception:
-        logger.warning(
-            "_classify_affirmative: Haiku call failed, defaulting to non-affirmative",
-            exc_info=True,
-        )
-        return False
-
-
 async def _handle_pending_actions(pool, sid: uuid.UUID, user_message: str) -> str | None:
-    """Check for pending confirmations for this session and execute or reject them.
+    """Settle this session's pending confirmations from the user's reply.
 
-    Returns a response string if a pending action was handled, else None.
-    A misclassified affirmative is worse than a missed one — we default to rejection on any error.
+    A plain yes runs them and a plain no cancels them; either returns the response for the turn.
+    Any other reply cancels them too (a missed yes is cheap, a wrong one isn't) but returns None, so
+    the turn goes on and the agent answers it: "what would that do?" gets an answer, and "yes but
+    change the title" lets it call the tool again, which asks again. None also means nothing was
+    pending.
     """
     # Expire stale pending actions (older than 10 min)
     await pool.execute(
@@ -97,18 +80,14 @@ async def _handle_pending_actions(pool, sid: uuid.UUID, user_message: str) -> st
     if not rows:
         return None
 
-    is_affirmative = bool(_AFFIRMATIVE_RE.match(user_message))
-    if not is_affirmative:
-        is_affirmative = await _classify_affirmative(user_message, session_id=sid)
-
-    if not is_affirmative:
+    if not _CONFIRM_RE.match(user_message):
         ids = [row["id"] for row in rows]
         await pool.execute(
             "UPDATE pending_actions SET status = 'rejected' WHERE id = ANY($1::uuid[])",
             ids,
         )
         logger.info(f"session {sid}: {len(rows)} pending action(s) rejected")
-        return "Action cancelled."
+        return "Action cancelled." if _CANCEL_RE.match(user_message) else None
 
     parts = []
     for row in rows:
