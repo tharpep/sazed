@@ -33,6 +33,7 @@ from app.agent.tools import (
     select_tools,
     tools_from_names,
 )
+from app.agent.ui_blocks import build_ui_block
 from app.config import settings
 from app.db import get_pool
 from app.jobs.tools import current_session
@@ -798,6 +799,7 @@ async def run_turn_stream(
         event: session    data: {"session_id": "..."}                              — before first LLM call
         event: tool_start data: {"name": "..."}                                    — before each tool execution
         event: tool_done  data: {"name": "...", "status": "success"|"error"|"awaiting_confirmation", ...}
+        event: ui_block   data: {"component": "...", "props": {...}}               — chat mode only
         event: text_delta data: {"text": "..."}                                    — streaming text tokens
         event: done       data: {}                                                 — after session persisted
     """
@@ -975,6 +977,11 @@ async def run_turn_stream(
                         "error": tool_result.error,
                     }
                     yield f"event: tool_done\ndata: {json.dumps(tool_done_evt)}\n\n"
+                    # Display and voice have their own layouts; a card would replace the reply.
+                    if mode == "chat" and tool_result.status == "success":
+                        ui_block = build_ui_block(block.name, block.input, tool_result.content)
+                        if ui_block:
+                            yield f"event: ui_block\ndata: {json.dumps(ui_block)}\n\n"
                     tr: dict[str, Any] = {
                         "type": "tool_result",
                         "tool_use_id": block.id,
