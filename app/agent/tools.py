@@ -17,6 +17,8 @@ import httpx
 from app.agent.memory import upsert_fact
 from app.automations import tools as automation_tools
 from app.automations.tools import AUTOMATION_TOOL_NAMES
+from app.agent import session_search
+from app.agent.session_search import SESSION_SEARCH_TOOL_NAMES
 from app.backlog import tools as backlog_tools
 from app.backlog.tools import BACKLOG_TOOL_NAMES
 from app.jobs import tools as job_tools
@@ -2465,6 +2467,29 @@ TOOLS: list[ToolDef] = [
         method="INTERNAL",
         endpoint="",
     ),
+    # ── Past sessions (internal: app/agent/session_search.py) ────────────────
+    ToolDef(
+        name="search_past_sessions",
+        description=(
+            "Full-text search over Pryce's past conversations with you. Returns matching "
+            "message snippets with timestamp, role and session id. Use it to recall earlier "
+            "troubleshooting steps, decisions or commands from previous chats ('what did we "
+            "do last time about X'). Not for documents or notes: that's search_knowledge_base."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Words to find; quotes for a phrase, 'or' for alternatives.",
+                },
+                "limit": {"type": "integer", "description": "Max results (default 8, max 20)."},
+            },
+            "required": ["query"],
+        },
+        method="INTERNAL",
+        endpoint="",
+    ),
     # ── Automations (internal: app/automations/tools.py) ─────────────────────
     ToolDef(
         name="list_automations",
@@ -2674,7 +2699,7 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
                  "send_email", "reply_to_email"],
     "notify":   ["send_notification"],
     "kb":       ["search_knowledge_base", "get_kb_index", "read_kb_source", "list_kb_sources",
-                 "delete_kb_source", "ingest_text", "ingest_url"],
+                 "delete_kb_source", "ingest_text", "ingest_url", "search_past_sessions"],
     "web":      ["web_search", "fetch_url", "aggregate_search"],
     "drive":    ["list_files", "list_folders", "create_folder", "get_file_info", "read_file",
                  "create_file", "update_file", "append_to_file", "delete_file", "move_file",
@@ -3230,6 +3255,16 @@ async def _execute_internal(name: str, args: dict[str, Any], t0: float) -> ToolR
 
     if name in BACKLOG_TOOL_NAMES:
         content = await backlog_tools.handle(name, args)
+        is_error = content.startswith("Error")
+        return ToolResult(
+            content=content,
+            status="error" if is_error else "success",
+            error=content if is_error else None,
+            duration_ms=_ms(),
+        )
+
+    if name in SESSION_SEARCH_TOOL_NAMES:
+        content = await session_search.handle(name, args)
         is_error = content.startswith("Error")
         return ToolResult(
             content=content,
