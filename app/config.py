@@ -71,6 +71,14 @@ class Settings(BaseSettings):
     public_map_redis_token: str = ""
     public_map_key: str = "homelab:map"
 
+    # Monthly Anthropic API spend alert (app/spend_alert.py). Month-to-date cost from llm_calls
+    # past this many USD sends one Pushover per step; empty or 0 = off. Steps are percents of the
+    # limit, e.g. [75, 100] for an early warning plus the limit itself. A string so an empty
+    # env var is valid; spend_alert.monthly_limit() parses it.
+    spend_alert_monthly_usd: str = ""
+    spend_alert_steps_pct: list[int] = [100]
+    spend_alert_timezone: str = "America/Indiana/Indianapolis"
+
     # Per-model request settings (thinking, effort) live in agent/client.py:model_params
     # Routing (plans/11 phase 1): Sonnet is the front door for every chat turn, Opus takes a
     # turn over on request_escalation and runs the think loop, Haiku does background calls.
