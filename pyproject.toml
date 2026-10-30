@@ -14,7 +14,7 @@ httpx = "^0.28.0"
 anthropic = "^1.17.0"
 asyncpg = "^0.30.0"
 python-dotenv = "^1.0.0"
-cachetools = "^5.0"
+cachetools = ">=5,<8"
 tzdata = ">=2024.1"
 sentry-sdk = {extras = ["fastapi"], version = "^2.65.0"}
 apscheduler = "^3.11"
