@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.agent.loop import get_session, list_sessions
 from app.agent.session import mark_processed, process_session
+from app.agent.ui_blocks import attach_ui_blocks
 from app.db import get_pool
 
 logger = logging.getLogger(__name__)
@@ -46,7 +47,11 @@ async def get_conversation(session_id: str):
     messages = await get_session(session_id)
     if messages is None:
         raise HTTPException(404, "Session not found")
-    return {"session_id": session_id, "messages": messages, "message_count": len(messages)}
+    return {
+        "session_id": session_id,
+        "messages": attach_ui_blocks(messages),
+        "message_count": len(messages),
+    }
 
 
 @router.post("/{session_id}/process")

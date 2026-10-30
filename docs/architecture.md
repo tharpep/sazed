@@ -122,7 +122,7 @@ flowchart TB
 | **5. tool_use** | For each `tool_use` block: `execute_tool(name, input)` → INTERNAL (`_execute_internal`) or gateway HTTP call. Result appended as `tool_result`. |
 | **6. Persist** | Each assistant turn + tool results saved to `messages` immediately. |
 | **7. Loop** | Repeat until `stop_reason = end_turn` or 5 turns exceeded. |
-| **8. Finalize** | Update `session.last_activity` and `message_count`. Return text (or SSE: `session`, `tool_start`, `tool_done`, `text_delta`, `done`). |
+| **8. Finalize** | Update `session.last_activity` and `message_count`. Return text (or SSE: `session`, `tool_start`, `tool_done`, `ui_block`, `text_delta`, `done`). |
 
 **Post-session processing** (`/conversations/{id}/process`): Haiku extracts new personal facts from the conversation; `upsert_fact()` saves with confidence-gated overwrite.
 

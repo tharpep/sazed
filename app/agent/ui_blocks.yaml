@@ -1,0 +1,32 @@
+# Which console widget shows a tool's result. Pure data: edit this file to add or change a card.
+# The console validates every card against its widget catalog (sazed-frontend/src/widgets/catalog.ts),
+# so a mismatch shows a fallback card there, never a broken widget.
+#
+# <tool name>: rules, first match wins
+#   when       tool input values that must match (optional)
+#   component  a widget name from the catalog
+#   props      widget prop -> key in the tool's JSON result ($ = the whole result)
+
+get_events:
+  - when: {days: 1}
+    component: CalendarWidget
+    props: {events: events}
+  - component: UpcomingWidget
+    props: {events: events}
+
+get_tasks:
+  - component: TaskWidget
+    props: {tasks: tasks, count: count}
+
+list_emails:
+  - when: {unread_only: true}
+    component: EmailBadge
+    props: {count: count, messages: messages}
+
+get_upcoming_bills:
+  - component: FinanceWidget
+    props: {upcoming: $}
+
+homelab_status:
+  - component: HomelabWidget
+    props: {summary: summary, services: services}
