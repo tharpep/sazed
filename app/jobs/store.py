@@ -144,16 +144,50 @@ async def expire_stale() -> list[dict[str, Any]]:
     return [_row(r) for r in rows]
 
 
+# A Claude job that Pryce's plan refused records {"window", "resets_at"} in meta.rate_limited
+# (plans/10 P1.2). Until the latest such reset passes, queued Claude jobs wait: they would only
+# be refused too. 8 days covers the longest window (seven_day).
+_PLAN_LIMIT_UNTIL = """
+    SELECT max((r.meta->'rate_limited'->>'resets_at')::double precision)
+    FROM jobs r
+    WHERE r.agent = 'claude' AND r.finished_at > NOW() - INTERVAL '8 days'
+      AND jsonb_typeof(r.meta->'rate_limited'->'resets_at') = 'number'
+      AND (r.meta->'rate_limited'->>'resets_at')::double precision > extract(epoch FROM NOW())
+"""
+
+
+async def plan_limit_until() -> float | None:
+    """When Pryce's plan accepts Claude jobs again (epoch seconds), or None if it does now."""
+    return await get_pool().fetchval(_PLAN_LIMIT_UNTIL)
+
+
+async def due_rate_limit_resumes() -> list[dict[str, Any]]:
+    """Change jobs paused by the plan limit whose reset has passed and that nobody has resumed."""
+    rows = await get_pool().fetch(
+        """
+        SELECT * FROM jobs p
+        WHERE p.status = 'paused' AND p.meta->>'pause_reason' = 'rate_limit'
+          AND jsonb_typeof(p.meta->'resume_after') = 'number'
+          AND (p.meta->>'resume_after')::double precision <= extract(epoch FROM NOW())
+          AND NOT EXISTS (SELECT 1 FROM jobs c WHERE c.parent_id = p.id)
+        ORDER BY p.finished_at
+        """
+    )
+    return [_row(r) for r in rows]
+
+
 async def claim_next(agents: list[str]) -> dict[str, Any] | None:
     """Hand the next queued job for one of these agents to the worker: lowest priority number
     first, then oldest (one claimant wins). Keep this one query; per-kind exclusions (plans/11's
     one browse job at a time) belong in its WHERE clause."""
     rec = await get_pool().fetchrow(
-        """
+        f"""
         UPDATE jobs SET status = 'running', started_at = NOW(), heartbeat_at = NOW()
         WHERE id = (
             SELECT id FROM jobs
             WHERE status = 'queued' AND agent = ANY($1::text[])
+              -- Hold Claude jobs while Pryce's plan limit is in effect (plans/10 P1.2).
+              AND NOT (agent = 'claude' AND ({_PLAN_LIMIT_UNTIL}) IS NOT NULL)
             ORDER BY priority, created_at
             FOR UPDATE SKIP LOCKED
             LIMIT 1

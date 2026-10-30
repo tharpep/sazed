@@ -42,6 +42,9 @@ async def get_job(job_id: uuid.UUID, events: bool = Query(True)):
     job["recent_steps"] = service.recent_steps(await store.get_recent_events(job_id))
     asking = job["status"] == "needs_input"
     job["question"] = (job.get("meta") or {}).get("question") if asking else None
+    # A queued Claude job behind Pryce's plan limit says so, instead of looking stuck.
+    held = job["status"] == "queued" and job["agent"] == "claude"
+    job["held_until"] = await store.plan_limit_until() if held else None
     return job
 
 

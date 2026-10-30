@@ -153,6 +153,9 @@ async def finish(job_id: uuid.UUID, body: FinishRequest):
         current = await store.get_job(job_id)
         if current and current["profile"] == "change" and current["status"] == "running":
             status, meta["pause_reason"] = "paused", meta["stop_reason"]
+            if meta["stop_reason"] == "rate_limit":
+                # Resumed by the CI watcher's loop once the plan resets (plans/10 P1.2).
+                meta["resume_after"] = (meta.get("rate_limited") or {}).get("resets_at")
             result, pr_meta = await _pr_outcome(
                 {**current, "meta": meta}, result or "", body.changes or {}, draft=True
             )

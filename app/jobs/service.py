@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -303,8 +304,9 @@ async def create_code_task(
 
 
 # Worker stops that don't mean "give up" (sazed_worker.jobs.PAUSING_STOPS): a change job stopped
-# this way is paused with its work so far on a draft PR (plans/10 P1.7).
-PAUSING_STOPS = ("timed_out", "tool_cap", "shutdown")
+# this way is paused with its work so far on a draft PR (plans/10 P1.7). A rate_limit pause (Pryce's
+# plan refused the run, P1.2) resumes on its own once the plan resets.
+PAUSING_STOPS = ("timed_out", "tool_cap", "shutdown", "rate_limit")
 
 _CONTINUABLE = ("succeeded", "needs_input", "cancelled", "timed_out", "paused")
 
@@ -359,6 +361,31 @@ async def create_follow_up(
             else "queued"
         ),
     )
+
+
+def _until(epoch: Any) -> str:
+    """'in about 2h 15m' for a reset time in epoch seconds."""
+    if not isinstance(epoch, (int, float)):
+        return "after the plan resets"
+    minutes = max(0, int((epoch - datetime.now(UTC).timestamp()) // 60))
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    span = f"{days}d {hours}h" if days else f"{hours}h {minutes}m" if hours else f"{minutes}m"
+    return f"in about {span}"
+
+
+async def resume_rate_limited() -> int:
+    """Resume change jobs paused by the plan limit once it has reset (plans/10 P1.2). Each
+    resume keeps its parent's requester, so its priority and cap rules don't change; a CI fix-up
+    keeps its attempt number. Returns how many were resumed."""
+    resumed = 0
+    for job in await store.due_rate_limit_resumes():
+        try:
+            await resume_job(job["id"], job["requested_by"])
+            resumed += 1
+        except JobError as e:
+            logger.warning("Job %s not resumed after the plan limit: %s", job["id"], e)
+    return resumed
 
 
 async def resume_job(job_id: uuid.UUID, requested_by: str) -> dict:
@@ -456,9 +483,16 @@ async def _notify(job: dict[str, Any]) -> None:
             saved = f"Draft PR #{meta.get('pr_number')} has the work so far"
         else:
             saved = "No files were changed yet"
+        next_step = "resume it from Sazed (Jobs)"
+        if meta.get("pause_reason") == "rate_limit":
+            reason = "plan limit"
+            next_step = (
+                f"it resumes on its own {_until(meta.get('resume_after'))}, and other Claude jobs "
+                "wait until then"
+            )
         await notify_simple(
             f"{label} paused ({reason})",
-            f"{job['title']}. {saved}; resume it from Sazed (Jobs).",
+            f"{job['title']}. {saved}; {next_step}.",
             meta.get("pr_url"),
             f"Open draft PR #{meta.get('pr_number')}" if meta.get("pr_url") else None,
         )
