@@ -88,5 +88,9 @@ jobs:
           pip install poetry==2.1.4
           poetry install --no-interaction
 
+      - name: The app imports with no configuration
+        # Plans/10 P2: catches bad imports and names that compileall misses.
+        run: poetry run python -c "import app.main"
+
       - name: Tests
         run: poetry run pytest -q
