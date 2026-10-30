@@ -306,6 +306,23 @@ async def update_outcome(
     return _row(rec) if rec else None
 
 
+async def settle_ancestors(job_id: uuid.UUID, ci_state: str) -> None:
+    """A fix-up's result is also its parents' result: they'd otherwise say "fixing" for good."""
+    await get_pool().execute(
+        """
+        WITH RECURSIVE up AS (
+            SELECT parent_id FROM jobs WHERE id = $1
+            UNION ALL
+            SELECT j.parent_id FROM jobs j JOIN up ON j.id = up.parent_id
+        )
+        UPDATE jobs SET meta = meta || jsonb_build_object('ci_state', $2::text)
+        WHERE id IN (SELECT parent_id FROM up) AND meta->>'ci_state' = 'fixing'
+        """,
+        job_id,
+        ci_state,
+    )
+
+
 async def awaiting_ci() -> list[dict[str, Any]]:
     """Recent change jobs with an open PR whose CI result hasn't been handled yet."""
     rows = await get_pool().fetch(

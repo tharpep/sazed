@@ -151,3 +151,15 @@ async def test_a_refused_follow_up_keeps_the_work_out_of_github(monkeypatch):
     with pytest.raises(service.JobError, match="not reopening"):
         await service.open_pull_request(_job(parent_id=PARENT_ID), {"a.py": "eA=="})
     assert change_result.FOLLOW_UP_RULE  # the follow-up rule the fix-up relies on still exists
+
+
+async def test_a_fix_ups_result_reaches_its_parents(watch, monkeypatch):
+    settled = []
+
+    async def fake_settle(job_id, state):
+        settled.append((job_id, state))
+
+    monkeypatch.setattr(ci_watch.store, "settle_ancestors", fake_settle)
+    watch["pr"] = {"state": "closed", "merged": True}
+    await ci_watch._check(_job(parent_id=PARENT_ID))
+    assert settled == [(JOB_ID, "merged")]
