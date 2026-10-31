@@ -26,6 +26,7 @@ from app.routers import (
     audit,
     automations,
     backlog,
+    capture,
     chat,
     conversations,
     finance,
@@ -170,5 +171,11 @@ app.include_router(
     procedures.router,
     prefix="/procedures",
     tags=["procedures"],
+    dependencies=[Depends(verify_api_key)],
+)
+app.include_router(
+    capture.router,
+    prefix="/capture",
+    tags=["capture"],
     dependencies=[Depends(verify_api_key)],
 )

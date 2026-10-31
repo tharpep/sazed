@@ -36,7 +36,7 @@ Tests live in `tests/` (pytest, pytest-asyncio in auto mode). No DB or network: 
 - Calendar: `get_events`, `check_availability`, `create_event`, `update_event`, `delete_event`, `search_events` → `/calendar/*`
 - Tasks: `get_task_lists`, `get_tasks`, `create_task_list`, `rename_task_list`, `create_task`, `update_task`, `delete_task` → `/tasks/*`
 - Email: `list_emails`, `search_emails`, `get_email`, `draft_email`, `send_email`, `reply_to_email` → `/email/*`
-- Notifications: `send_notification` → `/notify`. Takes an optional `document` (long markdown); the gateway stores it for 30 days and the Pushover button opens it.
+- Notifications: `send_notification`, `update_glance` → `/notify`, `/notify/glance`. Takes an optional `document` (long markdown); the gateway stores it for 30 days and the Pushover button opens it. `update_glance` silently updates the iPhone lock-screen widget.
 - Knowledge Base: `search_knowledge_base`, `get_kb_index`, `read_kb_source`, `list_kb_sources`, `delete_kb_source`, `ingest_text`, `ingest_url` → `/kb/*`. The KB has no Drive sync (removed 2026-10-18); content comes from console uploads and these ingest tools.
 - Web Search: `web_search`, `fetch_url` → `/search/web*`
 - Storage (Drive): `list_files`, `list_folders`, `create_folder`, `get_file_info`, `read_file`, `create_file`, `update_file`, `append_to_file`, `delete_file`, `move_file`, `copy_file`, `copy_file_from_github` → `/storage/*`
@@ -56,6 +56,7 @@ Tests live in `tests/` (pytest, pytest-asyncio in auto mode). No DB or network: 
 - **CI watcher** (`app/jobs/ci_watch.py`, started in the lifespan when `WORKER_KEY` is set): it watches CI on bot PRs through the gateway, sends a Pushover on green, and on red auto-starts up to 2 `ci-fix` follow-ups with the log tails.
 - `create_issue`, `add_issue_comment` and `add_pr_comment` post as the bot (gateway `/github/app/...`).
 - Backlog (internal, `app/backlog/tools.py`): `list_backlog`, `add_backlog_item`. Sazed can file and read items, but never approves or dismisses them.
+- Capture (internal, `app/capture/service.py`): `capture_thought`. Ingests raw text, stores in `captures` table (migration 013), and triages via Haiku into journal, tasks, backlog, or KB.
 - Memory (internal): `memory_update`
 
 **Backlog (`app/backlog/`, migration 005, plans/07 section 9b):**
@@ -97,7 +98,7 @@ Tests live in `tests/` (pytest, pytest-asyncio in auto mode). No DB or network: 
 
 **Worker jobs (`app/jobs/`, migration 004, plans/07):** `jobs` + `job_events` tables. `service.py` holds the rules: research prompts and depths (Gemini 3.8 Flash High via agy; the effort is part of the model id, so no `--effort`), model allowlists (`AGY_MODELS`, `CLAUDE_MODELS`, no Fable), daily caps per agent (`JOBS_DAILY_CAP_AGY` 20, `JOBS_DAILY_CAP_CLAUDE` 5), Pushover on finish. The worker uses `routers/worker.py`: `POST /worker/claim` (204 when idle; also expires silent jobs), `/worker/jobs/{id}/events` (heartbeat + cancel signal), and `/worker/jobs/{id}/finish`, authenticated by `X-Worker-Key` = `WORKER_KEY` (empty = 503, as on GCP). The console uses `routers/jobs.py`: `GET /jobs`, `GET /jobs/{id}` (with events), `POST /jobs/research`, `POST /jobs/{id}/cancel`.
 
-**Routers:** `health.py` (GET /health), `chat.py` (POST /chat, GET /chat/stream), `conversations.py` (GET /conversations — accepts `?type=` filter, defaults to `chat`, pass `all` for every type; GET /conversations/{id}, POST /conversations/{id}/process, POST /conversations/archive), `memory.py` (GET /memory, PUT /memory, DELETE /memory/{id}), `kb.py` (GET /kb/stats, /kb/sources, /kb/files, POST /kb/search, DELETE /kb/files/{id}, DELETE /kb), `journal.py` (`/journal/*` proxy to api-gateway + `POST /journal/sync-kb` which ingests a period's markdown export into the KB via `/kb/ingest/text`), `tools.py` (GET /tools).
+**Routers:** `health.py` (GET /health), `chat.py` (POST /chat, GET /chat/stream), `conversations.py` (GET /conversations — accepts `?type=` filter, defaults to `chat`, pass `all` for every type; GET /conversations/{id}, POST /conversations/{id}/process, POST /conversations/archive), `capture.py` (POST /capture, GET /capture, GET /capture/{id}), `memory.py` (GET /memory, PUT /memory, DELETE /memory/{id}), `kb.py` (GET /kb/stats, /kb/sources, /kb/files, POST /kb/search, DELETE /kb/files/{id}, DELETE /kb), `journal.py` (`/journal/*` proxy to api-gateway + `POST /journal/sync-kb` which ingests a period's markdown export into the KB via `/kb/ingest/text`), `tools.py` (GET /tools).
 
 **Database:** `app/db.py` — asyncpg pool for sessions and agent_memory. Sessions store `context_summary` and `summarized_through` for context window management, and `session_type` (`chat` default; `think`, `automation`, `claude` for other callers) for listing/archival/process_session gating.
 
