@@ -497,6 +497,44 @@ TOOLS: list[ToolDef] = [
         method="POST",
         endpoint="/notify",
     ),
+    ToolDef(
+        name="update_glance",
+        description=(
+            "Update the ambient lock-screen glance widget on Pryce's iPhone via Pushover Glances. "
+            "Silent, does not buzz or notify. Use to publish glanceable status: next calendar "
+            "event, disk usage %, pending approvals count, or active tasks."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Optional short title."},
+                "text": {
+                    "type": "string",
+                    "description": (
+                        "Primary glance line (e.g. 'Next: 3pm Sync'). Max 100 chars."
+                    ),
+                },
+                "subtext": {
+                    "type": "string",
+                    "description": (
+                        "Secondary glance line (e.g. 'Disk 58% · 0 jobs'). Max 100 chars."
+                    ),
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "Number badge (e.g. pending items count).",
+                },
+                "percent": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Progress/bar percent (0-100).",
+                },
+            },
+        },
+        method="POST",
+        endpoint="/notify/glance",
+    ),
 
     # -------------------------------------------------------------------------
     # Knowledge Base (proxied via api-gateway → knowledge-base service)
@@ -2465,6 +2503,25 @@ TOOLS: list[ToolDef] = [
         method="INTERNAL",
         endpoint="",
     ),
+    # ── Captures (internal: app/capture/service.py) ──────────────────────────
+    ToolDef(
+        name="capture_thought",
+        description=(
+            "Capture a raw thought, voice dump, note, or task. Sazed stores the text verbatim "
+            "and automatically triages it into tasks, journal reflections, backlog items, or "
+            "KB notes."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "The raw capture content."},
+                "source": {"type": "string", "description": "Capture source, defaults to 'chat'."},
+            },
+            "required": ["content"],
+        },
+        method="INTERNAL",
+        endpoint="",
+    ),
     # ── Automations (internal: app/automations/tools.py) ─────────────────────
     ToolDef(
         name="list_automations",
@@ -2672,7 +2729,8 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
                  "create_task", "update_task", "delete_task"],
     "email":    ["list_emails", "search_emails", "get_email", "draft_email",
                  "send_email", "reply_to_email"],
-    "notify":   ["send_notification"],
+    "notify":   ["send_notification", "update_glance"],
+    "capture":  ["capture_thought"],
     "kb":       ["search_knowledge_base", "get_kb_index", "read_kb_source", "list_kb_sources",
                  "delete_kb_source", "ingest_text", "ingest_url"],
     "web":      ["web_search", "fetch_url", "aggregate_search"],
@@ -3247,6 +3305,25 @@ async def _execute_internal(name: str, args: dict[str, Any], t0: float) -> ToolR
             error=content if is_error else None,
             duration_ms=_ms(),
         )
+
+    if name == "capture_thought":
+        from app.capture import service as capture_service
+
+        try:
+            res = await capture_service.ingest_capture(
+                content=args["content"],
+                source=args.get("source", "chat"),
+            )
+            return ToolResult(
+                content=json.dumps(res, default=str),
+                status="success",
+                error=None,
+                duration_ms=_ms(),
+            )
+        except Exception as e:
+            logger.exception("capture_thought failed")
+            msg = f"Capture failed: {e}"
+            return ToolResult(content=msg, status="error", error=msg, duration_ms=_ms())
 
     if name == "request_tools":
         # Normally handled inline by the agent loop; this is a safety fallback.
