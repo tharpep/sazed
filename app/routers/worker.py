@@ -147,6 +147,17 @@ async def finish(job_id: uuid.UUID, body: FinishRequest):
                 draft = {"draft": True}
             result, pr_meta = await _pr_outcome(current, result or "", body.changes or {}, **draft)
             meta |= pr_meta
+        elif current and current["profile"] == "review" and current["status"] == "running":
+            params = current.get("params") or {}
+            pr_number = params.get("pr_number")
+            repo = params.get("repo")
+            if pr_number and repo and result:
+                try:
+                    review = await service.post_pull_review(repo, pr_number, result)
+                    meta |= {"pr_review_id": review.get("id"), "pr_review_url": review.get("url")}
+                except service.JobError as e:
+                    logger.warning("Job %s failed to post PR review: %s", job_id, e)
+                    meta["pr_review_error"] = str(e)
     elif meta.get("stop_reason") in service.PAUSING_STOPS and body.agent_session_id:
         # Stopped, not given up (plans/10 P1.7): a change job pauses, its work so far saved as a
         # draft PR, so resume_job can carry on in the same session and working copy.
