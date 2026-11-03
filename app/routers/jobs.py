@@ -81,7 +81,7 @@ class CodeTaskRequest(BaseModel):
     mode: Literal["review", "change"] = "review"
     agent: Literal["agy", "claude"] | None = None
     model: str | None = None
-    requested_by: Literal["console", "mcp", "webhook"] = "console"
+    requested_by: Literal["console", "mcp"] = "console"  # webhooks come in through /events
     pr_number: int | None = Field(None, ge=1)
     branch: str | None = Field(None, min_length=1, max_length=100)
 

@@ -286,7 +286,9 @@ async def create_code_task(
         repo = f"{DEFAULT_GITHUB_OWNER}/{repo}"
     if not _REPO_RE.match(repo):
         raise JobError(f"'{repo}' isn't a repo name like owner/name")
-    agent = agent or ("agy" if mode == "review" else "claude")
+    if not agent:
+        by_source = settings.review_agent_by_source if mode == "review" else {}
+        agent = by_source.get(requested_by, "claude")
     _require(policy.StartJob(agent, requested_by, repo=repo))
     info = await _repo_info(repo)
     if agent == "agy":
