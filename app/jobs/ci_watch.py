@@ -77,6 +77,12 @@ def _fix_instruction(ci: dict[str, Any], attempt: int) -> str:
     return "\n".join(parts)
 
 
+async def _settle(job: dict[str, Any], patch: dict[str, Any]) -> None:
+    await store.update_outcome(job["id"], None, patch)
+    if job.get("parent_id"):
+        await store.settle_ancestors(job["id"], patch["ci_state"])
+
+
 async def _check(job: dict[str, Any]) -> None:
     meta = job.get("meta") or {}
     params = job.get("params") or {}
@@ -87,7 +93,7 @@ async def _check(job: dict[str, Any]) -> None:
         if pr.get("state") != "open":
             # Closed or merged: nothing to report or fix (a fix-up would only reopen the work).
             state = "merged" if pr.get("merged") else "closed"
-            await store.update_outcome(job["id"], None, {"ci_state": state})
+            await _settle(job, {"ci_state": state})
             return
     ci = await _ci(params["repo"], meta["head_sha"])
     if ci is None:
@@ -97,11 +103,11 @@ async def _check(job: dict[str, Any]) -> None:
         return
     if state == "none":
         if datetime.now(UTC) - job["finished_at"] > NO_CI_AFTER:
-            await store.update_outcome(job["id"], None, {"ci_state": "no_ci"})
+            await _settle(job, {"ci_state": "no_ci"})
         return
     runs = [r.get("url") for r in ci.get("runs", [])]
     if state == "success":
-        await store.update_outcome(job["id"], None, {"ci_state": "success", "ci_runs": runs})
+        await _settle(job, {"ci_state": "success", "ci_runs": runs})
         await service.notify_simple(
             f"PR #{meta.get('pr_number')} ready · {params['repo'].split('/')[-1]}",
             f"{job['title']}. CI passed.",
@@ -112,7 +118,7 @@ async def _check(job: dict[str, Any]) -> None:
 
     attempt = int(params.get("ci_fix_attempt") or 0) + 1
     if attempt > MAX_FIX_ATTEMPTS:
-        await store.update_outcome(job["id"], None, {"ci_state": "failure", "ci_runs": runs})
+        await _settle(job, {"ci_state": "failure", "ci_runs": runs})
         await service.notify_simple(
             f"PR #{meta.get('pr_number')} needs you",
             f"{job['title']}. CI still fails after {MAX_FIX_ATTEMPTS} automatic fixes.",
@@ -129,7 +135,7 @@ async def _check(job: dict[str, Any]) -> None:
         )
     except service.JobError as e:
         logger.warning("CI fix-up for job %s not started: %s", job["id"], e)
-        await store.update_outcome(job["id"], None, {"ci_state": "failure", "ci_fix_error": str(e)})
+        await _settle(job, {"ci_state": "failure", "ci_fix_error": str(e)})
         return
     await store.update_outcome(
         job["id"], None, {"ci_state": "fixing", "ci_fix_job": str(fix["id"]), "ci_runs": runs}

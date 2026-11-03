@@ -26,6 +26,7 @@ from app.routers import (
     audit,
     automations,
     backlog,
+    board,
     chat,
     conversations,
     finance,
@@ -160,6 +161,9 @@ app.include_router(
 )
 app.include_router(
     backlog.router, prefix="/backlog", tags=["backlog"], dependencies=[Depends(verify_api_key)]
+)
+app.include_router(
+    board.router, prefix="/board", tags=["board"], dependencies=[Depends(verify_api_key)]
 )
 app.include_router(
     jobs.router, prefix="/jobs", tags=["jobs"], dependencies=[Depends(verify_api_key)]

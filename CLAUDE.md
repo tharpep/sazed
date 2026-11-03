@@ -58,6 +58,12 @@ Tests live in `tests/` (pytest, pytest-asyncio in auto mode). No DB or network: 
 - Backlog (internal, `app/backlog/tools.py`): `list_backlog`, `add_backlog_item`. Sazed can file and read items, but never approves or dismisses them.
 - Memory (internal): `memory_update`
 
+**Board (`app/board/`, plans/13):**
+- `GET /board` returns flat cards from every source, and `GET /board/{id}` one card with its detail. Ids are `item:<uuid>` or `job:<uuid>`. The console and the gateway MCP read this; neither works out stages itself.
+- `stages.py` holds the rules as pure functions over an item's status and the last job in its chain. Stages are fixed: inbox, next, doing, needs_me, done. Code detail stays on the card as fields.
+- A job with no item gets a card only while unfinished, and an automation's job only while it's waiting on Pryce. A new kind of work is one more source in `service.py`.
+- Phase 1 is read-only, so `actions` is empty.
+
 **Backlog (`app/backlog/`, migration 005, plans/07 section 9b):**
 - `backlog_items` holds ideas, bugs, gaps, optimizations, planned work and known issues.
 - **Never deleted.** Dismissed and stale items stay so `store.similar` dedupe keeps them from coming back.

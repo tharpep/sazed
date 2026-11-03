@@ -130,7 +130,8 @@ async def _check_cap(agent: str, requested_by: str) -> None:
 
 
 def _title(text: str, limit: int = 80) -> str:
-    one_line = re.sub(r"\s+", " ", text).strip()
+    # The first line only: a backlog instruction's first line is the item title, then the prompt.
+    one_line = re.sub(r"\s+", " ", text.strip().split("\n", 1)[0]).strip()
     return one_line if len(one_line) <= limit else one_line[: limit - 1] + "…"
 
 
