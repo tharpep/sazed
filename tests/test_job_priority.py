@@ -18,7 +18,9 @@ def test_pryce_first_then_sazed():
 def test_backfill_uses_the_same_split_as_the_cap():
     sql = (_MIGRATIONS_DIR / "011_job_priority.sql").read_text(encoding="utf-8")
     prefixes = {p.rstrip("%") for p in re.findall(r"requested_by LIKE '([^']+)'", sql)}
-    assert prefixes == set(_CAPPED_PREFIXES)
+    # webhook jobs (GitHub PR reviews) didn't exist when 011 ran, so it had none to backfill.
+    added_after_011 = {"webhook"}
+    assert prefixes == set(_CAPPED_PREFIXES) - added_after_011
 
 
 async def test_new_jobs_carry_their_priority(monkeypatch):
