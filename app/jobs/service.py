@@ -229,6 +229,23 @@ Task: {instruction}
 Reply in markdown: a short summary first, then findings ordered by importance, each with
 file:line references and a concrete suggestion. Say what you did not check."""
 
+_PR_REVIEW_PROMPT = """You are reviewing Pull Request #{pr_number} on {repo} for Pryce.
+It is checked out in the current directory. You can read and search files.
+You cannot change anything; don't try.
+
+Task: {instruction}
+{context}
+Reply in markdown:
+1. ### Architecture & Visual Structure (lead with clean ASCII flow/state diagram of changes)
+2. ### Component & Verification Summary (table of files, changes, verification status)
+3. ### Issues & Defect Analysis (file:line, exact quote, defect analysis, concrete fix)
+4. ### Architectural Tensions & Trade-Offs (Option A vs Option B with recommendations)
+5. ### Git & Rule Hygiene (commit conventions, unwanted comments, tool footers)
+6. ### Actionable Checklist for PR Author
+
+Never report a defect based on a comment explaining why an edge case was handled
+without checking if the code directly handles it."""
+
 _REPO_RE = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
 
 
@@ -256,6 +273,9 @@ async def create_code_task(
     requested_by: str,
     model: str | None = None,
     context: str = "",
+    agent: str | None = None,
+    pr_number: int | None = None,
+    branch: str | None = None,
 ) -> dict[str, Any]:
     if not settings.worker_key:
         raise JobError("the worker isn't configured here (WORKER_KEY is empty)")
@@ -266,16 +286,29 @@ async def create_code_task(
         repo = f"{DEFAULT_GITHUB_OWNER}/{repo}"
     if not _REPO_RE.match(repo):
         raise JobError(f"'{repo}' isn't a repo name like owner/name")
-    _require(policy.StartJob("claude", requested_by, repo=repo))
+    if not agent:
+        by_source = settings.review_agent_by_source if mode == "review" else {}
+        agent = by_source.get(requested_by, "claude")
+    _require(policy.StartJob(agent, requested_by, repo=repo))
     info = await _repo_info(repo)
-    model = model or DEFAULT_CLAUDE_MODEL
-    _check_model("claude", model)
-    await _check_cap("claude", requested_by)
+    if agent == "agy":
+        model = model or DEFAULT_AGY_MODEL
+    else:
+        model = model or DEFAULT_CLAUDE_MODEL
+    _check_model(agent, model)
+    await _check_cap(agent, requested_by)
     profile, timeout_s, max_tools = CODE_MODES[mode]
-    prompt = (_CHANGE_PROMPT if mode == "change" else _REVIEW_PROMPT).format(
+    if mode == "change":
+        template = _CHANGE_PROMPT
+    elif pr_number:
+        template = _PR_REVIEW_PROMPT
+    else:
+        template = _REVIEW_PROMPT
+    prompt = template.format(
         repo=info.get("full_name") or repo,
         instruction=instruction.strip(),
         context=_context_line(context),
+        pr_number=pr_number or 0,
     ) + _ASK_RULE
     params = {
         "repo": repo,
@@ -284,10 +317,12 @@ async def create_code_task(
         "instruction": instruction.strip(),
         "timeout_s": timeout_s,
         "max_tool_calls": max_tools,
+        "pr_number": pr_number,
+        "branch": branch,
     }
     return await store.create_job(
         kind="code_task",
-        agent="claude",
+        agent=agent,
         model=model,
         profile=profile,
         title=_title(f"{repo.split('/', 1)[1]}: {instruction}"),
@@ -669,6 +704,23 @@ async def open_pull_request(
         except ValueError:
             detail = resp.text
         raise JobError(f"couldn't open the PR: {detail}")
+    return resp.json()
+
+
+async def post_pull_review(repo: str, pr_number: int, review_body: str) -> dict[str, Any]:
+    owner, name = repo.split("/", 1)
+    resp = await get_client().post(
+        f"{settings.gateway_url}/github/app/repos/{owner}/{name}/pulls/{pr_number}/reviews",
+        headers={"X-API-Key": settings.gateway_api_key},
+        json={"body": review_body, "event": "COMMENT"},
+        timeout=30.0,
+    )
+    if not resp.is_success:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except ValueError:
+            detail = resp.text
+        raise JobError(f"couldn't post review: {detail}")
     return resp.json()
 
 

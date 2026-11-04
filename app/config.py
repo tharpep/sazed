@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     jobs_daily_cap_agy: int = 20
     jobs_daily_cap_claude: int = 5
     research_wait_seconds: int = 60  # how long the research tool waits before handing back a job id
+    # Which agent runs a review task, by who asked (ai-context research/agent-stack.md, D1):
+    # automatic PR reviews from the GitHub webhook go to agy; any source not listed runs Claude.
+    review_agent_by_source: dict[str, str] = {"webhook": "agy"}
     # Repos Sazed never runs code tasks on (dormant; the gateway's bot refuses them too).
     code_task_excluded_repos: list[str] = [
         "tharpep/Trusted-Model-Registry",

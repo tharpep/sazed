@@ -79,8 +79,11 @@ class CodeTaskRequest(BaseModel):
     repo: str = Field(..., min_length=1, max_length=200)
     instruction: str = Field(..., min_length=3, max_length=8000)
     mode: Literal["review", "change"] = "review"
+    agent: Literal["agy", "claude"] | None = None
     model: str | None = None
-    requested_by: Literal["console", "mcp"] = "console"
+    requested_by: Literal["console", "mcp"] = "console"  # webhooks come in through /events
+    pr_number: int | None = Field(None, ge=1)
+    branch: str | None = Field(None, min_length=1, max_length=100)
 
 
 class FollowUpRequest(BaseModel):
@@ -92,7 +95,14 @@ class FollowUpRequest(BaseModel):
 async def start_code_task(body: CodeTaskRequest):
     try:
         job = await service.create_code_task(
-            body.repo, body.instruction, body.mode, body.requested_by, model=body.model
+            body.repo,
+            body.instruction,
+            body.mode,
+            body.requested_by,
+            model=body.model,
+            agent=body.agent,
+            pr_number=body.pr_number,
+            branch=body.branch,
         )
     except service.JobError as e:
         raise HTTPException(422, str(e)) from e

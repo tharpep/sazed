@@ -62,7 +62,7 @@ GATEWAY_WRITE_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
 # Jobs started by automations, think runs, CI fix-ups or Sazed with no conversation count against
 # the daily cap (it protects Pryce's subscription limits from runaway loops). Jobs he starts from
 # the console, a chat he's in, or MCP don't: Claude's and Google's own limits are the backstop.
-_CAPPED_PREFIXES = ("automation", "think:", "ci-fix", "sazed")
+_CAPPED_PREFIXES = ("automation", "think:", "ci-fix", "sazed", "webhook")
 
 
 def counts_toward_cap(requested_by: str) -> bool:

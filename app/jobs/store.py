@@ -78,6 +78,23 @@ async def get_job(job_id: uuid.UUID) -> dict[str, Any] | None:
     return _row(rec) if rec else None
 
 
+async def pr_review_open(repo: str, pr_number: int) -> bool:
+    """A review of this PR is already waiting or running, so another push doesn't queue a second."""
+    found = await get_pool().fetchval(
+        """
+        SELECT 1 FROM jobs
+        WHERE kind = 'code_task' AND profile = 'review'
+          AND status <> ALL($3::text[])
+          AND params->>'repo' = $1 AND params->>'pr_number' = $2
+        LIMIT 1
+        """,
+        repo,
+        str(pr_number),
+        list(SETTLED_STATUSES),
+    )
+    return found is not None
+
+
 async def list_jobs(status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
     rows = await get_pool().fetch(
         """

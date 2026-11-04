@@ -29,6 +29,7 @@ from app.routers import (
     board,
     chat,
     conversations,
+    events,
     finance,
     health,
     jobs,
@@ -167,6 +168,9 @@ app.include_router(
 )
 app.include_router(
     jobs.router, prefix="/jobs", tags=["jobs"], dependencies=[Depends(verify_api_key)]
+)
+app.include_router(
+    events.router, prefix="/events", tags=["events"], dependencies=[Depends(verify_api_key)]
 )
 # The worker authenticates with its own key (X-Worker-Key), checked inside the router.
 app.include_router(worker.router, prefix="/worker", tags=["worker"])
