@@ -17,22 +17,16 @@ from app import policy
 from app.config import settings
 from app.db import get_pool
 from app.http_client import get_client
-from app.jobs import change_result, store
+from app.jobs import change_result, profiles, store
 
 logger = logging.getLogger(__name__)
 
-# Pryce's call (2026-10-18): Gemini 3.8 Flash at its highest effort suits research best. The effort
-# is part of the model id ("-high" is Flash's top level); agy rejects a conflicting --effort.
-DEFAULT_AGY_MODEL = "gemini-3.8-flash-high"
-
-# depth -> (timeout seconds, max tool calls, answer shape)
-RESEARCH_DEPTHS: dict[str, tuple[int, int, str]] = {
-    "quick": (300, 30, "a direct answer in 2-6 sentences"),
+# depth -> answer shape; the limits per depth live in profiles.CAPABILITIES (research_<depth>).
+RESEARCH_DEPTHS: dict[str, str] = {
+    "quick": "a direct answer in 2-6 sentences",
     "deep": (
-        600,
-        80,
         "a thorough report: a short summary first, then sections covering the important details, "
-        "trade-offs and any disagreement between sources",
+        "trade-offs and any disagreement between sources"
     ),
 }
 
@@ -144,14 +138,15 @@ async def _create_agy_job(
 ) -> dict[str, Any]:
     if not settings.worker_key:
         raise JobError("the worker isn't configured here (WORKER_KEY is empty)")
-    model = model or DEFAULT_AGY_MODEL
-    _check_model("agy", model)
-    await _check_cap("agy", requested_by)
+    capability = "second_opinion" if kind == "second_opinion" else "research_quick"
+    run = profiles.resolve(capability, source=requested_by, agent="agy", model=model)
+    _check_model(run.agent, run.model)
+    await _check_cap(run.agent, requested_by)
     return await store.create_job(
         kind=kind,
-        agent="agy",
-        model=model,
-        profile="research",
+        agent=run.agent,
+        model=run.model,
+        profile=run.profile,
         title=_title(title),
         prompt=prompt,
         params=params,
@@ -169,17 +164,17 @@ async def create_research(
 ) -> dict[str, Any]:
     if depth not in RESEARCH_DEPTHS:
         raise JobError(f"depth must be one of: {', '.join(RESEARCH_DEPTHS)}")
-    timeout_s, max_tools, shape = RESEARCH_DEPTHS[depth]
+    limits = profiles.resolve(f"research_{depth}", source=requested_by, model=model)
     prompt = (
         _RESEARCH_PROMPT.format(
-            question=question.strip(), context=_context_line(context), shape=shape
+            question=question.strip(), context=_context_line(context), shape=RESEARCH_DEPTHS[depth]
         )
         + _ASK_RULE
     )
     params = {
         "depth": depth,
-        "timeout_s": timeout_s,
-        "max_tool_calls": max_tools,
+        "timeout_s": limits.timeout_s,
+        "max_tool_calls": limits.max_tool_calls,
         "save_to_kb": save_to_kb,
         "question": question.strip(),
     }
@@ -193,18 +188,14 @@ async def create_second_opinion(
         _SECOND_OPINION_PROMPT.format(subject=subject.strip(), context=_context_line(context))
         + _ASK_RULE
     )
-    params = {"timeout_s": 300, "max_tool_calls": 20}
+    limits = profiles.resolve("second_opinion", source=requested_by, model=model)
+    params = {"timeout_s": limits.timeout_s, "max_tool_calls": limits.max_tool_calls}
     return await _create_agy_job("second_opinion", subject, prompt, params, requested_by, model)
 
 
-DEFAULT_CLAUDE_MODEL = "claude-sonnet-5-5"
 DEFAULT_GITHUB_OWNER = "tharpep"
 
-# mode -> (profile, timeout seconds, max tool calls)
-CODE_MODES: dict[str, tuple[str, int, int]] = {
-    "review": ("review", 900, 150),
-    "change": ("change", 1800, 200),
-}
+CODE_MODES = ("review", "change")  # each is also a capability in profiles.CAPABILITIES
 
 _CHANGE_PROMPT = """You are making a change to the GitHub repository {repo} for Pryce. A copy of its
 default branch is in the current directory (no .git). You can read, search, edit and create
@@ -286,18 +277,11 @@ async def create_code_task(
         repo = f"{DEFAULT_GITHUB_OWNER}/{repo}"
     if not _REPO_RE.match(repo):
         raise JobError(f"'{repo}' isn't a repo name like owner/name")
-    if not agent:
-        by_source = settings.review_agent_by_source if mode == "review" else {}
-        agent = by_source.get(requested_by, "claude")
-    _require(policy.StartJob(agent, requested_by, repo=repo))
+    run = profiles.resolve(mode, source=requested_by, agent=agent, model=model)
+    _require(policy.StartJob(run.agent, requested_by, repo=repo))
     info = await _repo_info(repo)
-    if agent == "agy":
-        model = model or DEFAULT_AGY_MODEL
-    else:
-        model = model or DEFAULT_CLAUDE_MODEL
-    _check_model(agent, model)
-    await _check_cap(agent, requested_by)
-    profile, timeout_s, max_tools = CODE_MODES[mode]
+    _check_model(run.agent, run.model)
+    await _check_cap(run.agent, requested_by)
     if mode == "change":
         template = _CHANGE_PROMPT
     elif pr_number:
@@ -315,16 +299,16 @@ async def create_code_task(
         "mode": mode,
         "private": bool(info.get("private")),
         "instruction": instruction.strip(),
-        "timeout_s": timeout_s,
-        "max_tool_calls": max_tools,
+        "timeout_s": run.timeout_s,
+        "max_tool_calls": run.max_tool_calls,
         "pr_number": pr_number,
         "branch": branch,
     }
     return await store.create_job(
         kind="code_task",
-        agent=agent,
-        model=model,
-        profile=profile,
+        agent=run.agent,
+        model=run.model,
+        profile=run.profile,
         title=_title(f"{repo.split('/', 1)[1]}: {instruction}"),
         prompt=prompt,
         params=params,
