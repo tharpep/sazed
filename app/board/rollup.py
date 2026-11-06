@@ -36,6 +36,25 @@ def _progress(counts: dict[str, int]) -> dict[str, int]:
     }
 
 
+_BAR_KEYS = ("done", "in_flight", "needs_me", "next")
+
+
+def _step_bar(state: str, progress: dict[str, int]) -> dict[str, float]:
+    """A step's share of its bar by card stage; a step closed as done is full however many cards."""
+    if state == "done":
+        return {"done": 1.0, "in_flight": 0.0, "needs_me": 0.0, "next": 0.0}
+    total = progress["total"]
+    return {k: round(progress[k] / total, 4) if total else 0.0 for k in _BAR_KEYS}
+
+
+def _project_bar(steps: list[dict[str, Any]]) -> dict[str, float]:
+    """Every live step weighs the same; each one fills its slice by its own bar."""
+    live = [w for w in steps if w["state"] != "dropped"]
+    if not live:
+        return {k: 0.0 for k in _BAR_KEYS}
+    return {k: round(sum(w["bar"][k] for w in live) / len(live), 4) for k in _BAR_KEYS}
+
+
 def _open_status(ws: dict[str, Any], counts: dict[str, int], settled: set[str]) -> str:
     if counts["needs_me"]:
         return _NEEDS_ME
@@ -69,6 +88,7 @@ def workstreams(
                 "status": status,
                 "depends_on": [str(d) for d in ws["depends_on"]],
                 "progress": _progress(counts),
+                "bar": _step_bar(ws["state"], _progress(counts)),
                 "cards": cards,
             }
         )
@@ -117,6 +137,7 @@ def project(row: dict[str, Any], steps: list[dict[str, Any]]) -> dict[str, Any]:
     }
     current = _current(steps)
     return {
+        "bar": _project_bar(steps),
         "id": str(row["id"]),
         "slug": row["slug"],
         "title": row["title"],
