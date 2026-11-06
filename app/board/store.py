@@ -37,7 +37,8 @@ def _job(rec) -> dict[str, Any]:
 async def items() -> list[dict[str, Any]]:
     rows = await get_pool().fetch(
         """
-        SELECT id, type, status, title, repos, effort, impact, rank, job_id, created_at, updated_at
+        SELECT id, type, status, title, repos, effort, impact, rank, job_id, workstream_id,
+               created_at, updated_at
         FROM backlog_items WHERE status <> ALL($1::text[])
         ORDER BY rank NULLS LAST, created_at DESC
         """,
