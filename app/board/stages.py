@@ -70,6 +70,7 @@ def item_stage(
     # An open item may still hold a job from an earlier try (a closed PR puts it back in Open).
     if status == "approved" and job is not None:
         return job_stage(job, now)
-    if status == "shortlisted" or item.get("rank") is not None:
+    # A card filed under a workstream is committed work on a project's ladder, not one to triage.
+    if status == "shortlisted" or item.get("rank") is not None or item.get("workstream_id"):
         return "next", "Approve it to start"
     return "inbox", "Rank it or dismiss it"

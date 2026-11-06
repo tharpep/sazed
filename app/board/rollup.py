@@ -26,13 +26,12 @@ def stage_counts(cards: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def _progress(counts: dict[str, int]) -> dict[str, int]:
-    """The bar's segments. Inbox cards are ideas, not planned work, so they stay off the bar."""
+    """The bar's segments. Workstream cards are never in the inbox (see stages.item_stage)."""
     return {
         "done": counts["done"],
         "in_flight": counts["doing"],
         "needs_me": counts["needs_me"],
         "next": counts["next"],
-        "ideas": counts["inbox"],
         "total": counts["done"] + counts["doing"] + counts["needs_me"] + counts["next"],
     }
 
@@ -113,7 +112,6 @@ def project(row: dict[str, Any], steps: list[dict[str, Any]]) -> dict[str, Any]:
             ("in_flight", "in_flight"),
             ("needs_me", "needs_me"),
             ("next", "next"),
-            ("ideas", "ideas"),
             ("total", "total"),
         )
     }
