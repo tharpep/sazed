@@ -36,6 +36,7 @@ from app.routers import (
     jobs,
     journal,
     kb,
+    learning,
     memory,
     procedures,
     think,
@@ -172,6 +173,10 @@ app.include_router(
 )
 app.include_router(
     bakeoffs.router, prefix="/bakeoffs", tags=["bakeoffs"], dependencies=[Depends(verify_api_key)]
+)
+app.include_router(
+    learning.router, prefix="/learning", tags=["learning"],
+    dependencies=[Depends(verify_api_key)],
 )
 app.include_router(
     events.router, prefix="/events", tags=["events"], dependencies=[Depends(verify_api_key)]

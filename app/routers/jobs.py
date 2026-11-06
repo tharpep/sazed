@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.jobs import service, store
+from app.learning import service as learning
 
 router = APIRouter()
 
@@ -146,4 +147,5 @@ async def cancel(job_id: uuid.UUID):
     job = await store.cancel_job(job_id)
     if job is None:
         raise HTTPException(409, "Job not found or already finished")
+    await learning.record(job)
     return job

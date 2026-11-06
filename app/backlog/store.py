@@ -8,7 +8,7 @@ from typing import Any
 
 from app.db import get_pool
 
-TYPES = ("idea", "bug", "gap", "optimization", "planned", "known_issue")
+TYPES = ("idea", "bug", "gap", "optimization", "planned", "known_issue", "guard")
 OPEN = ("new", "shortlisted")
 STATUSES = ("new", "shortlisted", "approved", "done", "dismissed", "stale")
 
