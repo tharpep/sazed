@@ -6,6 +6,7 @@ from typing import Any
 
 from app.db import get_pool
 from app.policy import counts_toward_cap
+from app.policy.decide import _CAPPED_PREFIXES
 
 _JSON_FIELDS = ("params", "meta", "event")
 FINAL_STATUSES = ("succeeded", "failed", "cancelled", "timed_out")
@@ -22,11 +23,16 @@ _HEARTBEAT_GRACE_S = 120
 # Claim order (plans/10 P1.3, migration 011): lower runs first, then oldest.
 PRIORITY_PRYCE = 0  # console, his chats, MCP, backlog Approve
 PRIORITY_SAZED = 5  # automations, think runs, CI fix-ups, Sazed on its own
-# Autopilot (plans/10 A1) will use 9, below both.
+PRIORITY_BACKGROUND = 9  # bake-off arms; later autopilot (plans/10 A1). Never ahead of the rest.
+
+BAKEOFF_PREFIX = "bakeoff:"  # requested_by of a bake-off's arms: bakeoff:<id> (My-AI plans/14)
 
 
 def claim_priority(requested_by: str) -> int:
-    """Jobs Pryce starts go before jobs Sazed starts itself; the same split as the daily cap."""
+    """Jobs Pryce starts go before jobs Sazed starts itself; the same split as the daily cap.
+    Bake-off arms go after both, so comparing models never delays real work."""
+    if requested_by.startswith(BAKEOFF_PREFIX):
+        return PRIORITY_BACKGROUND
     return PRIORITY_SAZED if counts_toward_cap(requested_by) else PRIORITY_PRYCE
 
 
@@ -50,12 +56,13 @@ async def create_job(
     requested_by: str,
     status: str = "queued",
     parent_id: uuid.UUID | None = None,
+    variant: str | None = None,
 ) -> dict[str, Any]:
     rec = await get_pool().fetchrow(
         """
         INSERT INTO jobs (kind, agent, model, profile, title, prompt, params, status,
-                          parent_id, requested_by, priority)
-        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11)
+                          parent_id, requested_by, priority, variant)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12)
         RETURNING *
         """,
         kind,
@@ -69,6 +76,7 @@ async def create_job(
         parent_id,
         requested_by,
         claim_priority(requested_by),
+        variant,
     )
     return _row(rec)
 
@@ -131,17 +139,77 @@ async def get_recent_events(job_id: uuid.UUID, limit: int = 200) -> list[dict[st
 
 
 async def count_recent(agent: str) -> int:
-    """Capped jobs (automations, think, CI fix-ups, Sazed alone) for this agent in the last 24h."""
+    """Capped jobs for this agent in the last 24h, by the same prefixes the policy caps (webhook
+    reviews included; the hand-written list here had missed them)."""
     return await get_pool().fetchval(
         """
         SELECT COUNT(*) FROM jobs
         WHERE agent = $1 AND created_at > NOW() - INTERVAL '24 hours'
           AND status NOT IN ('cancelled', 'needs_approval')
-          AND (requested_by LIKE 'automation%' OR requested_by LIKE 'think:%'
-               OR requested_by LIKE 'ci-fix%' OR requested_by = 'sazed')
+          AND requested_by LIKE ANY($2::text[])
         """,
         agent,
+        [f"{prefix}%" for prefix in _CAPPED_PREFIXES],
     )
+
+
+async def count_bakeoff_recent() -> int:
+    """Bake-off arms created in the last 24h; they have their own cap (jobs_daily_cap_bakeoff)."""
+    return await get_pool().fetchval(
+        """
+        SELECT COUNT(*) FROM jobs
+        WHERE created_at > NOW() - INTERVAL '24 hours'
+          AND status NOT IN ('cancelled', 'needs_approval')
+          AND requested_by LIKE $1
+        """,
+        f"{BAKEOFF_PREFIX}%",
+    )
+
+
+async def save_changes(job_id: uuid.UUID, changes: dict[str, str | None]) -> None:
+    """A result-only change job's files (path -> base64 content, or None for a deletion), kept
+    until a bake-off's winner is promoted to a PR (migration 019)."""
+    await get_pool().execute(
+        """
+        INSERT INTO job_changes (job_id, changes) VALUES ($1, $2::jsonb)
+        ON CONFLICT (job_id) DO UPDATE SET changes = EXCLUDED.changes, saved_at = NOW()
+        """,
+        job_id,
+        json.dumps(changes),
+    )
+
+
+async def get_changes(job_id: uuid.UUID) -> dict[str, str | None] | None:
+    raw = await get_pool().fetchval("SELECT changes FROM job_changes WHERE job_id = $1", job_id)
+    if raw is None:
+        return None
+    return json.loads(raw) if isinstance(raw, str) else raw
+
+
+async def bakeoff_arms(bakeoff_id: str) -> list[dict[str, Any]]:
+    """One bake-off's arms, oldest first: their run rows, plus the job's params and meta for what
+    run_rows doesn't carry (tool calls, the changed files, whether it was promoted)."""
+    rows = await get_pool().fetch(
+        """
+        SELECT r.job_id, r.variant, r.agent, r.model, r.state, r.usage, r.checks,
+               r.check_passed, r.created_at, r.started_at, r.finished_at, j.params, j.meta,
+               (SELECT count(*) FROM jsonb_object_keys(c.changes)) AS changed_files
+        FROM run_rows r
+        JOIN jobs j ON j.id::text = r.job_id
+        LEFT JOIN job_changes c ON c.job_id = j.id
+        WHERE r.shape = 'job' AND r.variant LIKE $1
+        ORDER BY r.created_at
+        """,
+        f"{BAKEOFF_PREFIX}{bakeoff_id}:%",
+    )
+    out = []
+    for r in rows:
+        d = _row(r)
+        for f in ("usage", "checks"):
+            if isinstance(d.get(f), str):
+                d[f] = json.loads(d[f])
+        out.append(d)
+    return out
 
 
 async def expire_stale() -> list[dict[str, Any]]:

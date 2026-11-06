@@ -18,6 +18,7 @@ from app.config import settings
 from app.db import get_pool
 from app.http_client import get_client
 from app.jobs import change_result, profiles, store
+from app.pricing import estimate_cost_usd
 
 logger = logging.getLogger(__name__)
 
@@ -117,9 +118,12 @@ def _check_model(agent: str, model: str) -> None:
 
 
 async def _check_cap(agent: str, requested_by: str) -> None:
-    if not policy.counts_toward_cap(requested_by):
+    if requested_by.startswith(store.BAKEOFF_PREFIX):
+        used = await store.count_bakeoff_recent()
+    elif policy.counts_toward_cap(requested_by):
+        used = await store.count_recent(agent)
+    else:
         return
-    used = await store.count_recent(agent)
     _require(policy.StartJob(agent, requested_by, used_today=used))
 
 
@@ -267,6 +271,8 @@ async def create_code_task(
     agent: str | None = None,
     pr_number: int | None = None,
     branch: str | None = None,
+    variant: str | None = None,
+    result_only: bool = False,
 ) -> dict[str, Any]:
     if not settings.worker_key:
         raise JobError("the worker isn't configured here (WORKER_KEY is empty)")
@@ -304,6 +310,8 @@ async def create_code_task(
         "pr_number": pr_number,
         "branch": branch,
     }
+    if result_only:
+        params["result_only"] = True
     return await store.create_job(
         kind="code_task",
         agent=run.agent,
@@ -320,6 +328,7 @@ async def create_code_task(
             if requested_by == "mcp" or (mode == "change" and requested_by.startswith("automation"))
             else "queued"
         ),
+        variant=variant,
     )
 
 
@@ -373,6 +382,7 @@ async def create_follow_up(
         params=params,
         requested_by=requested_by,
         parent_id=parent["id"],
+        variant=parent.get("variant"),
         status=(
             "needs_approval"
             if parent["profile"] == "change"
@@ -726,6 +736,10 @@ async def on_finished(job: dict[str, Any]) -> None:
     """Everything that follows a job settling (final, or paused on a question); each step fails
     on its own."""
     await _save_to_kb(job)
+    if (job.get("requested_by") or "").startswith(store.BAKEOFF_PREFIX):
+        # One ping when the last arm settles, instead of one per arm.
+        await _notify_bakeoff_done(job["requested_by"].removeprefix(store.BAKEOFF_PREFIX))
+        return
     if should_notify(job):
         # Nobody is waiting on the call: tell Pryce, and leave Sazed's note where it was asked.
         await _notify(job)
@@ -733,3 +747,156 @@ async def on_finished(job: dict[str, Any]) -> None:
             await _post_to_session(job)
         except Exception:
             logger.warning("Posting job %s back to its session failed", job["id"], exc_info=True)
+
+
+# Bake-offs (My-AI plans/14): one task run by 2-3 Claude arms side by side. Arms open no PR (their
+# files go to job_changes), queue behind everything else (store.PRIORITY_BACKGROUND) and count
+# toward their own daily cap; promote opens one PR from the arm Pryce picks.
+BAKEOFF_ARMS = (2, 3)
+
+
+def _arm_label(model: str) -> str:
+    # claude-sonnet-5-5 -> sonnet
+    parts = model.split("-")
+    return parts[1] if len(parts) > 2 and parts[0] == "claude" else model
+
+
+async def create_bakeoff(repo: str, instruction: str, models: list[str], requested_by: str) -> dict:
+    """Queue one result-only change job per model. The same model twice is allowed (sonnet,
+    sonnet-2), to see how much one model varies run to run."""
+    lo, hi = BAKEOFF_ARMS
+    if not lo <= len(models) <= hi:
+        raise JobError(f"a bake-off takes {lo} to {hi} models")
+    for model in models:
+        if model not in settings.claude_models:
+            raise JobError(
+                f"bake-off arms run on Claude Code only (agy can't make changes); '{model}' isn't "
+                f"one of: {', '.join(settings.claude_models)}"
+            )
+    bakeoff_id = uuid.uuid4().hex[:8]
+    source = f"{store.BAKEOFF_PREFIX}{bakeoff_id}"
+    used = await store.count_bakeoff_recent()
+    # The whole bake-off fits under the cap, or none of it starts: half a comparison is no use.
+    _require(policy.StartJob("claude", source, used_today=used + len(models) - 1))
+    labels: list[str] = []
+    for model in models:
+        base = _arm_label(model)
+        n = sum(1 for label in labels if label == base or label.startswith(f"{base}-")) + 1
+        labels.append(base if n == 1 else f"{base}-{n}")
+    arms = []
+    for label, model in zip(labels, models, strict=True):
+        job = await create_code_task(
+            repo,
+            instruction,
+            "change",
+            requested_by=source,
+            model=model,
+            agent="claude",
+            variant=f"{source}:{label}",
+            result_only=True,
+        )
+        arms.append({"arm": label, "model": model, "job_id": str(job["id"])})
+    logger.info("Bake-off %s queued for %s by %s: %s", bakeoff_id, repo, requested_by, labels)
+    return {"bakeoff_id": bakeoff_id, "repo": repo, "instruction": instruction, "arms": arms}
+
+
+def _arm_view(row: dict[str, Any]) -> dict[str, Any]:
+    meta = row.get("meta") or {}
+    tokens = (row.get("usage") or {}).get("tokens") or {}
+    started, finished = row.get("started_at"), row.get("finished_at")
+    seconds = meta.get("duration_seconds")
+    if seconds is None and started and finished:
+        seconds = (finished - started).total_seconds()
+    cost = None
+    if tokens:
+        cost = estimate_cost_usd(
+            row["model"],
+            tokens.get("input_tokens") or 0,
+            tokens.get("output_tokens") or 0,
+            tokens.get("cache_read_input_tokens") or 0,
+            tokens.get("cache_creation_input_tokens") or 0,
+        )
+    return {
+        "arm": (row.get("variant") or "").rsplit(":", 1)[-1],
+        "model": row["model"],
+        "state": row["state"],
+        "check_passed": row.get("check_passed"),
+        "checks": row.get("checks") or {},
+        "tests_left": len((meta.get("tests") or {}).get("left") or []),
+        "seconds": round(seconds) if seconds is not None else None,
+        "turns": meta.get("turns"),
+        "tool_calls": meta.get("tool_calls"),
+        "output_tokens": tokens.get("output_tokens"),
+        # What the run would cost on the API: a like-for-like number, not what the plan charges.
+        "api_cost_usd": round(cost, 3) if cost is not None else None,
+        "changed_files": row.get("changed_files") or 0,
+        "summary": (meta.get("change_result") or {}).get("summary"),
+        "pr_url": meta.get("pr_url"),
+        "promoted": bool(meta.get("promoted")),
+        "job_id": str(row["job_id"]),
+    }
+
+
+async def bakeoff_report(bakeoff_id: str) -> dict:
+    """The side-by-side: one entry per arm (a resumed arm shows its latest run)."""
+    rows = await store.bakeoff_arms(bakeoff_id)
+    if not rows:
+        raise JobError(f"no bake-off with id {bakeoff_id}")
+    latest: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        latest[row["variant"]] = row
+    arms = [_arm_view(r) for r in latest.values()]
+    first = rows[0].get("params") or {}
+    return {
+        "bakeoff_id": bakeoff_id,
+        "repo": first.get("repo"),
+        "instruction": first.get("instruction"),
+        "done": all(a["state"] in store.SETTLED_STATUSES for a in arms),
+        "arms": arms,
+    }
+
+
+async def _notify_bakeoff_done(bakeoff_id: str) -> None:
+    try:
+        report = await bakeoff_report(bakeoff_id)
+    except JobError:
+        return
+    if not report["done"]:
+        return
+    line = ", ".join(
+        f"{a['arm']} {'passed' if a['check_passed'] else a['state']}" for a in report["arms"]
+    )
+    await notify_simple(f"Bake-off {bakeoff_id} done", line, settings.console_url, "Sazed")
+
+
+async def promote_bakeoff(bakeoff_id: str, arm: str) -> dict:
+    """Open one PR from the chosen arm's kept files. Once per bake-off."""
+    report = await bakeoff_report(bakeoff_id)
+    if any(a["promoted"] for a in report["arms"]):
+        raise JobError(f"bake-off {bakeoff_id} already has a promoted arm")
+    chosen = next((a for a in report["arms"] if a["arm"] == arm), None)
+    if chosen is None:
+        names = ", ".join(a["arm"] for a in report["arms"])
+        raise JobError(f"no arm '{arm}' in bake-off {bakeoff_id} (arms: {names})")
+    if chosen["state"] not in ("succeeded", "paused"):
+        raise JobError(
+            f"arm '{arm}' is {chosen['state']}; only a finished or paused arm can be promoted"
+        )
+    job = await store.get_job(uuid.UUID(chosen["job_id"]))
+    changes = await store.get_changes(job["id"]) if job else None
+    if not job or not changes:
+        raise JobError(f"arm '{arm}' kept no changed files, so there is nothing to promote")
+    pr = await open_pull_request(job, changes, draft=job["status"] == "paused")
+    outcome = {
+        "pr_url": pr["url"],
+        "pr_number": pr["number"],
+        "branch": pr["branch"],
+        "head_sha": pr.get("head_sha"),
+        "pr_draft": bool(pr.get("draft")),
+        "promoted": True,
+    }
+    label = "Draft pull request" if pr.get("draft") else "Pull request"
+    await store.update_outcome(
+        job["id"], (job.get("result") or "") + f"\n\n**{label} (promoted):** {pr['url']}", outcome
+    )
+    return {"bakeoff_id": bakeoff_id, "arm": arm, "job_id": chosen["job_id"]} | outcome

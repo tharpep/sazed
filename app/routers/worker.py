@@ -114,6 +114,21 @@ async def _pr_outcome(
     }
 
 
+async def _land_changes(
+    job: dict[str, Any], result: str, changes: dict[str, str | None], draft: bool = False
+) -> tuple[str, dict[str, Any]]:
+    """A result-only job (a bake-off arm) keeps its files for a later promote instead of
+    opening a PR; every other change job opens one."""
+    if not (job.get("params") or {}).get("result_only"):
+        return await _pr_outcome(job, result, changes, draft=draft)
+    if changes:
+        await store.save_changes(job["id"], changes)
+        note = f"_Result only: {len(changes)} changed file(s) kept, no PR opened._"
+    else:
+        note = "_Result only: no files were changed._"
+    return f"{result}\n\n{note}", {"result_only": True}
+
+
 @router.post("/jobs/{job_id}/finish")
 async def finish(job_id: uuid.UUID, body: FinishRequest):
     result, meta, status = body.result, dict(body.meta), body.status
@@ -145,7 +160,9 @@ async def finish(job_id: uuid.UUID, body: FinishRequest):
             if failing:
                 result = (result or "") + service.failing_tests_section(failing)
                 draft = {"draft": True}
-            result, pr_meta = await _pr_outcome(current, result or "", body.changes or {}, **draft)
+            result, pr_meta = await _land_changes(
+                current, result or "", body.changes or {}, **draft
+            )
             meta |= pr_meta
         elif current and current["profile"] == "review" and current["status"] == "running":
             params = current.get("params") or {}
@@ -167,7 +184,7 @@ async def finish(job_id: uuid.UUID, body: FinishRequest):
             if meta["stop_reason"] == "rate_limit":
                 # Resumed by the CI watcher's loop once the plan resets (plans/10 P1.2).
                 meta["resume_after"] = (meta.get("rate_limited") or {}).get("resets_at")
-            result, pr_meta = await _pr_outcome(
+            result, pr_meta = await _land_changes(
                 {**current, "meta": meta}, result or "", body.changes or {}, draft=True
             )
             meta |= pr_meta

@@ -34,7 +34,7 @@ async def test_new_jobs_carry_their_priority(monkeypatch):
     monkeypatch.setattr(store, "get_pool", lambda: Pool())
     await store.create_job(kind="research", agent="agy", model="m", profile="research",
                            title="t", prompt="p", params={}, requested_by="automation-run:1")
-    assert "priority" in sent["sql"] and sent["args"][-1] == store.PRIORITY_SAZED
+    assert "priority" in sent["sql"] and sent["args"][-2] == store.PRIORITY_SAZED
 
 
 async def test_claim_orders_by_priority_then_age_in_one_query(monkeypatch):
