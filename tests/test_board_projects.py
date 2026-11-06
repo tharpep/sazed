@@ -63,17 +63,10 @@ def test_a_dropped_dependency_no_longer_blocks():
     assert rollup.workstreams(rows, {})[1]["status"] == "next"
 
 
-def test_ideas_in_the_inbox_stay_off_the_progress_bar():
+def test_progress_bar_segments_add_up_to_the_total():
     rows = [_ws(1)]
-    step = rollup.workstreams(rows, {str(rows[0]["id"]): _cards("inbox", "done", "next")})[0]
-    assert step["progress"] == {
-        "done": 1,
-        "in_flight": 0,
-        "needs_me": 0,
-        "next": 1,
-        "ideas": 1,
-        "total": 2,
-    }
+    step = rollup.workstreams(rows, {str(rows[0]["id"]): _cards("done", "next", "doing")})[0]
+    assert step["progress"] == {"done": 1, "in_flight": 1, "needs_me": 0, "next": 1, "total": 3}
 
 
 def test_project_sums_its_steps_and_names_the_current_one():

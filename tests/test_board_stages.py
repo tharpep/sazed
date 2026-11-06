@@ -19,8 +19,8 @@ def _pr(**meta):
     return _job(pr_number=7, **meta)
 
 
-def _item(status="approved", rank=None):
-    return {"status": status, "rank": rank}
+def _item(status="approved", rank=None, workstream_id=None):
+    return {"status": status, "rank": rank, "workstream_id": workstream_id}
 
 
 @pytest.mark.parametrize(
@@ -62,6 +62,7 @@ def test_a_pr_the_ci_watcher_gave_up_on_needs_pryce():
         (_item("new"), "inbox"),
         (_item("new", rank=3), "next"),
         (_item("shortlisted"), "next"),
+        (_item("new", workstream_id="w1"), "next"),
         (_item("done"), "done"),
     ],
 )
