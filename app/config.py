@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     # Worker jobs (plans/07, app/jobs/). The sazed-worker container authenticates with
     # X-Worker-Key; empty disables the worker API (as on GCP).
     worker_key: str = ""
+    claude_usage_key: str = ""
     # Models the worker may run, per agent (allowlist: anything else is refused, no Fable).
     agy_models: list[str] = [
         "gemini-3.8-flash-high",
