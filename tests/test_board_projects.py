@@ -83,3 +83,15 @@ def test_project_sums_its_steps_and_names_the_current_one():
 def test_a_paused_project_says_so_instead_of_its_next_step():
     out = rollup.project(_project("paused"), rollup.workstreams([_ws(1)], {}))
     assert out["headline"] == "Paused."
+
+
+def test_a_closed_step_fills_its_bar_even_with_no_cards():
+    steps = rollup.workstreams([_ws(1, "done")], {})
+    assert steps[0]["bar"] == {"done": 1.0, "in_flight": 0.0, "needs_me": 0.0, "next": 0.0}
+
+
+def test_the_project_bar_weighs_each_step_equally_and_splits_steps_by_cards():
+    rows = [_ws(1, "done"), _ws(2), _ws(3), _ws(4, "dropped")]
+    by_ws = {str(rows[1]["id"]): _cards("done", "doing", "next", "next")}
+    bar = rollup.project(_project(), rollup.workstreams(rows, by_ws))["bar"]
+    assert bar == {"done": 0.4167, "in_flight": 0.0833, "needs_me": 0.0, "next": 0.1667}
