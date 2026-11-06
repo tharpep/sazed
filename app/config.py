@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     # Jobs per agent per rolling 24h; protects the subscriptions for Pryce's own use (Claude Pro).
     jobs_daily_cap_agy: int = 20
     jobs_daily_cap_claude: int = 5
+    # Bake-off arms (requested_by bakeoff:*) have their own cap, so comparing models can't eat
+    # the quota real jobs use (My-AI plans/14).
+    jobs_daily_cap_bakeoff: int = 12
     research_wait_seconds: int = 60  # how long the research tool waits before handing back a job id
     # Which agent runs a review task, by who asked (ai-context research/agent-stack.md, D1):
     # automatic PR reviews from the GitHub webhook go to agy; any source not listed runs Claude.

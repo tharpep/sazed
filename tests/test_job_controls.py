@@ -107,7 +107,7 @@ def finish_calls(monkeypatch):
     async def fake_get_job(job_id):
         return _job(status="running", profile="change", kind="code_task")
 
-    async def fake_pr_outcome(job, result, changes):
+    async def fake_pr_outcome(job, result, changes, draft=False):
         calls["pr"].append(job["id"])
         return result, {"pr_url": "https://github.com/x/y/pull/1"}
 

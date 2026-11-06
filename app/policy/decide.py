@@ -92,7 +92,15 @@ def _start_job(action: StartJob) -> Decision:
                 f"model '{action.model}' is not allowed for {action.agent}. "
                 f"Allowed: {', '.join(allowed)}",
             )
-    if action.used_today is not None and counts_toward_cap(action.requested_by):
+    if action.used_today is not None and action.requested_by.startswith("bakeoff:"):
+        cap = settings.jobs_daily_cap_bakeoff
+        if action.used_today >= cap:
+            return Decision(
+                "block",
+                f"daily bake-off cap reached ({action.used_today}/{cap} arms in the last 24 "
+                "hours). It frees up as older arms age out.",
+            )
+    elif action.used_today is not None and counts_toward_cap(action.requested_by):
         cap = (
             settings.jobs_daily_cap_agy if action.agent == "agy" else settings.jobs_daily_cap_claude
         )
