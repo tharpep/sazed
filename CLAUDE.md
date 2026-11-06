@@ -107,6 +107,8 @@ Tests live in `tests/` (pytest, pytest-asyncio in auto mode). No DB or network: 
 
 **Learning v1 (`app/learning/`, My-AI plans/14):** every settled job that went wrong gets one class from a closed list in `classes.py` (code rules over status, error and meta; first match wins), written to `jobs.failure_class` once. `stop` classes (timeouts, caps, rate limits, quota, shutdown, cancelled) are bookkeeping only. A `lesson` class hit a second time since its last guard item opens one backlog item of type `guard` (source `learning`, sources `failure_class:<name>` plus `job:<id>`) and sends a Pushover; approving it builds the guard like any backlog item. `unclassified` never proposes. `GET /learning` summarizes; `POST /learning/backfill` classes old jobs without proposing. Hooks: `service.on_finished`, the cancel endpoint, and `ci_watch` when CI ends in failure.
 
+**Claude usage (`app/claude_usage/`, `routers/claude_usage.py`, migration 021):** the pusher on each machine posts Claude Code session logs to `POST /claude-usage/batch`, authenticated by `X-Claude-Usage-Key` (`CLAUDE_USAGE_KEY`; empty means 503, and the console `X-API-Key` does not pass). A batch holds at most 5000 rows in total (413 above that). Rows land in `claude_usage_*` tables keyed `(machine, id)` with `ON CONFLICT DO NOTHING`; a resent session only fills null `project`/`title`/`agent_name`/`version` and widens `first_ts`/`last_ts`. `GET /claude-usage/overview` and `/sessions` use the normal API key. `store.py` holds the SQL, `stats.py` the pure parts (median, ISO week, rate-or-null, the 60-point context series that keeps the peak, the tile and session assembly). Context is `input + cache_read + cache_write` (a generated column), with limits 200k soft and 400k hard returned in every response.
+
 **Routers:** `health.py` (GET /health), `chat.py` (POST /chat, GET /chat/stream), `conversations.py` (GET /conversations — accepts `?type=` filter, defaults to `chat`, pass `all` for every type; GET /conversations/{id}, POST /conversations/{id}/process, POST /conversations/archive), `memory.py` (GET /memory, PUT /memory, DELETE /memory/{id}), `kb.py` (GET /kb/stats, /kb/sources, /kb/files, POST /kb/search, DELETE /kb/files/{id}, DELETE /kb), `journal.py` (`/journal/*` proxy to api-gateway + `POST /journal/sync-kb` which ingests a period's markdown export into the KB via `/kb/ingest/text`), `tools.py` (GET /tools).
 
 **Database:** `app/db.py` — asyncpg pool for sessions and agent_memory. Sessions store `context_summary` and `summarized_through` for context window management, and `session_type` (`chat` default; `think`, `automation`, `claude` for other callers) for listing/archival/process_session gating.
@@ -135,6 +137,7 @@ app/
     memory.py          — GET /memory, PUT /memory, DELETE /memory/{id}
     kb.py              — KB proxy: stats, sources, search, delete
     tools.py           — GET /tools (agent tool registry)
+    claude_usage.py    — POST /claude-usage/batch (X-Claude-Usage-Key), GET /claude-usage/overview and /sessions
 chat.py                — CLI for testing (calls local /chat)
 ```
 

@@ -29,6 +29,7 @@ from app.routers import (
     bakeoffs,
     board,
     chat,
+    claude_usage,
     conversations,
     events,
     finance,
@@ -180,6 +181,13 @@ app.include_router(
 )
 app.include_router(
     events.router, prefix="/events", tags=["events"], dependencies=[Depends(verify_api_key)]
+)
+app.include_router(claude_usage.ingest_router, prefix="/claude-usage", tags=["claude-usage"])
+app.include_router(
+    claude_usage.router,
+    prefix="/claude-usage",
+    tags=["claude-usage"],
+    dependencies=[Depends(verify_api_key)],
 )
 # The worker authenticates with its own key (X-Worker-Key), checked inside the router.
 app.include_router(worker.router, prefix="/worker", tags=["worker"])
