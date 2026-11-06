@@ -65,7 +65,12 @@ async def load_relevant_procedures(
 
 
 def format_procedures_for_prompt(procedures: list[dict[str, Any]]) -> str:
-    """Render matched procedures as a compact system-prompt block."""
+    """Render matched procedures as a compact system-prompt block.
+
+    Sorted by name so the same selection renders the same text (load order follows use_count,
+    which changes every time a procedure is used and would break the prompt cache).
+    """
+    procedures = sorted(procedures, key=lambda p: (p["name"], p["trigger_desc"]))
     lines = [
         "## Known procedures",
         "Suggested step sequences for situations Sazed has handled successfully before. "

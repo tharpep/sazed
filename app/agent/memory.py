@@ -195,12 +195,16 @@ async def delete_fact(memory_id: str) -> bool:
 
 
 def format_for_prompt(facts: list[dict[str, Any]]) -> str:
-    """Format facts into a system prompt section, grouped by fact_type."""
+    """Format facts into a system prompt section, grouped by fact_type.
+
+    Sorted by (fact_type, key) so the same selection always renders the same text; the load
+    order (updated_at) would change the prompt prefix between messages and break the cache.
+    """
     if not facts:
         return "(None yet)"
 
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for fact in facts:
+    for fact in sorted(facts, key=lambda f: (f["fact_type"], f["key"], str(f["value"]))):
         grouped[fact["fact_type"]].append(fact)
 
     lines = []
