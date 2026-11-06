@@ -18,6 +18,7 @@ from app.config import settings
 from app.db import get_pool
 from app.http_client import get_client
 from app.jobs import change_result, profiles, store
+from app.learning import service as learning
 from app.pricing import estimate_cost_usd
 
 logger = logging.getLogger(__name__)
@@ -736,6 +737,7 @@ async def on_finished(job: dict[str, Any]) -> None:
     """Everything that follows a job settling (final, or paused on a question); each step fails
     on its own."""
     await _save_to_kb(job)
+    await learning.record(job)
     if (job.get("requested_by") or "").startswith(store.BAKEOFF_PREFIX):
         # One ping when the last arm settles, instead of one per arm.
         await _notify_bakeoff_done(job["requested_by"].removeprefix(store.BAKEOFF_PREFIX))

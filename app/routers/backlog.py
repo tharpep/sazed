@@ -14,7 +14,7 @@ from app.jobs.service import JobError
 
 router = APIRouter()
 
-ItemType = Literal["idea", "bug", "gap", "optimization", "planned", "known_issue"]
+ItemType = Literal["idea", "bug", "gap", "optimization", "planned", "known_issue", "guard"]
 
 
 class ItemCreate(BaseModel):

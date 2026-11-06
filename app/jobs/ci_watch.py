@@ -21,6 +21,7 @@ import httpx
 from app.config import settings
 from app.http_client import get_client
 from app.jobs import service, store
+from app.learning import service as learning
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,11 @@ async def _settle(job: dict[str, Any], patch: dict[str, Any]) -> None:
         await store.settle_ancestors(job["id"], patch["ci_state"])
 
 
+async def _record_failure(job_id) -> None:
+    if job := await store.get_job(job_id):
+        await learning.record(job)
+
+
 async def _check(job: dict[str, Any]) -> None:
     meta = job.get("meta") or {}
     params = job.get("params") or {}
@@ -119,6 +125,7 @@ async def _check(job: dict[str, Any]) -> None:
     attempt = int(params.get("ci_fix_attempt") or 0) + 1
     if attempt > MAX_FIX_ATTEMPTS:
         await _settle(job, {"ci_state": "failure", "ci_runs": runs})
+        await _record_failure(job["id"])
         await service.notify_simple(
             f"PR #{meta.get('pr_number')} needs you",
             f"{job['title']}. CI still fails after {MAX_FIX_ATTEMPTS} automatic fixes.",
@@ -136,6 +143,7 @@ async def _check(job: dict[str, Any]) -> None:
     except service.JobError as e:
         logger.warning("CI fix-up for job %s not started: %s", job["id"], e)
         await _settle(job, {"ci_state": "failure", "ci_fix_error": str(e)})
+        await _record_failure(job["id"])
         return
     await store.update_outcome(
         job["id"], None, {"ci_state": "fixing", "ci_fix_job": str(fix["id"]), "ci_runs": runs}

@@ -2427,7 +2427,7 @@ TOOLS: list[ToolDef] = [
             "properties": {
                 "type": {
                     "type": "string",
-                    "enum": ["idea", "bug", "gap", "optimization", "planned", "known_issue"],
+                    "enum": ["idea", "bug", "gap", "optimization", "planned", "known_issue", "guard"],
                 },
                 "view": {"type": "string", "enum": ["open", "done", "dismissed", "all"]},
             },
@@ -2449,7 +2449,7 @@ TOOLS: list[ToolDef] = [
             "properties": {
                 "type": {
                     "type": "string",
-                    "enum": ["idea", "bug", "gap", "optimization", "planned", "known_issue"],
+                    "enum": ["idea", "bug", "gap", "optimization", "planned", "known_issue", "guard"],
                 },
                 "title": {"type": "string", "description": "Short, specific title."},
                 "summary": {"type": "string", "description": "What it is (markdown)."},

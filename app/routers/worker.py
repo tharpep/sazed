@@ -148,6 +148,7 @@ async def finish(job_id: uuid.UUID, body: FinishRequest):
         if current and current["profile"] == "change" and current["status"] == "running":
             # The PR description is rendered from the reply's fields; a reply that doesn't fit
             # (after the worker's repair round) keeps its prose so the work isn't lost.
+            meta["changed_files"] = len(body.changes or {})
             fields = change_result.parse(result or "")
             if fields:
                 result, meta["change_result"] = change_result.render(fields), fields.model_dump()
