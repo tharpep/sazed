@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.backlog import service, store
+from app.board import projects
 from app.jobs.service import JobError
 
 router = APIRouter()
@@ -26,6 +27,7 @@ class ItemCreate(BaseModel):
     effort: Literal["S", "M", "L"] | None = None
     impact: Literal["low", "medium", "high"] | None = None
     sources: list[str] = Field(default_factory=list, max_length=20)
+    workstream_id: uuid.UUID | None = None
 
 
 class ItemUpdate(BaseModel):
@@ -36,6 +38,7 @@ class ItemUpdate(BaseModel):
     summary: str | None = Field(None, max_length=8000)
     why: str | None = Field(None, max_length=4000)
     rank: int | None = Field(None, ge=1, le=999)  # same as /move with this position
+    workstream_id: uuid.UUID | None = None  # sent as null, it takes the item off its workstream
 
 
 class ApproveRequest(BaseModel):
@@ -61,8 +64,14 @@ async def get_item(item_id: uuid.UUID):
     return item
 
 
+async def _check_workstream(ws_id: uuid.UUID | None) -> None:
+    if ws_id is not None and not await projects.workstream_exists(ws_id):
+        raise HTTPException(422, f"No workstream {ws_id}; list them with GET /board/projects")
+
+
 @router.post("", status_code=201)
 async def create_item(body: ItemCreate):
+    await _check_workstream(body.workstream_id)
     item, duplicate = await service.add_item(source="console", **body.model_dump())
     if duplicate:
         raise HTTPException(409, f"Already in the backlog: {duplicate['title']}")
@@ -72,6 +81,9 @@ async def create_item(body: ItemCreate):
 @router.patch("/{item_id}")
 async def update_item(item_id: uuid.UUID, body: ItemUpdate):
     fields = body.model_dump(exclude_none=True)
+    if "workstream_id" in body.model_fields_set:
+        await _check_workstream(body.workstream_id)
+        fields["workstream_id"] = body.workstream_id
     rank = fields.pop("rank", None)
     if not fields and rank is None:
         raise HTTPException(422, "Nothing to update")

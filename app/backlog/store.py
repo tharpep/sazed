@@ -105,12 +105,14 @@ async def create_item(
     effort: str | None = None,
     impact: str | None = None,
     sources: list[str] | None = None,
+    workstream_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     rec = await get_pool().fetchrow(
         """
         INSERT INTO backlog_items
-            (type, title, summary, why, repos, effort, impact, sources, fingerprint, source)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
+            (type, title, summary, why, repos, effort, impact, sources, fingerprint, source,
+             workstream_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)
         RETURNING *
         """,
         type_,
@@ -123,13 +125,14 @@ async def create_item(
         json.dumps(sources or []),
         fingerprint(title),
         source,
+        workstream_id,
     )
     return _row(rec)
 
 
 async def update_item(item_id: uuid.UUID, **fields: Any) -> dict[str, Any] | None:
     allowed = {"status", "note", "rank", "job_id", "type", "title", "summary", "why", "repos",
-               "effort", "impact"}
+               "effort", "impact", "workstream_id"}
     sets, args = [], []
     for key, value in fields.items():
         if key not in allowed:

@@ -63,6 +63,7 @@ Tests live in `tests/` (pytest, pytest-asyncio in auto mode). No DB or network: 
 - `stages.py` holds the rules as pure functions over an item's status and the last job in its chain. Stages are fixed: inbox, next, doing, needs_me, done. Code detail stays on the card as fields.
 - A job with no item gets a card only while unfinished, and an automation's job only while it's waiting on Pryce. A new kind of work is one more source in `service.py`.
 - Phase 1 is read-only, so `actions` is empty.
+- Projects (migration 021): `projects` hold an ordered ladder of `workstreams`, and a backlog item joins one through `workstream_id`. `rollup.py` computes progress, each step's status (needs_me, in_flight, blocked, next, planned) and the headline from the cards, so the only stored states are decisions: a project paused or dropped, a workstream closed as done or dropped. REST: `GET /board/projects`, `GET/PATCH /board/projects/{slug}`, `POST /board/projects/{slug}/workstreams`, `PATCH /board/workstreams/{id}`. Agents keep it current through the gateway's `board_*` tools and the ai-context `board-upkeep` skill.
 
 **Backlog (`app/backlog/`, migration 005, plans/07 section 9b):**
 - `backlog_items` holds ideas, bugs, gaps, optimizations, planned work and known issues.
