@@ -1,6 +1,7 @@
 """Shared Anthropic client singleton and common agent utilities."""
 
 import asyncio
+import json
 import logging
 import uuid
 from typing import Any
@@ -78,6 +79,61 @@ def with_message_cache(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return messages
     blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
     return messages[:-1] + [{"role": last["role"], "content": blocks}]
+
+
+def _is_user_prompt(message: dict[str, Any]) -> bool:
+    """A user message that starts a turn: anything but a tool_result-only message."""
+    if message["role"] != "user":
+        return False
+    content = message["content"]
+    if isinstance(content, str):
+        return True
+    return any(b.get("type") != "tool_result" for b in content)
+
+
+def elide_old_tool_results(
+    messages: list[dict[str, Any]], keep_turns: int = 2
+) -> list[dict[str, Any]]:
+    """Return a copy of `messages` with tool outputs older than the last `keep_turns` stubbed.
+
+    A turn starts at a user prompt (not a tool_result message). Each old tool_result keeps its
+    tool_use_id and is_error, so pairing stays valid; only its content becomes a one-line stub.
+    Results already shorter than their stub are left as they are. `messages` itself (and what
+    gets persisted) is left untouched. The cutoff only moves when a new user prompt arrives, so
+    the tool loop within one turn keeps a stable cache prefix.
+    """
+    prompts = [i for i, m in enumerate(messages) if _is_user_prompt(m)]
+    if len(prompts) <= keep_turns:
+        return messages
+    cutoff = prompts[-keep_turns]
+
+    names: dict[str, str] = {}
+    for m in messages[:cutoff]:
+        if m["role"] == "assistant" and isinstance(m["content"], list):
+            for b in m["content"]:
+                if b.get("type") == "tool_use":
+                    names[b["id"]] = b["name"]
+
+    out = list(messages)
+    for i, m in enumerate(messages[:cutoff]):
+        if m["role"] != "user" or isinstance(m["content"], str):
+            continue
+        blocks = list(m["content"])
+        changed = False
+        for j, b in enumerate(blocks):
+            if b.get("type") != "tool_result":
+                continue
+            raw = b.get("content", "")
+            size = len((raw if isinstance(raw, str) else json.dumps(raw)).encode())
+            name = names.get(b["tool_use_id"], "tool")
+            stub = f"[Output omitted: {name} returned {size} bytes]"
+            if size <= len(stub):
+                continue
+            blocks[j] = {**b, "content": stub}
+            changed = True
+        if changed:
+            out[i] = {"role": m["role"], "content": blocks}
+    return out
 
 
 def tool_sig(name: str, args: dict) -> tuple:

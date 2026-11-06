@@ -16,6 +16,7 @@ import asyncpg
 from fastapi import Request
 
 from app.agent.client import (
+    elide_old_tool_results,
     get_client,
     model_params,
     schedule_llm_log,
@@ -632,7 +633,7 @@ async def run_turn(
                     model=model,
                     **model_params(model),
                     system=system,
-                    messages=with_message_cache(messages),
+                    messages=with_message_cache(elide_old_tool_results(messages)),
                     tools=tools,
                     max_tokens=16000,  # Sonnet/Opus think; thinking counts toward max_tokens
                 ),
@@ -752,7 +753,7 @@ async def run_turn(
                     model=synth_model,
                     **model_params(synth_model),
                     system=system,
-                    messages=with_message_cache(messages),
+                    messages=with_message_cache(elide_old_tool_results(messages)),
                     max_tokens=16000,  # Sonnet/Opus think; thinking counts toward max_tokens
                 ),
                 timeout=settings.turn_timeout_seconds,
@@ -856,7 +857,7 @@ async def run_turn_stream(
                         model=model,
                         **model_params(model),
                         system=system,
-                        messages=with_message_cache(messages),
+                        messages=with_message_cache(elide_old_tool_results(messages)),
                         tools=tools,
                         max_tokens=16000,  # Sonnet/Opus think; thinking counts toward max_tokens
                     ) as stream:
@@ -1031,7 +1032,7 @@ async def run_turn_stream(
                         model=synth_model,
                         **model_params(synth_model),
                         system=system,
-                        messages=with_message_cache(messages),
+                        messages=with_message_cache(elide_old_tool_results(messages)),
                         max_tokens=16000,  # Sonnet/Opus think; thinking counts toward max_tokens
                     ) as stream:
                         async for text in stream.text_stream:
