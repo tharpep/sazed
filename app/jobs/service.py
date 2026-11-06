@@ -323,10 +323,11 @@ async def create_code_task(
         params=params,
         requested_by=requested_by,
         # MCP clients can't use Sazed's chat approval, so their code tasks wait in the console;
-        # so do change tasks an automation starts (nobody approved those in a chat).
+        # so do change tasks an automation or a GitHub mention starts (nobody approved those in a chat).
         status=(
             "needs_approval"
-            if requested_by == "mcp" or (mode == "change" and requested_by.startswith("automation"))
+            if requested_by == "mcp"
+            or (mode == "change" and requested_by.startswith(("automation", "webhook")))
             else "queued"
         ),
         variant=variant,
