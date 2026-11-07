@@ -1,7 +1,7 @@
 """The board (plans/13): one flat card shape from every source, read by the console and the MCP.
 
 A new kind of work is one more source here. Stages come from `stages`, never from the clients.
-Cards carry `actions` as data; phase 1 is read-only, so the list is empty.
+Cards carry `actions` as data, from `actions.offered`.
 """
 
 import uuid
@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.backlog import store as backlog
-from app.board import stages, store
+from app.board import actions, stages, store
 from app.jobs import store as jobs
 
 DONE_WINDOW = timedelta(days=14)
@@ -77,7 +77,7 @@ def _item_card(item: dict[str, Any], chain: list[dict[str, Any]]) -> dict[str, A
         "plan_id": str(item["plan_id"]) if item["plan_id"] else None,
         "plan_section": item["plan_section"],
         "plan_version": item["plan_version"],
-        "actions": [],
+        "actions": actions.describe(tail),
         **_job_fields(live),
     }
 
@@ -101,7 +101,7 @@ def _job_card(job: dict[str, Any]) -> dict[str, Any]:
         "plan_id": None,
         "plan_section": None,
         "plan_version": None,
-        "actions": [],
+        "actions": actions.describe(job),
         **_job_fields([job]),
     }
 

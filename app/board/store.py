@@ -71,3 +71,38 @@ async def active_jobs() -> list[dict[str, Any]]:
         list(_ACTIVE),
     )
     return [_job(r) for r in rows]
+
+
+async def working_jobs() -> list[dict[str, Any]]:
+    rows = await get_pool().fetch(
+        """
+        SELECT id, status, title, agent, model, profile, requested_by, params, meta,
+               created_at, started_at
+        FROM jobs
+        WHERE status IN ('running', 'queued')
+        ORDER BY COALESCE(started_at, created_at)
+        """
+    )
+    return [_job(r) for r in rows]
+
+
+async def questions(job_ids: list[Any]) -> dict[str, str]:
+    rows = await get_pool().fetch(
+        "SELECT id, meta->>'question' AS question FROM jobs WHERE id = ANY($1::uuid[])",
+        job_ids,
+    )
+    return {str(r["id"]): r["question"] for r in rows if r["question"]}
+
+
+async def finished_since(hours: int) -> list[dict[str, Any]]:
+    rows = await get_pool().fetch(
+        """
+        SELECT id, status, title, params->>'repo' AS repo, finished_at
+        FROM jobs
+        WHERE finished_at > NOW() - make_interval(hours => $1)
+          AND status IN ('succeeded', 'failed', 'timed_out')
+        ORDER BY finished_at DESC
+        """,
+        hours,
+    )
+    return [dict(r) for r in rows]

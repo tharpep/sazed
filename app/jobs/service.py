@@ -80,12 +80,9 @@ def _short(value: Any, limit: int = 60) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def recent_steps(events: list[dict[str, Any]], limit: int = 5) -> list[str]:
-    """The last few tool calls in a job's event stream, as 'tool: first argument' lines.
-
-    Claude Code streams assistant messages with tool_use blocks; agy streams step_update events
-    with step_type "tool" (one per state change, so they're keyed by step index)."""
-    steps: dict[Any, str] = {}
+def step_timeline(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every tool call in the events, oldest first, with the time it started."""
+    steps: dict[Any, dict[str, Any]] = {}
     for i, row in enumerate(events):
         ev = row.get("event") or {}
         update = ev.get("step_update") or {}
@@ -93,14 +90,25 @@ def recent_steps(events: list[dict[str, Any]], limit: int = 5) -> list[str]:
             info = update["tool_info"]
             params = info.get("parameters") or {}
             first = next(iter(params.values()), "") if isinstance(params, dict) else params
-            steps[("agy", update.get("step_index", i))] = f"{info.get('name')}: {_short(first)}"
+            key = ("agy", update.get("step_index", i))
+            at = steps[key]["at"] if key in steps else row.get("at")
+            steps[key] = {"at": at, "text": f"{info.get('name')}: {_short(first)}"}
         elif ev.get("type") == "assistant":
             for j, block in enumerate((ev.get("message") or {}).get("content") or []):
                 if isinstance(block, dict) and block.get("type") == "tool_use":
                     args = block.get("input") or {}
                     first = next(iter(args.values()), "") if isinstance(args, dict) else args
-                    steps[("claude", i, j)] = f"{block.get('name')}: {_short(first)}"
-    return list(steps.values())[-limit:]
+                    text = f"{block.get('name')}: {_short(first)}"
+                    steps[("claude", i, j)] = {"at": row.get("at"), "text": text}
+    return list(steps.values())
+
+
+def recent_steps(events: list[dict[str, Any]], limit: int = 5) -> list[str]:
+    """The last few tool calls in a job's event stream, as 'tool: first argument' lines.
+
+    Claude Code streams assistant messages with tool_use blocks; agy streams step_update events
+    with step_type "tool" (one per state change, so they're keyed by step index)."""
+    return [step["text"] for step in step_timeline(events)][-limit:]
 
 
 class JobError(ValueError):

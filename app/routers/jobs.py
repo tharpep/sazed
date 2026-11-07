@@ -11,6 +11,8 @@ from app.learning import service as learning
 
 router = APIRouter()
 
+TIMELINE_STEPS = 40
+
 
 class ResearchRequest(BaseModel):
     question: str = Field(..., min_length=3, max_length=4000)
@@ -40,7 +42,9 @@ async def get_job(job_id: uuid.UUID, events: bool = Query(True)):
     if events:
         job["events"] = await store.get_events(job_id)
     # For the console and MCP clients: what a long job is doing, and what it asked.
-    job["recent_steps"] = service.recent_steps(await store.get_recent_events(job_id))
+    recent = await store.get_recent_events(job_id)
+    job["recent_steps"] = service.recent_steps(recent)
+    job["timeline"] = service.step_timeline(recent)[-TIMELINE_STEPS:]
     asking = job["status"] == "needs_input"
     job["question"] = (job.get("meta") or {}).get("question") if asking else None
     # A queued Claude job behind Pryce's plan limit says so, instead of looking stuck.
