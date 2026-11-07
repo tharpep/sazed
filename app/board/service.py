@@ -74,6 +74,9 @@ def _item_card(item: dict[str, Any], chain: list[dict[str, Any]]) -> dict[str, A
         "impact": item["impact"],
         "rank": item["rank"],
         "workstream_id": str(item["workstream_id"]) if item["workstream_id"] else None,
+        "plan_id": str(item["plan_id"]) if item["plan_id"] else None,
+        "plan_section": item["plan_section"],
+        "plan_version": item["plan_version"],
         "actions": [],
         **_job_fields(live),
     }
@@ -95,6 +98,9 @@ def _job_card(job: dict[str, Any]) -> dict[str, Any]:
         "impact": None,
         "rank": None,
         "workstream_id": None,
+        "plan_id": None,
+        "plan_section": None,
+        "plan_version": None,
         "actions": [],
         **_job_fields([job]),
     }

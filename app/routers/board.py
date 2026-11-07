@@ -6,7 +6,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.board import projects, service
+from app.board import plans, projects, service
 
 router = APIRouter()
 
@@ -111,6 +111,100 @@ async def update_workstream(ws_id: uuid.UUID, body: WorkstreamUpdate):
         return await projects.update_workstream(ws_id, **_fields(body))
     except projects.ProjectError as e:
         raise _error(e) from e
+
+
+PlanState = Literal["draft", "active", "done", "superseded"]
+Author = Field(..., pattern=r"^(pryce|agent:[\w.:-]{1,60}|dispatch:[\w.:-]{1,60})$")
+
+
+class PlanCreate(BaseModel):
+    slug: str = Field(..., pattern=r"^[a-z0-9][a-z0-9-]{1,60}$")
+    title: str = Field(..., min_length=2, max_length=160)
+    body: str = Field(..., min_length=1, max_length=200_000)
+    author: str = Author
+    reason: str = Field(..., min_length=3, max_length=300)
+    project: str | None = Field(None, max_length=60)
+    workstream_id: uuid.UUID | None = None
+    state: PlanState = "draft"
+
+
+class PlanSave(BaseModel):
+    body: str = Field(..., min_length=1, max_length=200_000)
+    author: str = Author
+    reason: str = Field(..., min_length=3, max_length=300)
+    expected_version: int | None = Field(None, ge=1)
+
+
+class PlanUpdate(BaseModel):
+    title: str | None = Field(None, min_length=2, max_length=160)
+    state: PlanState | None = None
+    project: str | None = Field(None, max_length=60)
+    workstream_id: uuid.UUID | None = None
+
+
+def _plan_error(e: plans.PlanError) -> HTTPException:
+    text = str(e)
+    if text.startswith("no "):
+        return HTTPException(404, text)
+    if "moved to" in text or "landed first" in text or "already exists" in text:
+        return HTTPException(409, text)
+    return HTTPException(422, text)
+
+
+@router.get("/plans")
+async def list_plans(project: str | None = None, state: PlanState | None = None):
+    return {"plans": await plans.list_plans(project, state)}
+
+
+@router.post("/plans", status_code=201)
+async def create_plan(body: PlanCreate):
+    try:
+        return await plans.create(**body.model_dump())
+    except plans.PlanError as e:
+        raise _plan_error(e) from e
+
+
+@router.get("/plans/{slug}")
+async def get_plan(slug: str, version: int | None = Query(None, ge=1)):
+    try:
+        return await plans.get_plan(slug, version)
+    except plans.PlanError as e:
+        raise _plan_error(e) from e
+
+
+@router.post("/plans/{slug}/versions", status_code=201)
+async def save_plan(slug: str, body: PlanSave):
+    try:
+        return await plans.save(slug, **body.model_dump())
+    except plans.PlanError as e:
+        raise _plan_error(e) from e
+
+
+@router.get("/plans/{slug}/versions")
+async def plan_versions(slug: str):
+    try:
+        return {"versions": await plans.versions(slug)}
+    except plans.PlanError as e:
+        raise _plan_error(e) from e
+
+
+@router.get("/plans/{slug}/diff")
+async def plan_diff(slug: str, a: int = Query(..., ge=1), b: int = Query(..., ge=1)):
+    try:
+        return await plans.diff(slug, a, b)
+    except plans.PlanError as e:
+        raise _plan_error(e) from e
+
+
+@router.patch("/plans/{slug}")
+async def update_plan(slug: str, body: PlanUpdate):
+    fields = body.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(422, "Nothing to update")
+    try:
+        return await plans.update(slug, **fields)
+    except plans.PlanError as e:
+        raise _plan_error(e) from e
 
 
 @router.get("/{card_id}")
