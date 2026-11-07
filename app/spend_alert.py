@@ -35,7 +35,7 @@ def monthly_limit() -> float:
         return 0.0
 
 
-def _timezone() -> ZoneInfo:
+def timezone() -> ZoneInfo:
     try:
         return ZoneInfo(settings.spend_alert_timezone)
     except (ZoneInfoNotFoundError, ValueError):
@@ -141,7 +141,7 @@ async def check_spend(now: datetime | None = None) -> bool:
     if limit <= 0:
         return False
     now = now or datetime.now(UTC)
-    start, end, month = month_bounds(now, _timezone())
+    start, end, month = month_bounds(now, timezone())
     spend = await month_spend(start, end)
     crossed = sorted(p for p in set(settings.spend_alert_steps_pct)
                      if p > 0 and spend["total"] >= limit * p / 100)
