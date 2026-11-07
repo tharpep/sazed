@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS claude_usage_responses (
     cache_read_tokens   BIGINT NOT NULL,
     cache_write_tokens  BIGINT NOT NULL,
     sidechain           BOOLEAN NOT NULL,
+    cache_write_1h_tokens BIGINT NOT NULL DEFAULT 0,
+    speed               TEXT,
+    inference_geo       TEXT,
+    web_search_requests INTEGER NOT NULL DEFAULT 0,
     context             BIGINT GENERATED ALWAYS AS
         (input_tokens + cache_read_tokens + cache_write_tokens) STORED,
     PRIMARY KEY (machine, uuid)

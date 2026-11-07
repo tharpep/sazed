@@ -6,12 +6,22 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime
 from typing import Any
 
+from app.pricing import (
+    LONG_PROMPT_TOKENS,
+    PRICES_AS_OF,
+    US_ONLY_MULTIPLIER,
+    WEB_SEARCH_USD,
+    rate_for,
+    tokens_cost_usd,
+)
+
 CONTEXT_SOFT = 200_000
 CONTEXT_HARD = 400_000
 MEDIAN_MIN_PROMPTS = 5
 SERIES_POINTS = 60
 
 LIMITS = {"context_soft": CONTEXT_SOFT, "context_hard": CONTEXT_HARD}
+TOKEN_KINDS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
 
 
 def context_size(input_tokens: int, cache_read_tokens: int, cache_write_tokens: int) -> int:
@@ -71,6 +81,83 @@ def iso(ts: datetime) -> str:
     return ts.isoformat().replace("+00:00", "Z")
 
 
+def priced(row: Mapping[str, Any]) -> tuple[float, float] | None:
+    """(cost, cost without prompt caching) in USD for one group of calls, or None if unpriced."""
+    model = row["model"]
+    rate = model and rate_for(
+        model, LONG_PROMPT_TOKENS + 1 if row["long_prompt"] else 0, row.get("fast", False)
+    )
+    if not rate:
+        return None
+    region = US_ONLY_MULTIPLIER if row.get("us_only") else 1.0
+    searches = (row.get("web_searches") or 0) * WEB_SEARCH_USD
+    tokens = [row[k] or 0 for k in TOKEN_KINDS]
+    cost = tokens_cost_usd(rate, *tokens, row.get("cache_write_1h_tokens") or 0)
+    prompt = tokens[0] + tokens[2] + tokens[3]
+    uncached = tokens_cost_usd(rate, prompt, tokens[1])
+    return cost * region + searches, uncached * region + searches
+
+
+def source_of(row: Mapping[str, Any]) -> str:
+    if "source" in row:
+        return row["source"]
+    return "subagents" if row["sidechain"] else "main"
+
+
+def usd(value: float) -> float:
+    return round(value, 4)
+
+
+def _tally() -> dict[str, Any]:
+    return {"usd": 0.0, "calls": 0, **dict.fromkeys(TOKEN_KINDS, 0)}
+
+
+def _add(tally: dict[str, Any], row: Mapping[str, Any], cost: float) -> None:
+    tally["usd"] += cost
+    tally["calls"] += row["calls"]
+    for kind in TOKEN_KINDS:
+        tally[kind] += row[kind] or 0
+
+
+def _rounded(tally: Mapping[str, Any]) -> dict[str, Any]:
+    return {**tally, "usd": usd(tally["usd"])}
+
+
+def build_spend(rows: Iterable[Mapping[str, Any]], prompts: int) -> dict[str, Any]:
+    sources: dict[str, dict[str, Any]] = {}
+    models: dict[str, dict[str, Any]] = {}
+    unpriced: Counter[str] = Counter()
+    saved = 0.0
+    for row in rows:
+        costs = priced(row)
+        if costs is None:
+            unpriced[row["model"] or "unknown"] += row["calls"]
+            continue
+        cost, uncached = costs
+        source = source_of(row)
+        _add(sources.setdefault(source, _tally()), row, cost)
+        _add(models.setdefault(row["model"], _tally()), row, cost)
+        if source in ("main", "subagents"):
+            saved += uncached - cost
+    total = sum(t["usd"] for t in sources.values())
+    claude_code = sum(sources.get(k, {}).get("usd", 0.0) for k in ("main", "subagents"))
+    return {
+        "prices_as_of": PRICES_AS_OF,
+        "total_usd": usd(total),
+        "cost_per_prompt_usd": usd(claude_code / prompts) if prompts else None,
+        "cache_savings_usd": usd(saved),
+        "sources": [
+            {"source": name, **_rounded(t)}
+            for name, t in sorted(sources.items(), key=lambda kv: -kv[1]["usd"])
+        ],
+        "models": [
+            {"model": name, **_rounded(t), "share": rate(round(t["usd"] * 1e4), round(total * 1e4))}
+            for name, t in sorted(models.items(), key=lambda kv: -kv[1]["usd"])
+        ],
+        "unpriced": [{"model": m, "calls": n} for m, n in unpriced.most_common()],
+    }
+
+
 def _named(rows: Iterable[Mapping[str, Any]], key: str) -> list[dict[str, Any]]:
     return [{key: r["name"], "count": r["n"]} for r in rows]
 
@@ -87,8 +174,8 @@ def _weekly(rows: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "confused": 0,
                 "bash_writes": 0,
                 "edit_writes": 0,
-                "output_tokens": 0,
-                "cache_read_tokens": 0,
+                **dict.fromkeys(TOKEN_KINDS, 0),
+                "spend": dict.fromkeys(("main", "subagents", "sazed_api", "sazed_jobs"), 0.0),
             },
         )
 
@@ -101,10 +188,15 @@ def _weekly(rows: Mapping[str, Any]) -> list[dict[str, Any]]:
         w = week(r["day"])
         w["bash_writes"] += r["bash_writes"]
         w["edit_writes"] += r["edit_writes"]
-    for r in rows["response_days"]:
+    for r in [*rows["spend"], *rows["sazed_spend"]]:
         w = week(r["day"])
-        w["output_tokens"] += r["output_tokens"]
-        w["cache_read_tokens"] += r["cache_read_tokens"]
+        source = source_of(r)
+        if source in ("main", "subagents"):
+            for kind in TOKEN_KINDS:
+                w[kind] += r[kind] or 0
+        costs = priced(r)
+        if costs:
+            w["spend"][source] += costs[0]
     return [
         {
             "week": name,
@@ -113,8 +205,16 @@ def _weekly(rows: Mapping[str, Any]) -> list[dict[str, Any]]:
             "confusion_rate": rate(w["confused"], w["prompts"]),
             "bash_writes": w["bash_writes"],
             "edit_writes": w["edit_writes"],
-            "output_tokens": w["output_tokens"],
-            "cache_read_tokens": w["cache_read_tokens"],
+            **{kind: w[kind] for kind in TOKEN_KINDS},
+            "cost_usd": usd(sum(w["spend"].values())),
+            "main_cost_usd": usd(w["spend"]["main"]),
+            "subagent_cost_usd": usd(w["spend"]["subagents"]),
+            "sazed_cost_usd": usd(w["spend"]["sazed_api"] + w["spend"]["sazed_jobs"]),
+            "cost_per_prompt_usd": (
+                usd((w["spend"]["main"] + w["spend"]["subagents"]) / w["prompts"])
+                if w["prompts"]
+                else None
+            ),
         }
         for name, w in sorted(weeks.items())
     ]
@@ -150,6 +250,7 @@ def build_overview(rows: Mapping[str, Any], frm: datetime, to: datetime) -> dict
             "skills_used": len(rows["skills"]),
         },
         "weekly": _weekly(rows),
+        "spend": build_spend([*rows["spend"], *rows["sazed_spend"]], prompts),
         "models": [
             {"model": r["model"], "responses": r["n"], "share": rate(r["n"], model_total)}
             for r in rows["models"]
@@ -175,6 +276,14 @@ def build_sessions(rows: Mapping[str, Any]) -> dict[str, Any]:
     counts: dict[tuple[str, str, str], int] = {
         (r["machine"], r["session_id"], r["kind"]): r["n"] for r in rows["counts"]
     }
+    spend: dict[tuple[str, str], dict[str, float]] = {}
+    for r in rows["spend"]:
+        costs = priced(r)
+        if costs:
+            totals = spend.setdefault(
+                (r["machine"], r["session_id"]), {"main": 0.0, "subagents": 0.0}
+            )
+            totals[source_of(r)] += costs[0]
     confused: dict[tuple[str, str], list[datetime]] = {}
     for r in rows["confused"]:
         confused.setdefault((r["machine"], r["session_id"]), []).append(r["ts"])
@@ -196,6 +305,8 @@ def build_sessions(rows: Mapping[str, Any]) -> dict[str, Any]:
                 "prompts": s["prompts"],
                 "peak_context": max((c for _, c in timeline), default=None),
                 "main_model": main_model(r["model"] for r in main),
+                "cost_usd": usd(sum(spend.get(key, {}).values())),
+                "subagent_cost_usd": usd(spend.get(key, {}).get("subagents", 0.0)),
                 "subagents": counts.get((*key, "subagents"), 0),
                 "compactions": counts.get((*key, "compact"), 0),
                 "interrupts": counts.get((*key, "interrupt"), 0),

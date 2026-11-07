@@ -60,6 +60,10 @@ class ResponseRow(BaseModel):
     cache_read_tokens: int = Field(..., ge=0)
     cache_write_tokens: int = Field(..., ge=0)
     sidechain: bool
+    cache_write_1h_tokens: int = Field(0, ge=0)
+    speed: Detail = None
+    inference_geo: Detail = None
+    web_search_requests: int = Field(0, ge=0)
 
 
 class ToolCallRow(BaseModel):
