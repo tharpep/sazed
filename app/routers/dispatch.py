@@ -1,4 +1,4 @@
-"""Dispatch plans and rows from sazed-worker (migration 024)."""
+"""Dispatch plans, rows and steps from sazed-worker (migrations 024, 027)."""
 
 from datetime import UTC, datetime
 from typing import Literal
@@ -44,6 +44,21 @@ class RowIn(BaseModel):
     meta: dict = Field(default_factory=dict)
 
 
+class StepIn(BaseModel):
+    ts: float
+    seq: int
+    kind: Literal["tool", "result", "text"]
+    tool: str | None = None
+    text: str = ""
+    error: bool = False
+
+
+class StepsIn(BaseModel):
+    plan: str = Field(..., min_length=1, max_length=200)
+    task: str = Field(..., min_length=1, max_length=200)
+    steps: list[StepIn] = Field(..., min_length=1, max_length=200)
+
+
 @router.post("/plans")
 async def post_plan(body: PlanIn):
     tasks = [t.model_dump() for t in body.tasks]
@@ -55,6 +70,12 @@ async def post_plan(body: PlanIn):
 async def post_row(body: RowIn):
     await dispatch.insert_row(**body.model_dump())
     return {"ok": True}
+
+
+@router.post("/steps", status_code=201)
+async def post_steps(body: StepsIn):
+    await dispatch.insert_steps(body.plan, body.task, [s.model_dump() for s in body.steps])
+    return {"ok": True, "stored": len(body.steps)}
 
 
 @router.get("/plans")
