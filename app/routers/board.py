@@ -6,7 +6,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.board import plans, projects, service
+from app.board import actions, command, plans, projects, service
 
 router = APIRouter()
 
@@ -205,6 +205,35 @@ async def update_plan(slug: str, body: PlanUpdate):
         return await plans.update(slug, **fields)
     except plans.PlanError as e:
         raise _plan_error(e) from e
+
+
+@router.get("/command")
+async def get_command():
+    return await command.summary()
+
+
+class CardAction(BaseModel):
+    text: str = Field("", max_length=8000)
+
+
+@router.post("/{card_id}/actions/{action}")
+async def run_card_action(card_id: str, action: str, body: CardAction | None = None):
+    kind, _, raw_id = card_id.partition(":")
+    if kind == "job":
+        job_id = raw_id
+    else:
+        found = await service.card(card_id)
+        if found is None or not found["job_id"]:
+            raise HTTPException(404, "No card with a job behind it")
+        job_id = found["job_id"]
+    try:
+        job_uuid = uuid.UUID(job_id)
+    except ValueError as e:
+        raise HTTPException(404, "No such job") from e
+    try:
+        return await actions.run(job_uuid, action, (body or CardAction()).text)
+    except actions.ActionError as e:
+        raise HTTPException(409, str(e)) from e
 
 
 @router.get("/{card_id}")
