@@ -9,7 +9,7 @@ from app import spend_alert
 from app.config import settings
 
 MTOK = 1_000_000
-TZ = ZoneInfo("America/Indiana/Indianapolis")
+TZ = ZoneInfo("America/New_York")
 
 
 class _FakePool:
@@ -46,7 +46,7 @@ def env(monkeypatch):
     monkeypatch.setattr(spend_alert, "notify_simple", fake_notify)
     monkeypatch.setattr(settings, "spend_alert_monthly_usd", "10")
     monkeypatch.setattr(settings, "spend_alert_steps_pct", [100])
-    monkeypatch.setattr(settings, "spend_alert_timezone", "America/Indiana/Indianapolis")
+    monkeypatch.setattr(settings, "spend_alert_timezone", "America/New_York")
     return pool, messages
 
 
@@ -62,7 +62,7 @@ def test_monthly_limit(monkeypatch, raw, expected):
 
 
 def test_month_bounds_use_local_zone():
-    # 02:00 UTC on Nov 1 is still Oct 31 in Indianapolis.
+    # 02:00 UTC on Nov 1 is still Oct 31 in New York.
     start, end, month = spend_alert.month_bounds(datetime(2026, 11, 1, 2, tzinfo=UTC), TZ)
     assert month == "2026-10"
     assert start == datetime(2026, 10, 1, tzinfo=TZ)
@@ -95,7 +95,7 @@ async def test_alert_sent_once_per_month(env):
     title, body, url = messages[0]
     assert "$20.00" in title
     assert "projected" in body and "think $10.00" in body and "claude-opus-5-5 $10.00" in body
-    assert url.endswith("/?page=audit")
+    assert url.endswith("/?page=activity")
 
 
 async def test_new_month_alerts_again(env):

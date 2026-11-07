@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     # env var is valid; spend_alert.monthly_limit() parses it.
     spend_alert_monthly_usd: str = ""
     spend_alert_steps_pct: list[int] = [100]
-    spend_alert_timezone: str = "America/Indiana/Indianapolis"
+    spend_alert_timezone: str = "America/New_York"
 
     # Per-model request settings (thinking, effort) live in agent/client.py:model_params
     # Routing (plans/11 phase 1): Sonnet is the front door for every chat turn, Opus takes a
