@@ -1,6 +1,6 @@
-"""Postgres access for the claude_usage_* tables (migration 021)."""
+"""Postgres access for the claude_usage_* tables (migration 025)."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from app.db import get_pool
@@ -390,5 +390,80 @@ async def session_rows(
             frm,
             to,
             *keys,
+        ),
+    }
+
+
+_JOB_USAGE = "COALESCE((meta->'usage'->>'{}')::bigint, 0)"
+
+
+def _job_tokens(*keys: str) -> str:
+    return " + ".join(_JOB_USAGE.format(k) for k in keys)
+
+
+async def hub_rows(frm: datetime, to: datetime, tz: str) -> dict[str, Any]:
+    """Every usage source by local day for the usage hub, plus feed freshness and plan readings."""
+    pool = get_pool()
+    day = "(ts AT TIME ZONE $3)::date"
+    rng = "ts >= $1 AND ts <= $2"
+    prompt = _job_tokens("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+    return {
+        "claude_code": await pool.fetch(
+            f"SELECT {day} AS day, machine, {_PRICE_KEYS}, {_RESPONSE_SUMS} "
+            f"FROM claude_usage_responses WHERE {rng} GROUP BY 1, 2, 3, 4, 5, 6, 7",
+            frm,
+            to,
+            tz,
+        ),
+        "side_calls": await pool.fetch(
+            f"SELECT {day} AS day, machine, model, {_SIDE_SUMS} "
+            f"FROM claude_usage_api_requests t WHERE {_UNSEEN} AND {rng} GROUP BY 1, 2, 3",
+            frm,
+            to,
+            tz,
+        ),
+        "sazed_api": await pool.fetch(
+            f"SELECT (timestamp AT TIME ZONE $3)::date AS day, model, "
+            f"(COALESCE(input_tokens, 0) + COALESCE(cache_read_tokens, 0) "
+            f"+ COALESCE(cache_write_tokens, 0)) > {LONG_PROMPT_TOKENS} AS long_prompt, "
+            f"count(*)::int AS calls, sum(COALESCE(input_tokens, 0))::bigint AS input_tokens, "
+            f"sum(COALESCE(output_tokens, 0))::bigint AS output_tokens, "
+            f"sum(COALESCE(cache_read_tokens, 0))::bigint AS cache_read_tokens, "
+            f"sum(COALESCE(cache_write_tokens, 0))::bigint AS cache_write_tokens "
+            f"FROM llm_calls WHERE timestamp >= $1 AND timestamp <= $2 GROUP BY 1, 2, 3",
+            frm,
+            to,
+            tz,
+        ),
+        # Claude jobs report cache_*_input_tokens; agy jobs report cache_read_tokens and
+        # thinking_tokens, so each sum reads both spellings.
+        "jobs": await pool.fetch(
+            f"SELECT (finished_at AT TIME ZONE $3)::date AS day, agent, model, "
+            f"({prompt}) > {LONG_PROMPT_TOKENS} AS long_prompt, count(*)::int AS calls, "
+            f"sum({_job_tokens('input_tokens')})::bigint AS input_tokens, "
+            f"sum({_job_tokens('output_tokens')})::bigint AS output_tokens, "
+            f"sum({_job_tokens('cache_read_input_tokens', 'cache_read_tokens')})::bigint "
+            f"AS cache_read_tokens, "
+            f"sum({_job_tokens('cache_creation_input_tokens')})::bigint AS cache_write_tokens, "
+            f"sum({_job_tokens('thinking_tokens')})::bigint AS thinking_tokens "
+            f"FROM jobs WHERE jsonb_typeof(meta->'usage') = 'object' "
+            f"AND finished_at >= $1 AND finished_at <= $2 GROUP BY 1, 2, 3, 4",
+            frm,
+            to,
+            tz,
+        ),
+        "fresh": await pool.fetch(
+            "SELECT 'claude_code' AS source, machine, max(ts) AS last_at "
+            "FROM claude_usage_responses GROUP BY machine "
+            "UNION ALL SELECT 'sazed_api', NULL, max(timestamp) FROM llm_calls "
+            "UNION ALL SELECT 'worker_' || agent, NULL, max(finished_at) FROM jobs "
+            "WHERE jsonb_typeof(meta->'usage') = 'object' GROUP BY agent"
+        ),
+        "readings": await pool.fetch(
+            "SELECT plan_window, read_at, used_pct, resets_at, status, source "
+            "FROM plan_limit_readings WHERE read_at >= $1 OR id IN ("
+            "SELECT DISTINCT ON (plan_window) id FROM plan_limit_readings "
+            "ORDER BY plan_window, read_at DESC) ORDER BY read_at",
+            to - timedelta(days=8),
         ),
     }

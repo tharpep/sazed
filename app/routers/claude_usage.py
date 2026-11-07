@@ -7,6 +7,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
+from app import spend_alert
 from app.claude_usage import otlp, stats, store
 from app.config import settings
 
@@ -153,3 +154,18 @@ async def sessions(
 ):
     frm, to = _window(days)
     return stats.build_sessions(await store.session_rows(frm, to, machine, min_prompts))
+
+
+@router.get("/hub")
+async def hub(days: int = Query(30, ge=1, le=365)):
+    frm, to = _window(days)
+    tz = spend_alert.timezone()
+    start, end, month = spend_alert.month_bounds(to, tz)
+    spend = await spend_alert.month_spend(start, end)
+    billed = {
+        "month": month,
+        "usd": stats.usd(spend["total"]),
+        "alert_usd": spend_alert.monthly_limit() or None,
+        "unpriced": spend["unpriced"],
+    }
+    return stats.build_hub(await store.hub_rows(frm, to, tz.key), frm, to, tz.key, billed)

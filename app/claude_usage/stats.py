@@ -332,3 +332,135 @@ def build_sessions(rows: Mapping[str, Any]) -> dict[str, Any]:
             }
         )
     return {"limits": LIMITS, "sessions": out}
+
+
+WORKER_MACHINE = "homelab"
+SAZED_MACHINE = "sazed"
+PROJECTION_MIN_SECONDS = 600
+
+
+def _day_row(
+    row: Mapping[str, Any], source: str, machine: str, kind: str, cost: float | None
+) -> dict[str, Any]:
+    return {
+        "day": row["day"].isoformat(),
+        "source": source,
+        "machine": machine,
+        "model": row["model"],
+        "kind": kind,
+        "calls": row["calls"],
+        **{k: row[k] or 0 for k in TOKEN_KINDS},
+        "thinking_tokens": row.get("thinking_tokens") or 0,
+        "usd": None if cost is None else usd(cost),
+    }
+
+
+def hub_days(rows: Mapping[str, Any]) -> tuple[list[dict[str, Any]], Counter[str]]:
+    """One row per (day, source, machine, model): tokens, and cost where there is a price."""
+    merged: dict[tuple[str, str, str, str | None, str], dict[str, Any]] = {}
+    unpriced: Counter[str] = Counter()
+
+    def add(row, source, machine, kind):
+        cost = None
+        if kind != "tokens":
+            costs = priced(row)
+            if costs is None:
+                unpriced[row["model"] or "unknown"] += row["calls"]
+            else:
+                cost = costs[0]
+        item = _day_row(row, source, machine, kind, cost)
+        key = (item["day"], source, machine, item["model"], kind)
+        have = merged.get(key)
+        if have is None:
+            merged[key] = item
+            return
+        for k in ("calls", *TOKEN_KINDS, "thinking_tokens"):
+            have[k] += item[k]
+        if item["usd"] is not None:
+            have["usd"] = usd((have["usd"] or 0.0) + item["usd"])
+
+    for r in rows["claude_code"]:
+        add(r, "claude_code", r["machine"], "api_equivalent")
+    for r in rows["side_calls"]:
+        add(r, "claude_code", r["machine"], "api_equivalent")
+    for r in rows["sazed_api"]:
+        add(r, "sazed_api", SAZED_MACHINE, "billed")
+    for r in rows["jobs"]:
+        if r["agent"] == "claude":
+            add(r, "worker_claude", WORKER_MACHINE, "api_equivalent")
+        else:
+            add(r, f"worker_{r['agent']}", WORKER_MACHINE, "tokens")
+    days = sorted(merged.values(), key=lambda d: (d["day"], d["source"], d["machine"]))
+    return days, unpriced
+
+
+def _projection(readings: Sequence[Mapping[str, Any]], now: datetime) -> float | None:
+    """Where the current pace lands at reset, from the readings that share the last reset time."""
+    last = readings[-1]
+    if last["resets_at"] is None or last["resets_at"] <= now:
+        return None
+    same = [r for r in readings if r["resets_at"] == last["resets_at"]]
+    first = same[0]
+    span = (last["read_at"] - first["read_at"]).total_seconds()
+    if span < PROJECTION_MIN_SECONDS:
+        return None
+    slope = (last["used_pct"] - first["used_pct"]) / span
+    ahead = (last["resets_at"] - last["read_at"]).total_seconds()
+    return round(min(max(last["used_pct"] + slope * ahead, last["used_pct"]), 100.0), 1)
+
+
+def hub_limits(readings: Iterable[Mapping[str, Any]], now: datetime) -> list[dict[str, Any]]:
+    by_window: dict[str, list[Mapping[str, Any]]] = {}
+    for r in readings:
+        by_window.setdefault(r["plan_window"], []).append(r)
+    out = []
+    for window in ("five_hour", "seven_day"):
+        series = by_window.get(window)
+        if not series:
+            continue
+        last = series[-1]
+        out.append(
+            {
+                "window": window,
+                "used_pct": round(last["used_pct"], 1),
+                "resets_at": iso(last["resets_at"]) if last["resets_at"] else None,
+                "read_at": iso(last["read_at"]),
+                "status": last["status"],
+                "source": last["source"],
+                "reset_since": bool(last["resets_at"] and last["resets_at"] <= now),
+                "projected_pct": _projection(series, now),
+                "points": [
+                    {"read_at": iso(r["read_at"]), "used_pct": round(r["used_pct"], 1)}
+                    for r in series
+                ],
+            }
+        )
+    return out
+
+
+def build_hub(
+    rows: Mapping[str, Any],
+    frm: datetime,
+    to: datetime,
+    timezone: str,
+    billed: Mapping[str, Any],
+) -> dict[str, Any]:
+    days, unpriced = hub_days(rows)
+    return {
+        "range": {"from": iso(frm), "to": iso(to)},
+        "timezone": timezone,
+        "prices_as_of": PRICES_AS_OF,
+        "limits": hub_limits(rows["readings"], to),
+        "billed": dict(billed),
+        "days": days,
+        "sources": [
+            {
+                "source": r["source"],
+                "machine": r["machine"]
+                or (SAZED_MACHINE if r["source"] == "sazed_api" else WORKER_MACHINE),
+                "last_at": iso(r["last_at"]) if r["last_at"] else None,
+            }
+            for r in rows["fresh"]
+        ],
+        "unpriced": [{"model": m, "calls": n} for m, n in unpriced.most_common()],
+    }
