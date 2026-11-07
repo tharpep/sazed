@@ -67,7 +67,7 @@ async def test_plan_summary_counts_latest_states_and_planned_tasks(monkeypatch):
     assert summary["states"] == {"done": 1, "waiting": 1, "planned": 1}
 
 
-async def _summary_with(monkeypatch, rows):
+async def _summary_with(monkeypatch, rows, steps=()):
     async def plan_rows():
         return [PLAN]
 
@@ -84,7 +84,14 @@ async def _summary_with(monkeypatch, rows):
         return []
 
     monkeypatch.setattr(dispatch, "plan_rows", plan_rows)
+    async def steps_since(starts):
+        return {
+            k: [s for s in steps if (s["plan"], s["task"]) == k and s["ts"] >= start]
+            for k, start in starts.items()
+        }
+
     monkeypatch.setattr(dispatch, "rows_for", rows_for)
+    monkeypatch.setattr(dispatch, "steps_since", steps_since)
     monkeypatch.setattr(command.service, "cards", cards)
     monkeypatch.setattr(command.store, "working_jobs", working_jobs)
     monkeypatch.setattr(command.store, "finished_since", finished_since)
