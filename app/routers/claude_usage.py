@@ -7,7 +7,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
-from app.claude_usage import stats, store
+from app.claude_usage import otlp, stats, store
 from app.config import settings
 
 MACHINE_PATTERN = r"^[A-Za-z0-9._-]{1,64}$"
@@ -64,6 +64,7 @@ class ResponseRow(BaseModel):
     speed: Detail = None
     inference_geo: Detail = None
     web_search_requests: int = Field(0, ge=0)
+    api_request_id: Detail = None
 
 
 class ToolCallRow(BaseModel):
@@ -115,6 +116,19 @@ async def ingest_batch(body: BatchRequest):
     if sum(len(rows) for rows in batch.values()) > store.MAX_ROWS:
         raise HTTPException(413, f"At most {store.MAX_ROWS} rows per batch")
     return {"accepted": await store.ingest(body.machine, batch)}
+
+
+@ingest_router.post("/otlp/v1/logs")
+async def ingest_otlp_logs(request: Request):
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "Body is not OTLP/JSON") from exc
+    rows = otlp.api_requests(payload)
+    if len(rows) > store.MAX_ROWS:
+        raise HTTPException(413, f"At most {store.MAX_ROWS} api_request events per export")
+    await store.ingest_api_requests(rows)
+    return {}
 
 
 def _window(days: int) -> tuple[datetime, datetime]:

@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS claude_usage_responses (
     speed               TEXT,
     inference_geo       TEXT,
     web_search_requests INTEGER NOT NULL DEFAULT 0,
+    api_request_id      TEXT,
     context             BIGINT GENERATED ALWAYS AS
         (input_tokens + cache_read_tokens + cache_write_tokens) STORED,
     PRIMARY KEY (machine, uuid)
@@ -51,6 +52,28 @@ CREATE TABLE IF NOT EXISTS claude_usage_responses (
 CREATE INDEX IF NOT EXISTS claude_usage_responses_ts_idx ON claude_usage_responses (ts);
 CREATE INDEX IF NOT EXISTS claude_usage_responses_main_idx
     ON claude_usage_responses (machine, session_id, ts) WHERE NOT sidechain;
+CREATE INDEX IF NOT EXISTS claude_usage_responses_request_idx
+    ON claude_usage_responses (api_request_id) WHERE api_request_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS claude_usage_api_requests (
+    request_id            TEXT PRIMARY KEY,
+    machine               TEXT NOT NULL,
+    session_id            TEXT,
+    ts                    TIMESTAMPTZ NOT NULL,
+    model                 TEXT,
+    query_source          TEXT,
+    speed                 TEXT,
+    effort                TEXT,
+    input_tokens          BIGINT NOT NULL,
+    output_tokens         BIGINT NOT NULL,
+    cache_read_tokens     BIGINT NOT NULL,
+    cache_write_tokens    BIGINT NOT NULL,
+    cache_write_1h_tokens BIGINT NOT NULL,
+    cost_usd              NUMERIC(14, 8) NOT NULL
+);
+CREATE INDEX IF NOT EXISTS claude_usage_api_requests_ts_idx ON claude_usage_api_requests (ts);
+CREATE INDEX IF NOT EXISTS claude_usage_api_requests_session_idx
+    ON claude_usage_api_requests (machine, session_id);
 
 CREATE TABLE IF NOT EXISTS claude_usage_tool_calls (
     machine      TEXT NOT NULL,

@@ -58,6 +58,7 @@ _TABLES: dict[str, tuple[str, list[tuple[str, str]]]] = {
             ("speed", "text"),
             ("inference_geo", "text"),
             ("web_search_requests", "integer"),
+            ("api_request_id", "text"),
         ],
     ),
     "tool_calls": (
@@ -162,6 +163,41 @@ async def ingest(machine: str, batch: dict[str, list[dict[str, Any]]]) -> dict[s
     return accepted
 
 
+_API_REQUEST_COLUMNS = [
+    ("request_id", "text"),
+    ("machine", "text"),
+    ("session_id", "text"),
+    ("ts", "timestamptz"),
+    ("model", "text"),
+    ("query_source", "text"),
+    ("speed", "text"),
+    ("effort", "text"),
+    ("input_tokens", "bigint"),
+    ("output_tokens", "bigint"),
+    ("cache_read_tokens", "bigint"),
+    ("cache_write_tokens", "bigint"),
+    ("cache_write_1h_tokens", "bigint"),
+    ("cost_usd", "numeric"),
+]
+_UNSEEN = (
+    "NOT EXISTS (SELECT 1 FROM claude_usage_responses r WHERE r.api_request_id = t.request_id)"
+)
+_SIDE_SUMS = f"{_TOKEN_SUMS}, sum(cost_usd)::float8 AS cost_usd"
+
+
+async def ingest_api_requests(rows: list[dict[str, Any]]) -> int:
+    if not rows:
+        return 0
+    names = ", ".join(name for name, _ in _API_REQUEST_COLUMNS)
+    arrays = ", ".join(f"${i}::{kind}[]" for i, (_, kind) in enumerate(_API_REQUEST_COLUMNS, 1))
+    result = await get_pool().fetch(
+        f"INSERT INTO claude_usage_api_requests ({names}) SELECT * FROM unnest({arrays}) "
+        f"ON CONFLICT DO NOTHING RETURNING 1",
+        *_columns(rows, _API_REQUEST_COLUMNS),
+    )
+    return len(result)
+
+
 async def overview_rows(frm: datetime, to: datetime, machine: str | None) -> dict[str, Any]:
     args = (frm, to, machine)
     pool = get_pool()
@@ -206,6 +242,11 @@ async def overview_rows(frm: datetime, to: datetime, machine: str | None) -> dic
             *args,
         ),
         "sazed_spend": [] if machine else await sazed_spend_rows(pool, frm, to),
+        "side_spend": await pool.fetch(
+            f"SELECT {day} AS day, 'side_calls' AS source, model, query_source, {_SIDE_SUMS} "
+            f"FROM claude_usage_api_requests t WHERE {_UNSEEN} AND {_RANGE} GROUP BY 1, 2, 3, 4",
+            *args,
+        ),
         "models": await pool.fetch(
             f"SELECT model, count(*)::int AS n FROM claude_usage_responses "
             f"WHERE model IS NOT NULL AND {_RANGE} GROUP BY model ORDER BY n DESC, model",
@@ -292,7 +333,14 @@ async def session_rows(
         min_prompts,
     )
     if not sessions:
-        return {"sessions": [], "responses": [], "spend": [], "counts": [], "confused": []}
+        return {
+            "sessions": [],
+            "responses": [],
+            "spend": [],
+            "side_spend": [],
+            "counts": [],
+            "confused": [],
+        }
     keys = ([r["machine"] for r in sessions], [r["session_id"] for r in sessions])
     scope = (
         "JOIN unnest($3::text[], $4::text[]) AS k(machine, session_id) "
@@ -312,6 +360,14 @@ async def session_rows(
             f"SELECT t.machine, t.session_id, {_PRICE_KEYS}, {_RESPONSE_SUMS} "
             f"FROM claude_usage_responses t {scope} "
             f"WHERE t.ts >= $1 AND t.ts <= $2 GROUP BY 1, 2, 3, 4, 5, 6, 7",
+            frm,
+            to,
+            *keys,
+        ),
+        "side_spend": await pool.fetch(
+            f"SELECT t.machine, t.session_id, 'side_calls' AS source, t.model, {_SIDE_SUMS} "
+            f"FROM claude_usage_api_requests t {scope} "
+            f"WHERE {_UNSEEN} AND t.ts >= $1 AND t.ts <= $2 GROUP BY 1, 2, 3, 4",
             frm,
             to,
             *keys,

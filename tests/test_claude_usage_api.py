@@ -2,12 +2,13 @@
 
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime
+from decimal import Decimal
 
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
-from app.claude_usage import store
+from app.claude_usage import otlp, store
 from app.config import settings
 from app.dependencies import verify_api_key
 from app.routers import claude_usage
@@ -52,6 +53,9 @@ class FakePool:
     @asynccontextmanager
     async def acquire(self):
         yield self.conn
+
+    async def fetch(self, sql, *args):
+        return await self.conn.fetch(sql, *args)
 
 
 @pytest.fixture
@@ -259,6 +263,21 @@ def _spend(day, model, *, calls=1, sidechain=False, output=0, cache_read=0):
     }
 
 
+def _side(day, cost, *, calls=1, query_source="auto_mode"):
+    return {
+        "day": day,
+        "source": "side_calls",
+        "model": "claude-haiku-5-5",
+        "query_source": query_source,
+        "calls": calls,
+        "input_tokens": 10,
+        "output_tokens": 20,
+        "cache_read_tokens": 30,
+        "cache_write_tokens": 40,
+        "cost_usd": cost,
+    }
+
+
 def _overview_rows():
     return {
         "machines": ["desktop-wsl"],
@@ -301,6 +320,7 @@ def _overview_rows():
                 "source": "sazed_api",
             }
         ],
+        "side_spend": [_side(date(2026, 11, 3), 0.3, calls=5)],
         "models": [{"model": "opus", "n": 3}, {"model": "haiku", "n": 1}],
         "skills": [{"name": "pryce:log", "n": 4}],
         "subagents": [{"name": "general-purpose", "n": 29}],
@@ -365,6 +385,7 @@ def test_overview_shape_and_values(client, monkeypatch):
             "cost_usd": 20.2,
             "main_cost_usd": 20.2,
             "subagent_cost_usd": 0.0,
+            "side_cost_usd": 0.0,
             "sazed_cost_usd": 0.0,
             "cost_per_prompt_usd": 3.3667,
         },
@@ -379,26 +400,31 @@ def test_overview_shape_and_values(client, monkeypatch):
             "output_tokens": MTOK // 10,
             "cache_read_tokens": 0,
             "cache_write_tokens": 0,
-            "cost_usd": 1.5,
+            "cost_usd": 1.8,
             "main_cost_usd": 0.0,
             "subagent_cost_usd": 1.0,
+            "side_cost_usd": 0.3,
             "sazed_cost_usd": 0.5,
-            "cost_per_prompt_usd": 0.1667,
+            "cost_per_prompt_usd": 0.2167,
         },
     ]
     spend = data["spend"]
-    assert spend["total_usd"] == 21.7
-    assert spend["cost_per_prompt_usd"] == 1.7667
+    assert spend["total_usd"] == 22.0
+    assert spend["cost_per_prompt_usd"] == 1.7917
     assert spend["cache_savings_usd"] == 3.8
     assert [(s["source"], s["usd"], s["calls"]) for s in spend["sources"]] == [
         ("main", 20.2, 2),
         ("subagents", 1.0, 1),
         ("sazed_api", 0.5, 4),
+        ("side_calls", 0.3, 5),
     ]
     assert [(m["model"], m["share"]) for m in spend["models"]] == [
-        ("claude-opus-5-5", 0.931),
-        ("claude-sonnet-5-5", 0.046),
-        ("claude-haiku-5-5", 0.023),
+        ("claude-opus-5-5", 0.918),
+        ("claude-sonnet-5-5", 0.045),
+        ("claude-haiku-5-5", 0.036),
+    ]
+    assert [(c["query_source"], c["usd"], c["calls"]) for c in spend["side_calls"]] == [
+        ("auto_mode", 0.3, 5)
     ]
     assert spend["unpriced"] == [{"model": "mystery", "calls": 3}]
     assert data["models"] == [
@@ -420,6 +446,7 @@ def test_overview_with_no_data_has_null_rates_and_empty_lists(client, monkeypatc
             "tool_days": [],
             "spend": [],
             "sazed_spend": [],
+            "side_spend": [],
             "models": [],
             "skills": [],
             "subagents": [],
@@ -490,6 +517,7 @@ def _session_rows():
                 "session_id": "s",
             },
         ],
+        "side_spend": [{**_side(None, 2.0), "machine": "m", "session_id": "s"}],
         "counts": [
             {"machine": "m", "session_id": "s", "kind": "subagents", "n": 3},
             {"machine": "m", "session_id": "s", "kind": "compact", "n": 1},
@@ -527,6 +555,7 @@ def test_sessions_shape_and_values(client, monkeypatch):
         "main_model",
         "cost_usd",
         "subagent_cost_usd",
+        "side_cost_usd",
         "subagents",
         "compactions",
         "interrupts",
@@ -536,7 +565,11 @@ def test_sessions_shape_and_values(client, monkeypatch):
     assert first["prompts"] == 54
     assert first["peak_context"] == 5000
     assert first["main_model"] == "opus"
-    assert (first["cost_usd"], first["subagent_cost_usd"]) == (30.0, 10.0)
+    assert (first["cost_usd"], first["subagent_cost_usd"], first["side_cost_usd"]) == (
+        32.0,
+        10.0,
+        2.0,
+    )
     assert (bare["cost_usd"], bare["subagent_cost_usd"]) == (0.0, 0.0)
     assert (first["subagents"], first["compactions"], first["interrupts"]) == (3, 1, 2)
     assert first["first_ts"] == "2026-11-03T01:00:00Z"
@@ -586,3 +619,110 @@ async def test_sessions_with_no_matches_skip_the_dependent_queries(monkeypatch):
     out = await store.session_rows(_t(0), _t(1), None, 1)
     assert out["sessions"] == []
     assert Pool.calls == 1
+
+
+def _otlp(*records, resource=None):
+    def attrs(d):
+        return [{"key": k, "value": v} for k, v in d.items()]
+
+    return {
+        "resourceLogs": [
+            {
+                "resource": {"attributes": attrs(resource or {})},
+                "scopeLogs": [{"logRecords": [{"attributes": attrs(r)} for r in records]}],
+            }
+        ]
+    }
+
+
+API_REQUEST = {
+    "event.name": {"stringValue": "api_request"},
+    "event.timestamp": {"stringValue": "2026-11-07T04:25:28.354Z"},
+    "session.id": {"stringValue": "sess"},
+    "user.email": {"stringValue": "dropped@example.com"},
+    "model": {"stringValue": "claude-haiku-5-5"},
+    "query_source": {"stringValue": "auto_mode"},
+    "speed": {"stringValue": "normal"},
+    "input_tokens": {"intValue": "2"},
+    "output_tokens": {"intValue": 29},
+    "cache_read_tokens": {"intValue": "9074"},
+    "cache_creation_tokens": {"intValue": "29161"},
+    "cache_creation_1h_tokens": {"intValue": "29161"},
+    "cost_usd": {"doubleValue": 0.00593764},
+    "request_id": {"stringValue": "req_1"},
+}
+
+
+def test_otlp_keeps_only_api_requests_with_their_tokens_and_cost():
+    payload = _otlp(
+        API_REQUEST,
+        {"event.name": {"stringValue": "user_prompt"}},
+        {**API_REQUEST, "request_id": {"stringValue": ""}},
+        {**API_REQUEST, "cost_usd": {"stringValue": "nan"}},
+        resource={"sazed.machine": {"stringValue": "desktop-wsl"}},
+    )
+    (row,) = otlp.api_requests(payload)
+    assert row == {
+        "request_id": "req_1",
+        "machine": "desktop-wsl",
+        "session_id": "sess",
+        "ts": datetime(2026, 11, 7, 4, 25, 28, 354000, tzinfo=UTC),
+        "model": "claude-haiku-5-5",
+        "query_source": "auto_mode",
+        "speed": "normal",
+        "effort": None,
+        "input_tokens": 2,
+        "output_tokens": 29,
+        "cache_read_tokens": 9074,
+        "cache_write_tokens": 29161,
+        "cache_write_1h_tokens": 29161,
+        "cost_usd": Decimal("0.00593764"),
+    }
+
+
+@pytest.mark.parametrize("payload", [[], {"resourceLogs": "x"}, {"resourceLogs": [None, {}]}])
+def test_otlp_ignores_malformed_payloads(payload):
+    assert otlp.api_requests(payload) == []
+
+
+def test_otlp_machine_outside_the_pattern_is_unknown():
+    payload = _otlp(API_REQUEST, resource={"sazed.machine": {"stringValue": "a b"}})
+    assert otlp.api_requests(payload)[0]["machine"] == "unknown"
+
+
+def test_otlp_route_needs_the_usage_key(client, pool):
+    assert client.post("/claude-usage/otlp/v1/logs", json=_otlp(API_REQUEST)).status_code == 401
+    assert pool.conn.calls == []
+
+
+def test_otlp_route_stores_api_requests_and_answers_empty_json(client, pool):
+    resp = client.post(
+        "/claude-usage/otlp/v1/logs", json=_otlp(API_REQUEST), headers={"X-Claude-Usage-Key": KEY}
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {}
+    ((sql, args),) = pool.conn.calls
+    assert "INSERT INTO claude_usage_api_requests" in sql
+    assert "ON CONFLICT DO NOTHING" in sql
+    assert args[0] == ["req_1"]
+
+
+def test_otlp_route_rejects_a_non_json_body(client, pool):
+    resp = client.post(
+        "/claude-usage/otlp/v1/logs", content=b"\x00", headers={"X-Claude-Usage-Key": KEY}
+    )
+    assert resp.status_code == 400
+
+
+async def test_side_calls_exclude_requests_a_transcript_already_recorded(monkeypatch):
+    seen = []
+
+    class Pool:
+        async def fetch(self, sql, *args):
+            seen.append(sql)
+            return []
+
+    monkeypatch.setattr(store, "get_pool", lambda: Pool())
+    await store.overview_rows(_t(0), _t(1), "m")
+    (side,) = [sql for sql in seen if "claude_usage_api_requests" in sql]
+    assert "NOT EXISTS" in side and "r.api_request_id = t.request_id" in side

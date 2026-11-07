@@ -83,6 +83,8 @@ def iso(ts: datetime) -> str:
 
 def priced(row: Mapping[str, Any]) -> tuple[float, float] | None:
     """(cost, cost without prompt caching) in USD for one group of calls, or None if unpriced."""
+    if "cost_usd" in row:
+        return row["cost_usd"], row["cost_usd"]
     model = row["model"]
     rate = model and rate_for(
         model, LONG_PROMPT_TOKENS + 1 if row["long_prompt"] else 0, row.get("fast", False)
@@ -123,9 +125,13 @@ def _rounded(tally: Mapping[str, Any]) -> dict[str, Any]:
     return {**tally, "usd": usd(tally["usd"])}
 
 
+CLAUDE_CODE_SOURCES = ("main", "subagents", "side_calls")
+
+
 def build_spend(rows: Iterable[Mapping[str, Any]], prompts: int) -> dict[str, Any]:
     sources: dict[str, dict[str, Any]] = {}
     models: dict[str, dict[str, Any]] = {}
+    side_calls: dict[str, dict[str, Any]] = {}
     unpriced: Counter[str] = Counter()
     saved = 0.0
     for row in rows:
@@ -137,10 +143,12 @@ def build_spend(rows: Iterable[Mapping[str, Any]], prompts: int) -> dict[str, An
         source = source_of(row)
         _add(sources.setdefault(source, _tally()), row, cost)
         _add(models.setdefault(row["model"], _tally()), row, cost)
+        if source == "side_calls":
+            _add(side_calls.setdefault(row["query_source"] or "unknown", _tally()), row, cost)
         if source in ("main", "subagents"):
             saved += uncached - cost
     total = sum(t["usd"] for t in sources.values())
-    claude_code = sum(sources.get(k, {}).get("usd", 0.0) for k in ("main", "subagents"))
+    claude_code = sum(sources.get(k, {}).get("usd", 0.0) for k in CLAUDE_CODE_SOURCES)
     return {
         "prices_as_of": PRICES_AS_OF,
         "total_usd": usd(total),
@@ -153,6 +161,10 @@ def build_spend(rows: Iterable[Mapping[str, Any]], prompts: int) -> dict[str, An
         "models": [
             {"model": name, **_rounded(t), "share": rate(round(t["usd"] * 1e4), round(total * 1e4))}
             for name, t in sorted(models.items(), key=lambda kv: -kv[1]["usd"])
+        ],
+        "side_calls": [
+            {"query_source": name, **_rounded(t)}
+            for name, t in sorted(side_calls.items(), key=lambda kv: -kv[1]["usd"])
         ],
         "unpriced": [{"model": m, "calls": n} for m, n in unpriced.most_common()],
     }
@@ -175,7 +187,7 @@ def _weekly(rows: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "bash_writes": 0,
                 "edit_writes": 0,
                 **dict.fromkeys(TOKEN_KINDS, 0),
-                "spend": dict.fromkeys(("main", "subagents", "sazed_api", "sazed_jobs"), 0.0),
+                "spend": dict.fromkeys((*CLAUDE_CODE_SOURCES, "sazed_api", "sazed_jobs"), 0.0),
             },
         )
 
@@ -188,7 +200,7 @@ def _weekly(rows: Mapping[str, Any]) -> list[dict[str, Any]]:
         w = week(r["day"])
         w["bash_writes"] += r["bash_writes"]
         w["edit_writes"] += r["edit_writes"]
-    for r in [*rows["spend"], *rows["sazed_spend"]]:
+    for r in [*rows["spend"], *rows["side_spend"], *rows["sazed_spend"]]:
         w = week(r["day"])
         source = source_of(r)
         if source in ("main", "subagents"):
@@ -209,9 +221,10 @@ def _weekly(rows: Mapping[str, Any]) -> list[dict[str, Any]]:
             "cost_usd": usd(sum(w["spend"].values())),
             "main_cost_usd": usd(w["spend"]["main"]),
             "subagent_cost_usd": usd(w["spend"]["subagents"]),
+            "side_cost_usd": usd(w["spend"]["side_calls"]),
             "sazed_cost_usd": usd(w["spend"]["sazed_api"] + w["spend"]["sazed_jobs"]),
             "cost_per_prompt_usd": (
-                usd((w["spend"]["main"] + w["spend"]["subagents"]) / w["prompts"])
+                usd(sum(w["spend"][k] for k in CLAUDE_CODE_SOURCES) / w["prompts"])
                 if w["prompts"]
                 else None
             ),
@@ -250,7 +263,7 @@ def build_overview(rows: Mapping[str, Any], frm: datetime, to: datetime) -> dict
             "skills_used": len(rows["skills"]),
         },
         "weekly": _weekly(rows),
-        "spend": build_spend([*rows["spend"], *rows["sazed_spend"]], prompts),
+        "spend": build_spend([*rows["spend"], *rows["side_spend"], *rows["sazed_spend"]], prompts),
         "models": [
             {"model": r["model"], "responses": r["n"], "share": rate(r["n"], model_total)}
             for r in rows["models"]
@@ -277,11 +290,11 @@ def build_sessions(rows: Mapping[str, Any]) -> dict[str, Any]:
         (r["machine"], r["session_id"], r["kind"]): r["n"] for r in rows["counts"]
     }
     spend: dict[tuple[str, str], dict[str, float]] = {}
-    for r in rows["spend"]:
+    for r in [*rows["spend"], *rows["side_spend"]]:
         costs = priced(r)
         if costs:
             totals = spend.setdefault(
-                (r["machine"], r["session_id"]), {"main": 0.0, "subagents": 0.0}
+                (r["machine"], r["session_id"]), dict.fromkeys(CLAUDE_CODE_SOURCES, 0.0)
             )
             totals[source_of(r)] += costs[0]
     confused: dict[tuple[str, str], list[datetime]] = {}
@@ -307,6 +320,7 @@ def build_sessions(rows: Mapping[str, Any]) -> dict[str, Any]:
                 "main_model": main_model(r["model"] for r in main),
                 "cost_usd": usd(sum(spend.get(key, {}).values())),
                 "subagent_cost_usd": usd(spend.get(key, {}).get("subagents", 0.0)),
+                "side_cost_usd": usd(spend.get(key, {}).get("side_calls", 0.0)),
                 "subagents": counts.get((*key, "subagents"), 0),
                 "compactions": counts.get((*key, "compact"), 0),
                 "interrupts": counts.get((*key, "interrupt"), 0),
