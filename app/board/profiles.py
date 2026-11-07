@@ -3,6 +3,7 @@
 import json
 from typing import Any
 
+from app.board import mcp_servers
 from app.db import get_pool
 
 FIELDS = (
@@ -13,6 +14,7 @@ FIELDS = (
     "read_only",
     "evidence_required",
     "description",
+    "mcp",
 )
 PROTECTED = "implement"
 
@@ -28,7 +30,12 @@ def _json(value: Any) -> Any:
 
 
 def _out(row: dict[str, Any]) -> dict[str, Any]:
-    return {k: row[k] for k in (("name",) + FIELDS + ("updated_by", "updated_at", "version"))}
+    out = {k: row[k] for k in (("name",) + FIELDS + ("updated_by", "updated_at", "version"))}
+    return {**out, "mcp": _json(out["mcp"])}
+
+
+def _args(fields: dict[str, Any]) -> list[Any]:
+    return [json.dumps(fields[k]) if k == "mcp" else fields[k] for k in FIELDS]
 
 
 async def list_profiles() -> list[dict[str, Any]]:
@@ -76,10 +83,10 @@ async def write(
             )
             await conn.execute(
                 "INSERT INTO agent_profiles (name, model, effort, budget_usd, timeout_s, "
-                "read_only, evidence_required, description, version, updated_by) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                "read_only, evidence_required, description, mcp, version, updated_by) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)",
                 name,
-                *(fields[k] for k in FIELDS),
+                *_args(fields),
                 version,
                 author,
             )
@@ -88,10 +95,10 @@ async def write(
             done = await conn.fetchval(
                 "UPDATE agent_profiles SET model = $2, effort = $3, budget_usd = $4, "
                 "timeout_s = $5, read_only = $6, evidence_required = $7, description = $8, "
-                "version = $9, updated_by = $10, updated_at = NOW() "
-                "WHERE name = $1 AND version = $11 RETURNING version",
+                "mcp = $9::jsonb, version = $10, updated_by = $11, updated_at = NOW() "
+                "WHERE name = $1 AND version = $12 RETURNING version",
                 name,
-                *(fields[k] for k in FIELDS),
+                *_args(fields),
                 version,
                 author,
                 current["version"],
@@ -125,6 +132,10 @@ async def save(
             "read it again and reapply your change",
             409,
         )
+    try:
+        await mcp_servers.check_grants(fields["mcp"])
+    except mcp_servers.ServerError as e:
+        raise ProfileError(str(e), e.status) from e
     if current and all(current[k] == fields[k] for k in FIELDS):
         raise ProfileError("nothing changed", 422)
     await write(name, {k: fields[k] for k in FIELDS}, current, author, reason)
