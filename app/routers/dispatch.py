@@ -1,5 +1,6 @@
 """Dispatch plans and rows from sazed-worker (migration 024)."""
 
+from datetime import UTC, datetime
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
@@ -66,4 +67,4 @@ async def get_plan(plan: str):
     found = await dispatch.get_plan(plan)
     if not found:
         raise HTTPException(404, "Plan not found")
-    return found
+    return {**found, "now": datetime.now(UTC).isoformat()}
