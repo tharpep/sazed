@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from app.board import actions, service, store
+from app.board import actions, dispatch, service, store
 from app.jobs import service as jobs_service
 from app.jobs import store as jobs
 
@@ -16,6 +16,7 @@ def working_view(job: dict[str, Any], steps: list[str], now: datetime) -> dict[s
     started = job.get("started_at")
     params = job.get("params") or {}
     return {
+        "kind": "job",
         "job_id": str(job["id"]),
         "title": job["title"],
         "status": job["status"],
@@ -60,6 +61,9 @@ async def summary() -> dict[str, Any]:
     for job in await store.working_jobs():
         events = await jobs.get_recent_events(job["id"], 500)
         working.append(working_view(job, jobs_service.recent_steps(events, limit=10_000), now))
+    dispatch_working, dispatch_needs = await dispatch.command_parts(now)
+    working += dispatch_working
+    needs += dispatch_needs
     return {
         "needs": needs,
         "working": working,

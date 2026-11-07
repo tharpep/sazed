@@ -31,6 +31,7 @@ from app.routers import (
     board,
     chat,
     conversations,
+    dispatch,
     events,
     finance,
     health,
@@ -170,6 +171,9 @@ app.include_router(
 )
 app.include_router(
     board.router, prefix="/board", tags=["board"], dependencies=[Depends(verify_api_key)]
+)
+app.include_router(
+    dispatch.router, prefix="/dispatch", tags=["dispatch"], dependencies=[Depends(verify_api_key)]
 )
 app.include_router(
     jobs.router, prefix="/jobs", tags=["jobs"], dependencies=[Depends(verify_api_key)]
