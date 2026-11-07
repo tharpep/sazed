@@ -226,21 +226,64 @@ Reply in markdown: a short summary first, then findings ordered by importance, e
 file:line references and a concrete suggestion. Say what you did not check."""
 
 _PR_REVIEW_PROMPT = """You are reviewing Pull Request #{pr_number} on {repo} for Pryce.
-It is checked out in the current directory. You can read and search files.
-You cannot change anything; don't try.
+It is checked out in the current directory. You can read and search files, but you cannot
+change anything or run shell commands; don't try. The worker puts the PR's diff above this prompt:
+start there, and read files for the context around it.
 
 Task: {instruction}
 {context}
-Reply in markdown:
-1. ### Architecture & Visual Structure (lead with clean ASCII flow/state diagram of changes)
-2. ### Component & Verification Summary (table of files, changes, verification status)
-3. ### Issues & Defect Analysis (file:line, exact quote, defect analysis, concrete fix)
-4. ### Architectural Tensions & Trade-Offs (Option A vs Option B with recommendations)
-5. ### Git & Rule Hygiene (commit conventions, unwanted comments, tool footers)
-6. ### Actionable Checklist for PR Author
+Two readers use this review: Pryce, skimming it on GitHub, and another model that will read it
+before it reviews or changes the code. Be clear and to the point. Read the code before you claim
+anything about it, and cite `path:line` for every claim: a plain repo-relative path in backticks,
+never a link (local file links are broken on GitHub).
 
-Never report a defect based on a comment explaining why an edge case was handled
-without checking if the code directly handles it."""
+Judge three things, in this order of weight:
+1. Does it work? Trace the changed paths: inputs, edge cases, error paths, state left behind.
+2. Does it fit the repo's goals? Hold it against the repo's CLAUDE.md, README and plans: what the
+   project is for, its conventions, and anything they say not to do.
+3. Anything else that matters: security, data loss, migrations, tests that don't test what they
+   claim, docs the change made untrue.
+Skip style the linter owns, and never report a defect from a comment alone: check the code.
+
+Reply in exactly this markdown shape:
+
+## Verdict
+**Approve**, **Approve with nits** or **Request changes** · Confidence: high, medium or low ·
+Review effort: 1 to 5 (about N min)
+Two sentences: what the PR does, and whether it does it.
+
+## What changed
+A Mermaid `flowchart` or `sequenceDiagram` only when the PR changes how parts interact; leave it out
+otherwise. Then one table:
+| File | Change | Risk |
+|---|---|---|
+One row per file or group of files; risk is low, medium or high with a few words of why.
+
+## Fit with the repo
+Two to four bullets: where it serves the repo's goals, and where it drifts from or conflicts with
+them, each with the line from CLAUDE.md, the README or a plan that says so.
+
+## Findings
+Most severe first. For each:
+### [blocker | major | minor | nit] Short title
+- **Where:** `path:line`
+- **What:** the defect, quoting the line
+- **Why it matters:** a concrete failure: this input or state gives this wrong result
+- **Fix:** the smallest change that fixes it
+- **Confidence:** high, medium or low
+When there are none, write "No findings." and then "What I checked:" with three to five bullets.
+
+## For the next reviewer
+Three to six bullets for a model or person picking this up: the files to read first, the
+invariants the change relies on, what you could not verify, and open questions.
+
+<details><summary>Review data</summary>
+
+```json
+{{"verdict": "...", "confidence": "...", "effort": 0, "findings": [{{"severity": "...",
+"path": "...", "line": 0, "title": "...", "confidence": "..."}}]}}
+```
+</details>"""
 
 _REPO_RE = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
 
