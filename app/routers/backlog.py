@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.backlog import service, store
-from app.board import projects
+from app.board import plans, projects
 from app.jobs.service import JobError
 
 router = APIRouter()
@@ -28,6 +28,8 @@ class ItemCreate(BaseModel):
     impact: Literal["low", "medium", "high"] | None = None
     sources: list[str] = Field(default_factory=list, max_length=20)
     workstream_id: uuid.UUID | None = None
+    plan: str | None = Field(None, max_length=80)
+    plan_section: str | None = Field(None, max_length=80)
 
 
 class ItemUpdate(BaseModel):
@@ -39,6 +41,8 @@ class ItemUpdate(BaseModel):
     why: str | None = Field(None, max_length=4000)
     rank: int | None = Field(None, ge=1, le=999)  # same as /move with this position
     workstream_id: uuid.UUID | None = None  # sent as null, it takes the item off its workstream
+    plan: str | None = Field(None, max_length=80)  # sent as null, it unlinks the plan
+    plan_section: str | None = Field(None, max_length=80)
 
 
 class ApproveRequest(BaseModel):
@@ -69,10 +73,28 @@ async def _check_workstream(ws_id: uuid.UUID | None) -> None:
         raise HTTPException(422, f"No workstream {ws_id}; list them with GET /board/projects")
 
 
+async def _plan_link(slug: str | None, section: str | None) -> dict:
+    if slug is None:
+        return {"plan_id": None, "plan_section": None, "plan_version": None}
+    try:
+        plan = await plans.get_plan(slug)
+    except plans.PlanError as e:
+        raise HTTPException(422, str(e)) from e
+    if section and section not in {s["id"] for s in plan["sections"]}:
+        raise HTTPException(422, f"Plan {slug} has no section {section!r}")
+    return {
+        "plan_id": uuid.UUID(plan["id"]),
+        "plan_section": section,
+        "plan_version": plan["version"],
+    }
+
+
 @router.post("", status_code=201)
 async def create_item(body: ItemCreate):
     await _check_workstream(body.workstream_id)
-    item, duplicate = await service.add_item(source="console", **body.model_dump())
+    link = await _plan_link(body.plan, body.plan_section) if body.plan else {}
+    fields = body.model_dump(exclude={"plan", "plan_section"}) | link
+    item, duplicate = await service.add_item(source="console", **fields)
     if duplicate:
         raise HTTPException(409, f"Already in the backlog: {duplicate['title']}")
     return item
@@ -80,7 +102,9 @@ async def create_item(body: ItemCreate):
 
 @router.patch("/{item_id}")
 async def update_item(item_id: uuid.UUID, body: ItemUpdate):
-    fields = body.model_dump(exclude_none=True)
+    fields = body.model_dump(exclude_none=True, exclude={"plan", "plan_section"})
+    if "plan" in body.model_fields_set:
+        fields |= await _plan_link(body.plan, body.plan_section)
     if "workstream_id" in body.model_fields_set:
         await _check_workstream(body.workstream_id)
         fields["workstream_id"] = body.workstream_id
