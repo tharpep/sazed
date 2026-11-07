@@ -91,7 +91,7 @@ async def plan_row(plan: str) -> dict[str, Any] | None:
 async def rows_for(plan: str | None = None) -> list[dict[str, Any]]:
     rows = await get_pool().fetch(
         """
-        SELECT plan, task, ts, state, line, ref, cost_usd, session, meta
+        SELECT plan, task, ts, state, line, ref, cost_usd, session, meta, received_at
         FROM dispatch_rows
         WHERE $1::text IS NULL OR plan = $1
         ORDER BY ts, id
@@ -152,7 +152,8 @@ async def command_parts(now: datetime) -> tuple[list[dict], list[dict]]:
     for (plan, task), row in _latest(await rows_for()).items():
         meta = plans.get(plan, {})
         defn = next((t for t in meta.get("tasks", []) if t["id"] == task), {"id": task})
-        age = now.timestamp() - row["ts"]
+        seen = row.get("received_at")
+        age = (now - seen).total_seconds() if seen else now.timestamp() - row["ts"]
         if row["state"] == "running":
             working.append(
                 {
