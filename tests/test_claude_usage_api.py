@@ -238,6 +238,27 @@ def test_duplicate_session_ids_in_one_batch_are_merged_before_the_upsert(client,
     assert args[7] == [datetime(2026, 11, 3, 12, tzinfo=UTC)]
 
 
+MTOK = 1_000_000
+
+
+def _spend(day, model, *, calls=1, sidechain=False, output=0, cache_read=0):
+    return {
+        "day": day,
+        "model": model,
+        "sidechain": sidechain,
+        "fast": False,
+        "us_only": False,
+        "long_prompt": False,
+        "calls": calls,
+        "input_tokens": 0,
+        "output_tokens": output,
+        "cache_read_tokens": cache_read,
+        "cache_write_tokens": 0,
+        "cache_write_1h_tokens": 0,
+        "web_searches": 0,
+    }
+
+
 def _overview_rows():
     return {
         "machines": ["desktop-wsl"],
@@ -269,9 +290,16 @@ def _overview_rows():
             {"day": date(2026, 10, 26), "calls": 60, "bash_writes": 9, "edit_writes": 1},
             {"day": date(2026, 11, 3), "calls": 60, "bash_writes": 0, "edit_writes": 2},
         ],
-        "response_days": [
-            {"day": date(2026, 10, 27), "output_tokens": 70, "cache_read_tokens": 700},
-            {"day": date(2026, 11, 2), "output_tokens": 5, "cache_read_tokens": 50},
+        "spend": [
+            _spend(date(2026, 10, 27), "claude-opus-5-5", calls=2, output=MTOK, cache_read=MTOK),
+            _spend(date(2026, 11, 2), "claude-sonnet-5-5", sidechain=True, output=MTOK // 10),
+            _spend(date(2026, 11, 2), "mystery", calls=3),
+        ],
+        "sazed_spend": [
+            {
+                **_spend(date(2026, 11, 3), "claude-haiku-5-5", calls=4, output=MTOK),
+                "source": "sazed_api",
+            }
         ],
         "models": [{"model": "opus", "n": 3}, {"model": "haiku", "n": 1}],
         "skills": [{"name": "pryce:log", "n": 4}],
@@ -298,6 +326,7 @@ def test_overview_shape_and_values(client, monkeypatch):
         "machines",
         "tiles",
         "weekly",
+        "spend",
         "models",
         "skills",
         "subagents",
@@ -329,8 +358,15 @@ def test_overview_shape_and_values(client, monkeypatch):
             "confusion_rate": 0.167,
             "bash_writes": 9,
             "edit_writes": 1,
-            "output_tokens": 70,
-            "cache_read_tokens": 700,
+            "input_tokens": 0,
+            "output_tokens": MTOK,
+            "cache_read_tokens": MTOK,
+            "cache_write_tokens": 0,
+            "cost_usd": 20.2,
+            "main_cost_usd": 20.2,
+            "subagent_cost_usd": 0.0,
+            "sazed_cost_usd": 0.0,
+            "cost_per_prompt_usd": 3.3667,
         },
         {
             "week": "2026-W45",
@@ -339,10 +375,32 @@ def test_overview_shape_and_values(client, monkeypatch):
             "confusion_rate": 0.167,
             "bash_writes": 0,
             "edit_writes": 2,
-            "output_tokens": 5,
-            "cache_read_tokens": 50,
+            "input_tokens": 0,
+            "output_tokens": MTOK // 10,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cost_usd": 1.5,
+            "main_cost_usd": 0.0,
+            "subagent_cost_usd": 1.0,
+            "sazed_cost_usd": 0.5,
+            "cost_per_prompt_usd": 0.1667,
         },
     ]
+    spend = data["spend"]
+    assert spend["total_usd"] == 21.7
+    assert spend["cost_per_prompt_usd"] == 1.7667
+    assert spend["cache_savings_usd"] == 3.8
+    assert [(s["source"], s["usd"], s["calls"]) for s in spend["sources"]] == [
+        ("main", 20.2, 2),
+        ("subagents", 1.0, 1),
+        ("sazed_api", 0.5, 4),
+    ]
+    assert [(m["model"], m["share"]) for m in spend["models"]] == [
+        ("claude-opus-5-5", 0.931),
+        ("claude-sonnet-5-5", 0.046),
+        ("claude-haiku-5-5", 0.023),
+    ]
+    assert spend["unpriced"] == [{"model": "mystery", "calls": 3}]
     assert data["models"] == [
         {"model": "opus", "responses": 3, "share": 0.75},
         {"model": "haiku", "responses": 1, "share": 0.25},
@@ -360,7 +418,8 @@ def test_overview_with_no_data_has_null_rates_and_empty_lists(client, monkeypatc
             "prompt_days": [],
             "peaks": [],
             "tool_days": [],
-            "response_days": [],
+            "spend": [],
+            "sazed_spend": [],
             "models": [],
             "skills": [],
             "subagents": [],
@@ -379,6 +438,8 @@ def test_overview_with_no_data_has_null_rates_and_empty_lists(client, monkeypatc
     assert tiles["tool_calls_per_prompt"] is None
     assert data["weekly"] == []
     assert data["models"] == []
+    assert data["spend"]["total_usd"] == 0
+    assert data["spend"]["cost_per_prompt_usd"] is None
 
 
 @pytest.mark.parametrize("query", ["days=0", "days=366", "machine=a%20b"])
@@ -421,6 +482,14 @@ def _session_rows():
             },
         ],
         "responses": responses,
+        "spend": [
+            {**_spend(None, "claude-opus-5-5", output=MTOK), "machine": "m", "session_id": "s"},
+            {
+                **_spend(None, "claude-sonnet-5-5", sidechain=True, output=MTOK),
+                "machine": "m",
+                "session_id": "s",
+            },
+        ],
         "counts": [
             {"machine": "m", "session_id": "s", "kind": "subagents", "n": 3},
             {"machine": "m", "session_id": "s", "kind": "compact", "n": 1},
@@ -456,6 +525,8 @@ def test_sessions_shape_and_values(client, monkeypatch):
         "prompts",
         "peak_context",
         "main_model",
+        "cost_usd",
+        "subagent_cost_usd",
         "subagents",
         "compactions",
         "interrupts",
@@ -465,6 +536,8 @@ def test_sessions_shape_and_values(client, monkeypatch):
     assert first["prompts"] == 54
     assert first["peak_context"] == 5000
     assert first["main_model"] == "opus"
+    assert (first["cost_usd"], first["subagent_cost_usd"]) == (30.0, 10.0)
+    assert (bare["cost_usd"], bare["subagent_cost_usd"]) == (0.0, 0.0)
     assert (first["subagents"], first["compactions"], first["interrupts"]) == (3, 1, 2)
     assert first["first_ts"] == "2026-11-03T01:00:00Z"
     assert first["confused_prompts"] == [

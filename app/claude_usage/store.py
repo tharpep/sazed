@@ -4,12 +4,28 @@ from datetime import datetime
 from typing import Any
 
 from app.db import get_pool
+from app.pricing import LONG_PROMPT_TOKENS
 
 MAX_ROWS = 5000
 
 _RANGE = "ts >= $1 AND ts <= $2 AND ($3::text IS NULL OR machine = $3)"
 _PROMPT_RANGE = "p.ts >= $1 AND p.ts <= $2 AND ($3::text IS NULL OR p.machine = $3)"
 _BASH = "name = 'Bash'"
+_TOKEN_SUMS = (
+    "count(*)::int AS calls, sum(input_tokens)::bigint AS input_tokens, "
+    "sum(output_tokens)::bigint AS output_tokens, "
+    "sum(cache_read_tokens)::bigint AS cache_read_tokens, "
+    "sum(cache_write_tokens)::bigint AS cache_write_tokens"
+)
+_PRICE_KEYS = (
+    "model, sidechain, COALESCE(speed = 'fast', FALSE) AS fast, "
+    "COALESCE(inference_geo = 'us', FALSE) AS us_only, "
+    f"context > {LONG_PROMPT_TOKENS} AS long_prompt"
+)
+_RESPONSE_SUMS = (
+    f"{_TOKEN_SUMS}, sum(cache_write_1h_tokens)::bigint AS cache_write_1h_tokens, "
+    "sum(web_search_requests)::int AS web_searches"
+)
 
 _TABLES: dict[str, tuple[str, list[tuple[str, str]]]] = {
     "prompts": (
@@ -38,6 +54,10 @@ _TABLES: dict[str, tuple[str, list[tuple[str, str]]]] = {
             ("cache_read_tokens", "bigint"),
             ("cache_write_tokens", "bigint"),
             ("sidechain", "boolean"),
+            ("cache_write_1h_tokens", "bigint"),
+            ("speed", "text"),
+            ("inference_geo", "text"),
+            ("web_search_requests", "integer"),
         ],
     ),
     "tool_calls": (
@@ -180,12 +200,12 @@ async def overview_rows(frm: datetime, to: datetime, machine: str | None) -> dic
             f"FROM claude_usage_tool_calls WHERE {_RANGE} GROUP BY 1",
             *args,
         ),
-        "response_days": await pool.fetch(
-            f"SELECT {day} AS day, sum(output_tokens)::bigint AS output_tokens, "
-            f"sum(cache_read_tokens)::bigint AS cache_read_tokens "
-            f"FROM claude_usage_responses WHERE {_RANGE} GROUP BY 1",
+        "spend": await pool.fetch(
+            f"SELECT {day} AS day, {_PRICE_KEYS}, {_RESPONSE_SUMS} "
+            f"FROM claude_usage_responses WHERE {_RANGE} GROUP BY 1, 2, 3, 4, 5, 6",
             *args,
         ),
+        "sazed_spend": [] if machine else await sazed_spend_rows(pool, frm, to),
         "models": await pool.fetch(
             f"SELECT model, count(*)::int AS n FROM claude_usage_responses "
             f"WHERE model IS NOT NULL AND {_RANGE} GROUP BY model ORDER BY n DESC, model",
@@ -214,6 +234,40 @@ async def overview_rows(frm: datetime, to: datetime, machine: str | None) -> dic
     }
 
 
+async def sazed_spend_rows(pool, frm: datetime, to: datetime) -> list[dict[str, Any]]:
+    """Sazed's own model calls and worker jobs, the spend no Claude Code transcript records."""
+    calls = await pool.fetch(
+        f"SELECT (timestamp AT TIME ZONE 'UTC')::date AS day, 'sazed_api' AS source, model, "
+        f"(COALESCE(input_tokens, 0) + COALESCE(cache_read_tokens, 0) "
+        f"+ COALESCE(cache_write_tokens, 0)) > {LONG_PROMPT_TOKENS} AS long_prompt, "
+        f"count(*)::int AS calls, sum(COALESCE(input_tokens, 0))::bigint AS input_tokens, "
+        f"sum(COALESCE(output_tokens, 0))::bigint AS output_tokens, "
+        f"sum(COALESCE(cache_read_tokens, 0))::bigint AS cache_read_tokens, "
+        f"sum(COALESCE(cache_write_tokens, 0))::bigint AS cache_write_tokens "
+        f"FROM llm_calls WHERE timestamp >= $1 AND timestamp <= $2 GROUP BY 1, 2, 3, 4",
+        frm,
+        to,
+    )
+    usage = "COALESCE((meta->'usage'->>'{}')::bigint, 0)"
+    prompt = " + ".join(
+        usage.format(k)
+        for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+    )
+    jobs = await pool.fetch(
+        f"SELECT (finished_at AT TIME ZONE 'UTC')::date AS day, 'sazed_jobs' AS source, model, "
+        f"({prompt}) > {LONG_PROMPT_TOKENS} AS long_prompt, count(*)::int AS calls, "
+        f"sum({usage.format('input_tokens')})::bigint AS input_tokens, "
+        f"sum({usage.format('output_tokens')})::bigint AS output_tokens, "
+        f"sum({usage.format('cache_read_input_tokens')})::bigint AS cache_read_tokens, "
+        f"sum({usage.format('cache_creation_input_tokens')})::bigint AS cache_write_tokens "
+        f"FROM jobs WHERE jsonb_typeof(meta->'usage') = 'object' "
+        f"AND finished_at >= $1 AND finished_at <= $2 GROUP BY 1, 2, 3, 4",
+        frm,
+        to,
+    )
+    return [*calls, *jobs]
+
+
 async def _named_counts(pool, where: str, column: str, table: str, args: tuple) -> list:
     return await pool.fetch(
         f"SELECT {column} AS name, count(*)::int AS n FROM {table} "
@@ -238,7 +292,7 @@ async def session_rows(
         min_prompts,
     )
     if not sessions:
-        return {"sessions": [], "responses": [], "counts": [], "confused": []}
+        return {"sessions": [], "responses": [], "spend": [], "counts": [], "confused": []}
     keys = ([r["machine"] for r in sessions], [r["session_id"] for r in sessions])
     scope = (
         "JOIN unnest($3::text[], $4::text[]) AS k(machine, session_id) "
@@ -250,6 +304,14 @@ async def session_rows(
             f"SELECT t.machine, t.session_id, t.ts, t.context, t.model "
             f"FROM claude_usage_responses t {scope} "
             f"WHERE NOT t.sidechain AND t.ts >= $1 AND t.ts <= $2 ORDER BY t.ts",
+            frm,
+            to,
+            *keys,
+        ),
+        "spend": await pool.fetch(
+            f"SELECT t.machine, t.session_id, {_PRICE_KEYS}, {_RESPONSE_SUMS} "
+            f"FROM claude_usage_responses t {scope} "
+            f"WHERE t.ts >= $1 AND t.ts <= $2 GROUP BY 1, 2, 3, 4, 5, 6, 7",
             frm,
             to,
             *keys,

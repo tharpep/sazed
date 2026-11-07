@@ -2,7 +2,10 @@
 
 from datetime import UTC, date, datetime
 
+import pytest
+
 from app.claude_usage import stats
+from app.claude_usage.stats import priced
 
 
 def _t(minute: int) -> datetime:
@@ -81,3 +84,32 @@ def test_main_model_most_common_with_stable_tie_and_none():
     assert stats.main_model([None, None]) is None
     assert stats.main_model(["b", "a", "b", None]) == "b"
     assert stats.main_model(["b", "a"]) == "a"
+
+
+def _group(**overrides):
+    row = {
+        "model": "claude-opus-5-5",
+        "long_prompt": False,
+        "fast": False,
+        "us_only": False,
+        "web_searches": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "cache_write_1h_tokens": 0,
+    }
+    return {**row, **overrides}
+
+
+def test_priced_applies_every_modifier_a_group_carries():
+    """A group's flags select fast, long-prompt, region and web-search pricing."""
+    mtok = 1_000_000
+    assert priced(_group(output_tokens=mtok, fast=True))[0] == pytest.approx(40.0)
+    long_haiku = _group(model="claude-haiku-5-5", output_tokens=mtok, long_prompt=True)
+    assert priced(long_haiku)[0] == pytest.approx(2.5)
+    us = _group(output_tokens=mtok, us_only=True, web_searches=10)
+    assert priced(us)[0] == pytest.approx(22.0 + 0.1)
+    one_hour = _group(cache_write_tokens=mtok, cache_write_1h_tokens=mtok)
+    assert priced(one_hour) == pytest.approx((8.0, 4.0))
+    assert priced(_group(model=None)) is None
