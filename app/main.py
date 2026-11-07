@@ -23,6 +23,7 @@ from app.http_client import startup as http_client_startup
 from app.jobs import ci_watch
 from app.routers import (
     activity,
+    agent_profiles,
     approvals,
     audit,
     automations,
@@ -172,6 +173,12 @@ app.include_router(
 )
 app.include_router(
     board.router, prefix="/board", tags=["board"], dependencies=[Depends(verify_api_key)]
+)
+app.include_router(
+    agent_profiles.router,
+    prefix="/agents",
+    tags=["agents"],
+    dependencies=[Depends(verify_api_key)],
 )
 app.include_router(
     dispatch.router, prefix="/dispatch", tags=["dispatch"], dependencies=[Depends(verify_api_key)]
