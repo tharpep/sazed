@@ -23,19 +23,30 @@ def _json(value: Any) -> Any:
     return json.loads(value) if isinstance(value, str) else value
 
 
-async def upsert_plan(plan: str, repo: str, base: str, host: str, tasks: list[dict]) -> None:
+async def upsert_plan(
+    plan: str,
+    repo: str,
+    base: str,
+    host: str,
+    tasks: list[dict],
+    project: str | None = None,
+    board_plan: str | None = None,
+) -> None:
     await get_pool().execute(
         """
-        INSERT INTO dispatch_plans (plan, repo, base, host, tasks)
-        VALUES ($1, $2, $3, $4, $5::jsonb)
+        INSERT INTO dispatch_plans (plan, repo, base, host, tasks, project, board_plan)
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
         ON CONFLICT (plan) DO UPDATE
-        SET repo = $2, base = $3, host = $4, tasks = $5::jsonb, updated_at = NOW()
+        SET repo = $2, base = $3, host = $4, tasks = $5::jsonb, project = $6, board_plan = $7,
+            updated_at = NOW()
         """,
         plan,
         repo,
         base,
         host,
         json.dumps(tasks),
+        project,
+        board_plan,
     )
 
 
@@ -133,15 +144,16 @@ def _plan(rec) -> dict[str, Any]:
 
 async def plan_rows() -> list[dict[str, Any]]:
     rows = await get_pool().fetch(
-        "SELECT plan, repo, base, host, tasks, updated_at FROM dispatch_plans "
-        "ORDER BY updated_at DESC"
+        "SELECT plan, repo, base, host, tasks, project, board_plan, updated_at "
+        "FROM dispatch_plans ORDER BY updated_at DESC"
     )
     return [_plan(r) for r in rows]
 
 
 async def plan_row(plan: str) -> dict[str, Any] | None:
     rec = await get_pool().fetchrow(
-        "SELECT plan, repo, base, host, tasks, updated_at FROM dispatch_plans WHERE plan = $1",
+        "SELECT plan, repo, base, host, tasks, project, board_plan, updated_at "
+        "FROM dispatch_plans WHERE plan = $1",
         plan,
     )
     return _plan(rec) if rec else None
@@ -175,6 +187,8 @@ def _summary(plan: dict[str, Any], latest: dict[tuple[str, str], dict[str, Any]]
         "repo": plan["repo"],
         "base": plan["base"],
         "host": plan["host"],
+        "project": plan.get("project"),
+        "board_plan": plan.get("board_plan"),
         "updated_at": plan["updated_at"],
         "tasks_total": len(plan["tasks"]),
         "states": states,
@@ -184,6 +198,16 @@ def _summary(plan: dict[str, Any], latest: dict[tuple[str, str], dict[str, Any]]
 async def list_plans() -> list[dict[str, Any]]:
     latest = _latest(await rows_for())
     return [_summary(p, latest) for p in await plan_rows()]
+
+
+async def runs_for_project(slug: str) -> list[dict[str, Any]]:
+    latest = _latest(await rows_for())
+    runs = []
+    for p in await plan_rows():
+        if p.get("project") == slug:
+            s = _summary(p, latest)
+            runs.append({k: s[k] for k in ("plan", "updated_at", "tasks_total", "states")})
+    return runs
 
 
 async def get_plan(plan: str) -> dict[str, Any] | None:

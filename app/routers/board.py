@@ -6,7 +6,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.board import actions, command, plans, projects, service
+from app.board import actions, command, dispatch, plans, projects, service
 
 router = APIRouter()
 
@@ -86,7 +86,7 @@ async def get_project(slug: str):
     found = await projects.get_project(slug)
     if found is None:
         raise HTTPException(404, "Project not found")
-    return found
+    return {**found, "dispatch_runs": await dispatch.runs_for_project(slug)}
 
 
 @router.patch("/projects/{slug}")

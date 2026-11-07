@@ -30,6 +30,8 @@ class PlanIn(BaseModel):
     base: str
     host: str
     tasks: list[TaskIn]
+    project: str | None = Field(None, max_length=60)
+    board_plan: str | None = Field(None, max_length=60)
 
 
 class RowIn(BaseModel):
@@ -62,7 +64,9 @@ class StepsIn(BaseModel):
 @router.post("/plans")
 async def post_plan(body: PlanIn):
     tasks = [t.model_dump() for t in body.tasks]
-    await dispatch.upsert_plan(body.plan, body.repo, body.base, body.host, tasks)
+    await dispatch.upsert_plan(
+        body.plan, body.repo, body.base, body.host, tasks, body.project, body.board_plan
+    )
     return {"plan": body.plan, "tasks": len(tasks)}
 
 
