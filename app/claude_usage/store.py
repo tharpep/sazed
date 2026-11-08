@@ -1,6 +1,7 @@
 """Postgres access for the claude_usage_* tables (migration 025)."""
 
-from datetime import datetime, timedelta
+import json
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from app.db import get_pool
@@ -460,10 +461,58 @@ async def hub_rows(frm: datetime, to: datetime, tz: str) -> dict[str, Any]:
             "WHERE jsonb_typeof(meta->'usage') = 'object' GROUP BY agent"
         ),
         "readings": await pool.fetch(
-            "SELECT plan_window, read_at, used_pct, resets_at, status, source "
+            "SELECT plan_window, read_at, used_pct, resets_at, status, source, machine "
             "FROM plan_limit_readings WHERE read_at >= $1 OR id IN ("
             "SELECT DISTINCT ON (plan_window) id FROM plan_limit_readings "
             "ORDER BY plan_window, read_at DESC) ORDER BY read_at",
             to - timedelta(days=8),
         ),
+        "plans": await plan_periods(),
     }
+
+
+async def add_reading(info: dict[str, Any], read_at: datetime, source: str, machine: str) -> int:
+    """Both plan windows from one rate_limit_info object; returns how many windows were new."""
+    return await get_pool().fetchval(
+        "SELECT plan_limit_readings_insert($1::jsonb, $2, $3, $4, NULL, NULL)",
+        json.dumps(info),
+        read_at,
+        source,
+        machine,
+    )
+
+
+async def touch_activity(machine: str, at: datetime) -> None:
+    await get_pool().execute(
+        "INSERT INTO claude_activity (machine, last_at) VALUES ($1, $2) "
+        "ON CONFLICT (machine) DO UPDATE SET last_at = GREATEST(claude_activity.last_at, $2)",
+        machine,
+        at,
+    )
+
+
+async def probe_state() -> dict[str, Any]:
+    row = await get_pool().fetchrow(
+        "SELECT (SELECT max(read_at) FROM plan_limit_readings) AS last_read, "
+        "(SELECT resets_at FROM plan_limit_readings WHERE plan_window = 'five_hour' "
+        "ORDER BY read_at DESC LIMIT 1) AS five_hour_resets, "
+        "(SELECT max(last_at) FROM claude_activity) AS last_active"
+    )
+    return dict(row)
+
+
+async def plan_periods() -> list[dict[str, Any]]:
+    rows = await get_pool().fetch(
+        "SELECT starts_on, plan, monthly_usd FROM claude_plan_periods ORDER BY starts_on"
+    )
+    return [dict(r) for r in rows]
+
+
+async def set_plan_period(starts_on: date, plan: str, monthly_usd: float) -> None:
+    await get_pool().execute(
+        "INSERT INTO claude_plan_periods (starts_on, plan, monthly_usd) VALUES ($1, $2, $3) "
+        "ON CONFLICT (starts_on) DO UPDATE SET plan = $2, monthly_usd = $3, updated_at = NOW()",
+        starts_on,
+        plan,
+        monthly_usd,
+    )

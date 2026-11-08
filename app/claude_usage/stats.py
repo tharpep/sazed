@@ -3,8 +3,9 @@
 import bisect
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.pricing import (
     LONG_PROMPT_TOKENS,
@@ -394,19 +395,44 @@ def hub_days(rows: Mapping[str, Any]) -> tuple[list[dict[str, Any]], Counter[str
     return days, unpriced
 
 
-def _projection(readings: Sequence[Mapping[str, Any]], now: datetime) -> float | None:
-    """Where the current pace lands at reset, from the readings that share the last reset time."""
+WINDOW_SPAN = {"five_hour": timedelta(hours=5), "seven_day": timedelta(days=7)}
+PACE_LOOKBACK = {"five_hour": timedelta(hours=1), "seven_day": timedelta(days=1)}
+PROBE_EVERY = timedelta(minutes=10)
+ACTIVE_WITHIN = timedelta(minutes=15)
+NO_PACE = {"even_pct": None, "projected_pct": None, "full_at": None, "allowance_per_day": None}
+
+
+def _pace(readings: Sequence[Mapping[str, Any]], now: datetime) -> dict[str, Any]:
+    """Even pace, where the recent rate lands at reset, and when it would reach 100%."""
     last = readings[-1]
-    if last["resets_at"] is None or last["resets_at"] <= now:
-        return None
-    same = [r for r in readings if r["resets_at"] == last["resets_at"]]
-    first = same[0]
-    span = (last["read_at"] - first["read_at"]).total_seconds()
-    if span < PROJECTION_MIN_SECONDS:
-        return None
-    slope = (last["used_pct"] - first["used_pct"]) / span
-    ahead = (last["resets_at"] - last["read_at"]).total_seconds()
-    return round(min(max(last["used_pct"] + slope * ahead, last["used_pct"]), 100.0), 1)
+    resets, window = last["resets_at"], last["plan_window"]
+    if resets is None or resets <= now:
+        return dict(NO_PACE)
+    span = WINDOW_SPAN[window]
+    elapsed = (now - (resets - span)) / span
+    left_days = (resets - now).total_seconds() / 86_400
+    out = {
+        **NO_PACE,
+        "even_pct": round(min(max(elapsed * 100, 0.0), 100.0), 1),
+        "allowance_per_day": round(max(100 - last["used_pct"], 0) / left_days, 1)
+        if window == "seven_day"
+        else None,
+    }
+    same = [r for r in readings if r["resets_at"] == resets]
+    recent = [r for r in same if r["read_at"] >= last["read_at"] - PACE_LOOKBACK[window]]
+    first = recent[0]
+    if (last["read_at"] - first["read_at"]).total_seconds() < PROJECTION_MIN_SECONDS:
+        first = same[0]
+    seconds = (last["read_at"] - first["read_at"]).total_seconds()
+    if seconds < PROJECTION_MIN_SECONDS:
+        return out
+    rate = max((last["used_pct"] - first["used_pct"]) / seconds, 0.0)
+    ahead = (resets - last["read_at"]).total_seconds()
+    out["projected_pct"] = round(min(last["used_pct"] + rate * ahead, 100.0), 1)
+    if rate > 0 and last["used_pct"] < 100:
+        full = last["read_at"] + timedelta(seconds=(100 - last["used_pct"]) / rate)
+        out["full_at"] = iso(full) if full < resets else None
+    return out
 
 
 def hub_limits(readings: Iterable[Mapping[str, Any]], now: datetime) -> list[dict[str, Any]]:
@@ -427,8 +453,9 @@ def hub_limits(readings: Iterable[Mapping[str, Any]], now: datetime) -> list[dic
                 "read_at": iso(last["read_at"]),
                 "status": last["status"],
                 "source": last["source"],
+                "machine": last.get("machine"),
                 "reset_since": bool(last["resets_at"] and last["resets_at"] <= now),
-                "projected_pct": _projection(series, now),
+                **_pace(series, now),
                 "points": [
                     {"read_at": iso(r["read_at"]), "used_pct": round(r["used_pct"], 1)}
                     for r in series
@@ -436,6 +463,50 @@ def hub_limits(readings: Iterable[Mapping[str, Any]], now: datetime) -> list[dic
             }
         )
     return out
+
+
+def _days_in_month(day: date) -> int:
+    nxt = date(day.year + day.month // 12, day.month % 12 + 1, 1)
+    return (nxt - date(day.year, day.month, 1)).days
+
+
+def plan_value(
+    periods: Sequence[Mapping[str, Any]], days: Sequence[Mapping[str, Any]], frm: date, to: date
+) -> dict[str, Any] | None:
+    """API-equivalent spend over the range next to what the plan cost for the same days."""
+    if not periods:
+        return None
+    starts = [p["starts_on"] for p in periods]
+    plan_usd = 0.0
+    day = max(frm, starts[0])
+    while day <= to:
+        period = periods[bisect.bisect_right(starts, day) - 1]
+        plan_usd += period["monthly_usd"] / _days_in_month(day)
+        day += timedelta(days=1)
+    api = sum(d["usd"] or 0.0 for d in days if d["kind"] == "api_equivalent")
+    current = periods[-1]
+    return {
+        "plan": current["plan"],
+        "monthly_usd": current["monthly_usd"],
+        "since": max(frm, starts[0]).isoformat(),
+        "plan_usd": usd(plan_usd),
+        "api_equivalent_usd": usd(api),
+        "multiple": round(api / plan_usd, 1) if plan_usd else None,
+    }
+
+
+def probe_due(state: Mapping[str, Any], now: datetime) -> dict[str, Any]:
+    """Whether the homelab probe reads now: only in an open 5-hour window or after activity."""
+    last_read = state.get("last_read")
+    if last_read and now - last_read < PROBE_EVERY:
+        return {"due": False, "reason": "fresh"}
+    resets = state.get("five_hour_resets")
+    if resets and resets > now:
+        return {"due": True, "reason": "window_open"}
+    active = state.get("last_active")
+    if active and now - active < ACTIVE_WITHIN:
+        return {"due": True, "reason": "active"}
+    return {"due": False, "reason": "idle"}
 
 
 def build_hub(
@@ -446,12 +517,16 @@ def build_hub(
     billed: Mapping[str, Any],
 ) -> dict[str, Any]:
     days, unpriced = hub_days(rows)
+    local = ZoneInfo(timezone)
     return {
         "range": {"from": iso(frm), "to": iso(to)},
         "timezone": timezone,
         "prices_as_of": PRICES_AS_OF,
         "limits": hub_limits(rows["readings"], to),
         "billed": dict(billed),
+        "value": plan_value(
+            rows["plans"], days, frm.astimezone(local).date(), to.astimezone(local).date()
+        ),
         "days": days,
         "sources": [
             {
