@@ -19,6 +19,7 @@ BODY = {
     "read_only": False,
     "evidence_required": False,
     "description": "Code behind a check.",
+    "mcp": {},
     "author": "pryce",
     "reason": "tune the budget",
 }
