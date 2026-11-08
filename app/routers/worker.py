@@ -7,11 +7,14 @@ can reach only these three routes. Disabled (503) when WORKER_KEY is empty.
 import hmac
 import logging
 import uuid
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
+from app.claude_usage import stats as usage_stats
+from app.claude_usage import store as usage_store
 from app.config import settings
 from app.jobs import change_result, service, store
 
@@ -199,3 +202,18 @@ async def finish(job_id: uuid.UUID, body: FinishRequest):
     logger.info("Job %s finished: %s", job_id, body.status)
     await service.on_finished(job)
     return {"recorded": True}
+
+
+@router.post("/limits/due")
+async def limits_due():
+    return usage_stats.probe_due(await usage_store.probe_state(), datetime.now(UTC))
+
+
+class LimitsReading(BaseModel):
+    rate_limit_info: dict[str, Any]
+
+
+@router.post("/limits/reading")
+async def limits_reading(body: LimitsReading):
+    now = datetime.now(UTC)
+    return {"added": await usage_store.add_reading(body.rate_limit_info, now, "probe", "homelab")}

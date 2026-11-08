@@ -1,8 +1,8 @@
 """Claude usage API: a key-gated batch ingest for the pusher, and API-key reads for the console."""
 
 import hmac
-from datetime import UTC, datetime, timedelta
-from typing import Annotated, Literal
+from datetime import UTC, date, datetime, timedelta
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
@@ -130,6 +130,46 @@ async def ingest_otlp_logs(request: Request):
         raise HTTPException(413, f"At most {store.MAX_ROWS} api_request events per export")
     await store.ingest_api_requests(rows)
     return {}
+
+
+class ActivityRequest(BaseModel):
+    machine: str = Field(..., pattern=MACHINE_PATTERN)
+
+
+@ingest_router.post("/activity")
+async def ingest_activity(body: ActivityRequest):
+    await store.touch_activity(body.machine, datetime.now(UTC))
+    return {}
+
+
+class ReadingRequest(BaseModel):
+    machine: str = Field(..., pattern=MACHINE_PATTERN)
+    read_at: datetime | None = None
+    rate_limit_info: dict[str, Any]
+
+
+@router.post("/readings")
+async def add_reading(body: ReadingRequest):
+    read_at = body.read_at or datetime.now(UTC)
+    added = await store.add_reading(body.rate_limit_info, read_at, "dispatch", body.machine)
+    return {"added": added}
+
+
+class PlanPeriod(BaseModel):
+    starts_on: date
+    plan: Text
+    monthly_usd: float = Field(..., ge=0, le=10_000)
+
+
+@router.get("/plans")
+async def plans():
+    return {"periods": await store.plan_periods()}
+
+
+@router.post("/plans")
+async def set_plan(body: PlanPeriod):
+    await store.set_plan_period(body.starts_on, body.plan, body.monthly_usd)
+    return {"periods": await store.plan_periods()}
 
 
 def _window(days: int) -> tuple[datetime, datetime]:
