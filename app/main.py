@@ -25,6 +25,7 @@ from app.routers import (
     activity,
     agent_profiles,
     approvals,
+    audio,
     audit,
     automations,
     backlog,
@@ -123,6 +124,9 @@ app.add_middleware(
 
 # Health is public; all other routes require API key when API_KEY is set
 app.include_router(health.router)
+app.include_router(
+    audio.router, prefix="/audio", tags=["audio"], dependencies=[Depends(verify_api_key)]
+)
 app.include_router(
     chat.router, prefix="/chat", tags=["chat"], dependencies=[Depends(verify_api_key)]
 )
