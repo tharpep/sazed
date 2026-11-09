@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     default_tts_engine: str = "kokoro"
     default_tts_voice: str = "am_adam"
     whisper_stt_url: str = "http://192.168.50.117:8008/v1"
-    whisper_stt_prompt: str = "Pryce, Sazed."
+    whisper_stt_prompt: str = "Hey Sazed, Pryce."
 
     # Anthropic
     anthropic_api_key: str = ""

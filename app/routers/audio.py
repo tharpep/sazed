@@ -49,10 +49,11 @@ async def _stream_fish(
     headers = {
         "Authorization": f"Bearer {settings.fish_audio_api_key}",
         "Content-Type": "application/json",
+        "model": "drama-3",
     }
     payload = {
         "text": text,
-        "reference_id": voice,
+        "reference_id": voice if voice else None,
         "format": response_format,
         "streaming": True,
     }
