@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.config import settings
+from app.http_client import get_client
 
 router = APIRouter()
 
@@ -22,53 +23,37 @@ class TranscribeResponse(BaseModel):
     text: str
 
 
-async def _stream_kokoro(text: str, voice: str, response_format: str) -> AsyncIterator[bytes]:
-    payload = {
-        "model": "kokoro",
-        "voice": voice,
-        "input": text,
-        "response_format": response_format,
-    }
-    client = httpx.AsyncClient(timeout=30.0)
+async def _stream_tts_response(
+    url: str,
+    payload: dict,
+    headers: dict | None,
+    media_type: str,
+    service_name: str,
+) -> StreamingResponse:
+    client = get_client()
+    req = client.build_request("POST", url, json=payload, headers=headers)
     try:
-        url = f"{settings.kokoro_tts_url}/audio/speech"
-        async with client.stream("POST", url, json=payload) as resp:
-            if resp.status_code != 200:
-                body = await resp.aread()
-                detail = body.decode(errors="ignore")
-                raise HTTPException(status_code=resp.status_code, detail=detail)
+        resp = await client.send(req, stream=True)
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail=f"{service_name} service timed out")
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"{service_name} service unreachable: {exc}"
+        )
+
+    if resp.status_code != 200:
+        body = await resp.aread()
+        await resp.aclose()
+        raise HTTPException(status_code=resp.status_code, detail=body.decode(errors="ignore"))
+
+    async def _body_stream() -> AsyncIterator[bytes]:
+        try:
             async for chunk in resp.aiter_bytes(chunk_size=4096):
                 yield chunk
-    finally:
-        await client.aclose()
+        finally:
+            await resp.aclose()
 
-
-async def _stream_fish(
-    text: str, voice: str | None, response_format: str
-) -> AsyncIterator[bytes]:
-    headers = {
-        "Authorization": f"Bearer {settings.fish_audio_api_key}",
-        "Content-Type": "application/json",
-        "model": "drama-3",
-    }
-    payload = {
-        "text": text,
-        "reference_id": voice if voice else None,
-        "format": response_format,
-        "streaming": True,
-    }
-    client = httpx.AsyncClient(timeout=30.0)
-    try:
-        url = "https://api.fish.audio/v1/tts"
-        async with client.stream("POST", url, headers=headers, json=payload) as resp:
-            if resp.status_code != 200:
-                body = await resp.aread()
-                detail = body.decode(errors="ignore")
-                raise HTTPException(status_code=resp.status_code, detail=detail)
-            async for chunk in resp.aiter_bytes(chunk_size=4096):
-                yield chunk
-    finally:
-        await client.aclose()
+    return StreamingResponse(_body_stream(), media_type=media_type)
 
 
 @router.post("/speech")
@@ -81,13 +66,31 @@ async def synthesize_speech(body: SpeechRequest):
     media_type = "audio/mpeg" if body.format == "mp3" else "audio/wav"
 
     if engine == "kokoro":
-        stream = _stream_kokoro(body.text, voice, body.format)
-        return StreamingResponse(stream, media_type=media_type)
+        url = f"{settings.kokoro_tts_url}/audio/speech"
+        payload = {
+            "model": "kokoro",
+            "voice": voice,
+            "input": body.text,
+            "response_format": body.format,
+        }
+        return await _stream_tts_response(url, payload, None, media_type, "Kokoro TTS")
+
     if engine == "fish":
         if not settings.fish_audio_api_key:
             raise HTTPException(status_code=503, detail="Fish Audio API key not configured")
-        stream = _stream_fish(body.text, body.voice, body.format)
-        return StreamingResponse(stream, media_type=media_type)
+        url = "https://api.fish.audio/v1/tts"
+        headers = {
+            "Authorization": f"Bearer {settings.fish_audio_api_key}",
+            "Content-Type": "application/json",
+            "model": "drama-3",
+        }
+        payload = {
+            "text": body.text,
+            "reference_id": body.voice if body.voice else None,
+            "format": body.format,
+            "streaming": True,
+        }
+        return await _stream_tts_response(url, payload, headers, media_type, "Fish Audio")
 
     raise HTTPException(status_code=400, detail=f"Unsupported TTS engine: {engine}")
 
@@ -99,21 +102,24 @@ async def transcribe_audio(request: Request):
         raise HTTPException(status_code=400, detail="Empty audio content")
 
     content_type = request.headers.get("content-type", "audio/wav")
-    client = httpx.AsyncClient(timeout=30.0)
+    client = get_client()
+    url = f"{settings.whisper_stt_url}/audio/transcriptions"
+    files = {"file": ("audio.wav", content, content_type)}
+    data = {
+        "model": "systran/faster-whisper-base.en",
+        "prompt": settings.whisper_stt_prompt,
+    }
     try:
-        url = f"{settings.whisper_stt_url}/audio/transcriptions"
-        files = {"file": ("audio.wav", content, content_type)}
-        data = {
-            "model": "systran/faster-whisper-base.en",
-            "prompt": settings.whisper_stt_prompt,
-        }
         resp = await client.post(url, files=files, data=data)
-        if resp.status_code != 200:
-            raise HTTPException(status_code=resp.status_code, detail=resp.text)
-        result = resp.json()
-        return TranscribeResponse(text=result.get("text", "").strip())
-    finally:
-        await client.aclose()
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Whisper transcription timed out")
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail=f"Whisper service unreachable: {exc}")
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+    result = resp.json()
+    return TranscribeResponse(text=result.get("text", "").strip())
 
 
 @router.get("/voices")
