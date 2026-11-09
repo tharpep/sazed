@@ -1,9 +1,9 @@
 from collections.abc import AsyncIterator
 from typing import Literal
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-import httpx
 from pydantic import BaseModel
 
 from app.config import settings

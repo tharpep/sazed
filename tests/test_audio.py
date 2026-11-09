@@ -66,6 +66,8 @@ async def test_transcribe_audio_success(client, monkeypatch):
         return MockResponse()
 
     monkeypatch.setattr("httpx.AsyncClient.post", mock_post)
-    resp = client.post("/audio/transcribe", content=b"dummy_audio_bytes", headers={"content-type": "audio/wav"})
+    resp = client.post(
+        "/audio/transcribe", content=b"dummy_audio_bytes", headers={"content-type": "audio/wav"}
+    )
     assert resp.status_code == 200
     assert resp.json() == {"text": "Hello Sazed, check calendar."}
