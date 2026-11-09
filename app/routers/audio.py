@@ -1,7 +1,7 @@
 from collections.abc import AsyncIterator
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 import httpx
 from pydantic import BaseModel
@@ -16,6 +16,10 @@ class SpeechRequest(BaseModel):
     voice: str | None = None
     engine: Literal["kokoro", "fish"] | None = None
     format: str = "mp3"
+
+
+class TranscribeResponse(BaseModel):
+    text: str
 
 
 async def _stream_kokoro(text: str, voice: str, response_format: str) -> AsyncIterator[bytes]:
@@ -85,6 +89,30 @@ async def synthesize_speech(body: SpeechRequest):
         return StreamingResponse(stream, media_type=media_type)
 
     raise HTTPException(status_code=400, detail=f"Unsupported TTS engine: {engine}")
+
+
+@router.post("/transcribe", response_model=TranscribeResponse)
+async def transcribe_audio(request: Request):
+    content = await request.body()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty audio content")
+
+    content_type = request.headers.get("content-type", "audio/wav")
+    client = httpx.AsyncClient(timeout=30.0)
+    try:
+        url = f"{settings.whisper_stt_url}/audio/transcriptions"
+        files = {"file": ("audio.wav", content, content_type)}
+        data = {
+            "model": "systran/faster-whisper-base.en",
+            "prompt": settings.whisper_stt_prompt,
+        }
+        resp = await client.post(url, files=files, data=data)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        result = resp.json()
+        return TranscribeResponse(text=result.get("text", "").strip())
+    finally:
+        await client.aclose()
 
 
 @router.get("/voices")

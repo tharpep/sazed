@@ -46,3 +46,26 @@ async def test_synthesize_speech_kokoro_mock(client, monkeypatch):
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "audio/mpeg"
     assert resp.content == b"fake_mp3_chunk_1fake_mp3_chunk_2"
+
+
+def test_transcribe_rejects_empty_file(client):
+    """Proves transcription rejects empty audio uploads."""
+    resp = client.post("/audio/transcribe", content=b"", headers={"content-type": "audio/wav"})
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_transcribe_audio_success(client, monkeypatch):
+    """Proves transcription returns extracted text from Whisper response."""
+    class MockResponse:
+        status_code = 200
+        def json(self):
+            return {"text": "Hello Sazed, check calendar."}
+
+    async def mock_post(*args, **kwargs):
+        return MockResponse()
+
+    monkeypatch.setattr("httpx.AsyncClient.post", mock_post)
+    resp = client.post("/audio/transcribe", content=b"dummy_audio_bytes", headers={"content-type": "audio/wav"})
+    assert resp.status_code == 200
+    assert resp.json() == {"text": "Hello Sazed, check calendar."}
