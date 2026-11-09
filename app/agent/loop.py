@@ -223,14 +223,15 @@ async def _build_system_prompt(mode: str = "chat", user_message: str = "", locat
                 "- Write strictly for the ear: use natural contractions (it's, you'll, don't), "
                 "conversational transitions (Well, Honestly, Looks like), and phonetic numbers "
                 "(twenty dollars, not $20).\n"
-                "- Keep spoken answers compact: aim for 1-3 natural spoken clauses. Never monologue.\n"
+                "- Keep spoken answers compact: aim for 1-3 natural spoken clauses. "
+                "Never monologue.\n"
                 "- Zero markdown, bullet points, asterisks, URLs, emoji, or headers.\n"
                 "- Tone: Attentive, warm, and poised. Answer the core question immediately.\n"
                 "- Never open with filler words like 'certainly', 'absolutely', or 'of course'.\n"
                 "- After using a tool, summarize the result in plain spoken speech — "
                 "do not repeat raw data, dates in ISO format, or structured output.\n"
-                "- Yield the floor naturally: end with a crisp closing thought or a single focused "
-                "question if action is required, without robotic pleasantries."
+                "- Yield the floor naturally: end with a crisp closing thought or a "
+                "single focused question if action is required, without robotic pleasantries."
             ),
         })
     return blocks
