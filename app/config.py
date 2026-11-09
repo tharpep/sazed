@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     # Upstream gateway — single URL, single key for all integrations
     gateway_url: str = ""
     gateway_api_key: str = ""
+    kokoro_tts_url: str = "http://192.168.50.117:8880/v1"
+    fish_audio_api_key: str = ""
+    default_tts_engine: str = "kokoro"
+    default_tts_voice: str = "am_adam"
 
     # Anthropic
     anthropic_api_key: str = ""
