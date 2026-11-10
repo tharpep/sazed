@@ -24,7 +24,7 @@ from app.agent.client import (
     tool_sig,
     with_message_cache,
 )
-from app.agent.memory import format_for_prompt, load_memory, load_prompt_memory
+from app.agent.memory import format_for_prompt, load_prompt_memory
 from app.agent.procedures import format_procedures_for_prompt, load_relevant_procedures
 from app.agent.session import compress_context
 from app.agent.tools import (
@@ -178,7 +178,8 @@ async def _build_system_prompt(mode: str = "chat", user_message: str = "") -> li
                 "which document holds the answer. Use web_search when the knowledge base has "
                 "nothing useful or the topic requires current information.\n"
                 "- Email: use list_emails with filters before fetching full message content.\n"
-                "- Places: when the user asks about nearby places or 'near me', use the coordinates in the latest message's bracketed prefix if it has any.\n"
+                "- Places: when the user asks about nearby places or 'near me', use the "
+                "coordinates in the latest message's bracketed prefix if it has any.\n"
                 "- Available tools: you only receive tools relevant to the current request. "
                 "If you need a capability not shown in your current tools, call `request_tools` "
                 "with the relevant category — don't tell the user you can't do something until you've tried expanding first.\n\n"
