@@ -25,6 +25,7 @@ class ChatRequest(BaseModel):
     timezone: str | None = None
     location: UserLocation | None = None
     session_type: str = "chat"
+    screen: list[str] | None = None
 
 
 class ChatResponse(BaseModel):
@@ -40,7 +41,7 @@ async def chat(body: ChatRequest):
     logger.debug(f"POST /chat: session={body.session_id}, message='{body.message[:120]}'")
     session_id, response_text = await run_turn(
         body.session_id, body.message, body.mode, body.timezone, body.location,
-        session_type=body.session_type,
+        session_type=body.session_type, screen=body.screen,
     )
     logger.debug(f"POST /chat: done, session={session_id}, response='{response_text[:120]}'")
     return ChatResponse(session_id=session_id, response=response_text)
@@ -55,7 +56,7 @@ async def chat_stream(body: ChatRequest, request: Request):
     return StreamingResponse(
         run_turn_stream(
             body.session_id, body.message, body.mode, body.timezone, body.location,
-            session_type=body.session_type, request=request,
+            session_type=body.session_type, screen=body.screen, request=request,
         ),
         media_type="text/event-stream",
         headers={

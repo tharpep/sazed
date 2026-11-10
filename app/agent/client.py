@@ -42,13 +42,14 @@ def get_client() -> anthropic.AsyncAnthropic:
 _THINKING_MODEL_BETAS = "thinking-binding-controls-2026-08-01,server-side-fallback-2026-07-01"
 
 
-def model_params(model: str) -> dict[str, Any]:
+def model_params(model: str, effort: str = "medium") -> dict[str, Any]:
     """Per-model kwargs for messages.create / messages.stream.
 
     All three 5.5 models think by default. Haiku runs with thinking off, matching Haiku 4.5's
     behaviour, so short utility calls (max_tokens=5 etc.) and `content[0].text` reads keep
     working. Sonnet (front door) and Opus (escalation, think loop) keep adaptive thinking at
-    medium effort; Opus 5.5 can't turn thinking off at all. Callers must size max_tokens for
+    medium effort unless the caller passes a lower `effort` (voice turns); Opus 5.5 can't turn
+    thinking off at all. Callers must size max_tokens for
     thinking and pass thinking blocks back within a request.
     """
     if model == settings.haiku_model:
@@ -61,7 +62,7 @@ def model_params(model: str) -> dict[str, Any]:
                     "type": "adaptive",
                     "block_binding": {"prefix_mismatch_behavior": "drop_block"},
                 },
-                "output_config": {"effort": "medium"},
+                "output_config": {"effort": effort},
                 "fallbacks": "default",
             },
         }
