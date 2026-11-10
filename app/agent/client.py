@@ -22,6 +22,12 @@ _client: anthropic.AsyncAnthropic | None = None
 # | kb_summary | procedure | think
 
 
+# Tools and the system prompt are identical across a session's messages, which can be minutes
+# apart on a phone, so they take the 1h cache. The moving message-tail breakpoint stays at the
+# default 5m. The API requires longer TTLs to come before shorter ones in tools, system, messages.
+CACHE_1H = {"type": "ephemeral", "ttl": "1h"}
+
+
 def get_client() -> anthropic.AsyncAnthropic:
     global _client
     if _client is None:

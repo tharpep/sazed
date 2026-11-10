@@ -30,7 +30,7 @@ flowchart TB
         end
 
         subgraph AGENT["  Agent Core  "]
-            loop["agent/loop.py\nrun_turn  ·  run_turn_stream\nmax 5 turns per request"]
+            loop["agent/loop.py\nrun_turn  ·  run_turn_stream\nmax 20 turns per request"]
             tools_reg["agent/tools.py\nTOOLS registry — ToolDef dataclass\nexecute_tool  ·  get_tool_schemas\npath param interpolation"]
             session["agent/session.py\nload / save messages\npost-session fact extraction\n+ summarization via Haiku"]
             memory["agent/memory.py\nload_memory  ·  upsert_fact\nformat_for_prompt\ngrouped by fact_type"]
@@ -57,7 +57,7 @@ flowchart TB
     end
 
     GW["api-gateway\nsettings.gateway_url\nX-API-Key: settings.gateway_api_key"]
-    ANTH["Anthropic\nAsyncAnthropic\nHaiku (short/early turns)\nSonnet (long / turn > 2)"]
+    ANTH["Anthropic\nAsyncAnthropic\nSonnet (front door)\nOpus (request_escalation)"]
 
     FE -->|"POST /chat · /conversations\nGET /memory · /kb"| r_chat
     FE --> r_conv
@@ -116,12 +116,12 @@ flowchart TB
 | Step | Detail |
 |---|---|
 | **1. Session** | `INSERT INTO sessions … ON CONFLICT DO NOTHING`. Load all prior `messages` ordered by timestamp. |
-| **2. Prompt** | System: today's date + `format_for_prompt(load_memory())` — facts grouped by `fact_type`. |
-| **3. Model select** | Haiku if turn 0–2 and message ≤ 500 chars; Sonnet otherwise. |
+| **2. Prompt** | System: base prompt + every stored fact (`format_for_prompt(load_prompt_memory())`, grouped by `fact_type`, capped per type), both cached for 1h. |
+| **3. Model select** | Sonnet; Opus for the rest of the turn once Sonnet calls `request_escalation`. |
 | **4. LLM call** | `AsyncAnthropic.messages.create(tools=get_tool_schemas(), max_tokens=4096)`. Streaming variant uses `client.messages.stream`. |
 | **5. tool_use** | For each `tool_use` block: `execute_tool(name, input)` → INTERNAL (`_execute_internal`) or gateway HTTP call. Result appended as `tool_result`. |
 | **6. Persist** | Each assistant turn + tool results saved to `messages` immediately. |
-| **7. Loop** | Repeat until `stop_reason = end_turn` or 5 turns exceeded. |
+| **7. Loop** | Repeat until `stop_reason = end_turn` or `agent_max_turns` (20) exceeded. |
 | **8. Finalize** | Update `session.last_activity` and `message_count`. Return text (or SSE: `session`, `tool_start`, `tool_done`, `ui_block`, `text_delta`, `done`). |
 
 **Post-session processing** (`/conversations/{id}/process`): Haiku extracts new personal facts from the conversation; `upsert_fact()` saves with confidence-gated overwrite.
@@ -154,7 +154,7 @@ flowchart LR
 
     subgraph SAZ["  Sazed  "]
         s_routes["FastAPI\n/chat  /chat/stream\n/conversations  /memory\n/kb  /tools"]
-        s_agent["Agent loop\nAnthropic tool_use\nHaiku → Sonnet  ·  max 5 turns"]
+        s_agent["Agent loop\nAnthropic tool_use\nSonnet → Opus on escalation  ·  max 20 turns"]
         s_db[("PostgreSQL\nsessions · messages\nagent_memory")]
     end
 
@@ -170,7 +170,7 @@ flowchart LR
 
     subgraph EXT["  External Services  "]
         google["Google APIs\nCalendar · Tasks · Gmail · Drive"]
-        anthropic["Anthropic\nClaude Haiku + Sonnet"]
+        anthropic["Anthropic\nClaude Sonnet + Opus (Haiku for background calls)"]
         openrouter["OpenRouter"]
         pushover["Pushover"]
     end
