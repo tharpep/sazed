@@ -23,7 +23,7 @@ _CHAINS = """
 
 _ACTIVE = ("queued", "running", "needs_approval", "needs_input", "paused")
 
-OFF_BOARD = ("dismissed", "stale")
+OFF_BOARD = ("dismissed", "stale", "parked")
 
 
 def _job(rec) -> dict[str, Any]:

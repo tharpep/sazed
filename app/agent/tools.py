@@ -2420,9 +2420,9 @@ TOOLS: list[ToolDef] = [
         description=(
             "List Pryce's backlog: ideas (from the daily scout), bugs, gaps, optimizations, "
             "planned features and known issues, with status and any PR. view='open' (default: "
-            "new and shortlisted), 'done' (approved or done), 'dismissed' (dismissed or stale) "
-            "or 'all'. Pryce approves or dismisses items in the console (Backlog page); you "
-            "can't."
+            "new and shortlisted), 'done' (approved or done), 'dismissed' (dismissed or stale), "
+            "'parked' (kept for someday, off the board, never goes stale) or 'all'. Pryce "
+            "approves or dismisses items in the console (Backlog page); you can't."
         ),
         input_schema={
             "type": "object",
@@ -2433,7 +2433,9 @@ TOOLS: list[ToolDef] = [
                         "idea", "bug", "gap", "optimization", "planned", "known_issue", "guard"
                     ],
                 },
-                "view": {"type": "string", "enum": ["open", "done", "dismissed", "all"]},
+                "view": {
+                    "type": "string", "enum": ["open", "done", "dismissed", "parked", "all"]
+                },
             },
         },
         method="INTERNAL",

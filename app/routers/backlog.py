@@ -33,7 +33,7 @@ class ItemCreate(BaseModel):
 
 
 class ItemUpdate(BaseModel):
-    status: Literal["new", "shortlisted", "done", "dismissed"] | None = None
+    status: Literal["new", "shortlisted", "done", "dismissed", "parked"] | None = None
     type: ItemType | None = None
     note: str | None = Field(None, max_length=4000)
     title: str | None = Field(None, min_length=3, max_length=200)
@@ -54,7 +54,7 @@ class ApproveRequest(BaseModel):
 @router.get("")
 async def list_items(
     type: ItemType | None = Query(None),
-    view: Literal["open", "done", "dismissed", "all"] = Query("open"),
+    view: Literal["open", "done", "dismissed", "parked", "all"] = Query("open"),
     limit: int = Query(200, ge=1, le=500),
 ):
     return {"items": await store.list_items(type, view, limit)}

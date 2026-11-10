@@ -73,6 +73,7 @@ Tests live in `tests/` (pytest, pytest-asyncio in auto mode). No DB or network: 
 **Backlog (`app/backlog/`, migration 005, plans/07 section 9b):**
 - `backlog_items` holds ideas, bugs, gaps, optimizations, planned work and known issues.
 - **Never deleted.** Dismissed and stale items stay so `store.similar` dedupe keeps them from coming back.
+- **Parked** items are kept for someday: off the board (`board.store.OFF_BOARD`), out of the inbox and the open views, and never marked stale. `GET /backlog?view=parked` lists them; PATCH `status: new` brings one back.
 - REST `/backlog`: list, get, create, patch, and `POST /backlog/{id}/approve {repo, note}`.
 - **Priority:** `rank` is Pryce's saved pick-up order across open items (1 = next). `POST /backlog/{id}/move {position}` inserts there and shifts the others (`null` removes the rank); `store.normalize_ranks` keeps ranks contiguous as items leave the open views. The weekly triage only shortlists and never touches rank. Approve queues a change code task right away (requested_by `console`) and stores the `job_id`.
 - **Scout and triage** are agents (the `agent` automation action, see Agents below):
