@@ -14,6 +14,7 @@ from urllib.parse import quote, urlparse
 import cachetools
 import httpx
 
+from app.agent.client import CACHE_1H
 from app.agent.memory import upsert_fact
 from app.automations import tools as automation_tools
 from app.automations.tools import AUTOMATION_TOOL_NAMES
@@ -2683,7 +2684,7 @@ def get_tool_schemas() -> list[dict]:
         }
         for t in TOOLS
     ]
-    schemas[-1]["cache_control"] = {"type": "ephemeral"}
+    schemas[-1]["cache_control"] = CACHE_1H
     return schemas
 
 
@@ -2782,7 +2783,7 @@ def get_think_tool_schemas() -> list[dict]:
         if t.name in THINK_TOOLS
     ]
     if schemas:
-        schemas[-1]["cache_control"] = {"type": "ephemeral"}
+        schemas[-1]["cache_control"] = CACHE_1H
     return schemas
 
 
@@ -2904,7 +2905,7 @@ def select_tools(user_message: str) -> list[dict]:
         if t.name in selected_names
     ]
     if schemas:
-        schemas[-1]["cache_control"] = {"type": "ephemeral"}
+        schemas[-1]["cache_control"] = CACHE_1H
     return schemas
 
 
@@ -2921,7 +2922,7 @@ def tools_from_names(names: list[str]) -> list[dict]:
                 {"name": td.name, "description": td.description, "input_schema": td.input_schema}
             )
     if schemas:
-        schemas[-1]["cache_control"] = {"type": "ephemeral"}
+        schemas[-1]["cache_control"] = CACHE_1H
     return schemas
 
 
@@ -2951,7 +2952,7 @@ def expand_tools(current_tools: list[dict], categories: list[str]) -> tuple[list
     if expanded and "cache_control" in expanded[-1]:
         expanded[-1] = {k: v for k, v in expanded[-1].items() if k != "cache_control"}
     expanded.extend(new_defs)
-    expanded[-1]["cache_control"] = {"type": "ephemeral"}
+    expanded[-1]["cache_control"] = CACHE_1H
 
     added_names = [t["name"] for t in new_defs]
     msg = f"Tools expanded. Added {len(added_names)} tools from {categories}: {', '.join(added_names)}."
