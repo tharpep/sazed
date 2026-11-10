@@ -10,7 +10,7 @@ from app.db import get_pool
 
 TYPES = ("idea", "bug", "gap", "optimization", "planned", "known_issue", "guard")
 OPEN = ("new", "shortlisted")
-STATUSES = ("new", "shortlisted", "approved", "done", "dismissed", "stale")
+STATUSES = ("new", "shortlisted", "approved", "done", "dismissed", "stale", "parked")
 
 _STOP = set(
     "a an the and or for to of in on with into via by is are be use using add support new "
@@ -56,11 +56,12 @@ _SELECT = """
 async def list_items(
     type_: str | None = None, view: str = "open", limit: int = 200
 ) -> list[dict[str, Any]]:
-    """view: open (new, shortlisted), done (approved, done), dismissed (dismissed, stale), all."""
+    """view: open (new, shortlisted), done, dismissed (dismissed, stale), parked or all."""
     statuses = {
         "open": list(OPEN),
         "done": ["approved", "done"],
         "dismissed": ["dismissed", "stale"],
+        "parked": ["parked"],
         "all": list(STATUSES),
     }[view]
     rows = await get_pool().fetch(
