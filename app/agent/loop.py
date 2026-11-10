@@ -35,6 +35,7 @@ from app.agent.tools import (
     select_tools,
     tools_from_names,
 )
+from app.agent.confirm_card import build_confirm_card
 from app.agent.ui_blocks import build_ui_block
 from app.config import settings
 from app.db import get_pool
@@ -51,6 +52,9 @@ _CONFIRM_RE = re.compile(
     re.I,
 )
 _CANCEL_RE = re.compile(r"^\s*(?:n|no|nope|nah|cancel|stop|never\s*mind)[\s.!]*$", re.I)
+
+_SCREEN_MAX_LINES = 12
+_SCREEN_LINE_CHARS = 200
 
 _CONFIRMATION_PROMPT = (
     "CONFIRMATION REQUIRED: Describe exactly what you are about to do and ask the user to confirm. "
@@ -150,6 +154,21 @@ def _select_model(escalated: bool) -> tuple[str, str]:
     return settings.sonnet_model, "front_door"
 
 
+def _voice_effort(mode: str, model: str) -> str:
+    """Voice turns think at low effort on Sonnet; an escalated Opus turn keeps its full effort."""
+    return "low" if mode == "voice" and model == settings.sonnet_model else "medium"
+
+
+def _screen_block(screen: list[str] | None) -> str:
+    """The "[On screen]" prefix block for the lines the user is looking at, "* " marking a tap."""
+    lines = [line.strip()[:_SCREEN_LINE_CHARS] for line in (screen or [])[:_SCREEN_MAX_LINES]]
+    lines = [line for line in lines if line]
+    if not lines:
+        return ""
+    body = "\n".join(line if line.startswith("* ") else f"- {line}" for line in lines)
+    return f"[On screen]\n{body}\n"
+
+
 async def _build_system_prompt(mode: str = "chat", user_message: str = "") -> list[dict[str, Any]]:
     memory_section = format_for_prompt(await load_prompt_memory())
     blocks: list[dict[str, Any]] = [
@@ -225,7 +244,12 @@ async def _build_system_prompt(mode: str = "chat", user_message: str = "") -> li
                 "- After using a tool, summarize the result in plain spoken speech — "
                 "do not repeat raw data, dates in ISO format, or structured output.\n"
                 "- Yield the floor naturally: end with a crisp closing thought or a "
-                "single focused question if action is required, without robotic pleasantries."
+                "single focused question if action is required, without robotic pleasantries.\n"
+                "- The user can see any card you show. Give only the headline in one or two "
+                "short sentences, and never read out a list the card already shows.\n"
+                "- When the user says \"that\", \"this one\" or \"it\", resolve it against the "
+                "[On screen] lines in their message, preferring the line that starts with \"* \" "
+                "(the item they tapped)."
             ),
         })
     return blocks
@@ -380,6 +404,7 @@ async def _setup_turn(
     mode: str,
     timezone: str | None,
     location,
+    screen: list[str] | None = None,
 ) -> tuple[list, list, list]:
     """Load session messages, apply context window, append user message, build system prompt + tools.
 
@@ -405,11 +430,11 @@ async def _setup_turn(
     except ZoneInfoNotFoundError:
         tz = ZoneInfo("UTC")
     now = datetime.now(tz)
-    # Location rides in this stored prefix, not the system prompt: it changes per message, and
-    # a stored prefix keeps the history byte-stable.
+    # Location and the on-screen lines ride in this stored prefix, not the system prompt: they
+    # change per message, and a stored prefix keeps the history byte-stable.
     where = f" | lat {location.latitude}, lng {location.longitude}" if location else ""
     tz_prefix = f"[{now.strftime('%A, %B %d, %Y')} {now.strftime('%I:%M %p')} {tz.key}{where}]\n"
-    prefixed_message = tz_prefix + user_message
+    prefixed_message = tz_prefix + _screen_block(screen) + user_message
     messages.append({"role": "user", "content": prefixed_message})
     await _save_message(pool, sid, "user", prefixed_message)
     logger.debug(f"session {sid}: user message='{user_message[:120]}'")
@@ -602,6 +627,7 @@ async def run_turn(
     location=None,
     interactive: bool = True,
     session_type: str = "chat",
+    screen: list[str] | None = None,
 ) -> tuple[str, str]:
     """Run one user turn through the agent loop. Returns (session_id, response_text).
 
@@ -622,7 +648,9 @@ async def run_turn(
         sid, session_type,
     )
 
-    messages, system, tools = await _setup_turn(pool, sid, user_message, mode, timezone, location)
+    messages, system, tools = await _setup_turn(
+        pool, sid, user_message, mode, timezone, location, screen
+    )
 
     # Layer A: resolve any pending confirmation before running the agent loop
     if interactive and settings.confirmation_required:
@@ -647,7 +675,7 @@ async def run_turn(
             response = await asyncio.wait_for(
                 client.messages.create(
                     model=model,
-                    **model_params(model),
+                    **model_params(model, _voice_effort(mode, model)),
                     system=system,
                     messages=with_message_cache(elide_old_tool_results(messages)),
                     tools=tools,
@@ -767,7 +795,7 @@ async def run_turn(
             synth = await asyncio.wait_for(
                 client.messages.create(
                     model=synth_model,
-                    **model_params(synth_model),
+                    **model_params(synth_model, _voice_effort(mode, synth_model)),
                     system=system,
                     messages=with_message_cache(elide_old_tool_results(messages)),
                     max_tokens=16000,  # Sonnet/Opus think; thinking counts toward max_tokens
@@ -800,6 +828,7 @@ async def run_turn_stream(
     interactive: bool = True,
     session_type: str = "chat",
     request: Request | None = None,
+    screen: list[str] | None = None,
 ) -> AsyncIterator[str]:
     """
     Run one user turn through the agent loop, yielding SSE-formatted strings.
@@ -816,7 +845,7 @@ async def run_turn_stream(
         event: session    data: {"session_id": "..."}                              — before first LLM call
         event: tool_start data: {"name": "..."}                                    — before each tool execution
         event: tool_done  data: {"name": "...", "status": "success"|"error"|"awaiting_confirmation", ...}
-        event: ui_block   data: {"component": "...", "props": {...}}               — chat mode only
+        event: ui_block   data: {"component": "...", "props": {...}}   — tool cards, ConfirmCard
         event: text_delta data: {"text": "..."}                                    — streaming text tokens
         event: done       data: {}                                                 — after session persisted
     """
@@ -834,7 +863,7 @@ async def run_turn_stream(
         )
 
         messages, system, tools = await _setup_turn(
-            pool, sid, user_message, mode, timezone, location
+            pool, sid, user_message, mode, timezone, location, screen
         )
 
         yield f"event: session\ndata: {json.dumps({'session_id': session_id})}\n\n"
@@ -871,7 +900,7 @@ async def run_turn_stream(
                 async with asyncio.timeout(settings.turn_timeout_seconds):
                     async with client.messages.stream(
                         model=model,
-                        **model_params(model),
+                        **model_params(model, _voice_effort(mode, model)),
                         system=system,
                         messages=with_message_cache(elide_old_tool_results(messages)),
                         tools=tools,
@@ -975,6 +1004,8 @@ async def run_turn_stream(
                         "name": block.name, "status": "awaiting_confirmation", "error": None,
                     })
                     yield f"event: tool_done\ndata: {evt}\n\n"
+                    card = build_confirm_card(block.name, block.input)
+                    yield f"event: ui_block\ndata: {json.dumps(card)}\n\n"
                     tool_result_by_id[block.id] = {
                         "type": "tool_result",
                         "tool_use_id": block.id,
@@ -994,8 +1025,7 @@ async def run_turn_stream(
                         "error": tool_result.error,
                     }
                     yield f"event: tool_done\ndata: {json.dumps(tool_done_evt)}\n\n"
-                    # Display and voice have their own layouts; a card would replace the reply.
-                    if mode == "chat" and tool_result.status == "success":
+                    if tool_result.status == "success":
                         ui_block = build_ui_block(block.name, block.input, tool_result.content)
                         if ui_block:
                             yield f"event: ui_block\ndata: {json.dumps(ui_block)}\n\n"
@@ -1046,7 +1076,7 @@ async def run_turn_stream(
                 async with asyncio.timeout(settings.turn_timeout_seconds):
                     async with client.messages.stream(
                         model=synth_model,
-                        **model_params(synth_model),
+                        **model_params(synth_model, _voice_effort(mode, synth_model)),
                         system=system,
                         messages=with_message_cache(elide_old_tool_results(messages)),
                         max_tokens=16000,  # Sonnet/Opus think; thinking counts toward max_tokens
