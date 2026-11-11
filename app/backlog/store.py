@@ -173,12 +173,12 @@ async def update_item(item_id: uuid.UUID, **fields: Any) -> dict[str, Any] | Non
 
 
 async def close_for_merged_pr(repo: str, number: int) -> list[uuid.UUID]:
-    """Close the open cards linked to a merged PR. A card with a job keeps the job's stage logic."""
+    """Close the open cards linked to a merged PR. Job-driven cards are approved, so not open."""
     rows = await get_pool().fetch(
         """
         UPDATE backlog_items SET status = 'done', decided_at = NOW(), updated_at = NOW()
         WHERE lower(pr_repo) = lower($1) AND pr_number = $2
-          AND job_id IS NULL AND status = ANY($3::text[])
+          AND status = ANY($3::text[])
         RETURNING id
         """,
         repo,

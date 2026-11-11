@@ -115,7 +115,7 @@ async def test_a_pr_closed_unmerged_or_still_open_closes_nothing(ev):
     closes.assert_not_awaited()
 
 
-async def test_closing_only_touches_open_cards_without_a_job():
+async def test_closing_only_touches_open_cards():
     pool = MagicMock()
     pool.fetch = AsyncMock(return_value=[{"id": uuid.uuid4()}])
     with (
@@ -125,7 +125,7 @@ async def test_closing_only_touches_open_cards_without_a_job():
         ids = await store.close_for_merged_pr("tharpep/sazed", 12)
     sql, repo, number, statuses = pool.fetch.call_args.args
     assert len(ids) == 1
-    assert "job_id IS NULL" in sql
+    assert "job_id" not in sql
     assert (repo, number, statuses) == ("tharpep/sazed", 12, ["new", "shortlisted"])
 
 
@@ -148,3 +148,40 @@ def test_the_board_card_shows_the_link_and_the_doing_stage():
     assert card["session_link"] == {
         "session": "cc-7", "branch": "feature/x", "pr_repo": "tharpep/sazed", "pr_number": 12
     }  # fmt: skip
+
+
+def test_a_reopened_card_with_a_leftover_job_is_doing_then_done():
+    reopened = _item(session_label="cc-7", pr_number=12) | {"job_id": uuid.uuid4()}
+    job = {"status": "succeeded", "meta": {"pr_number": 3, "ci_state": "closed"}}
+    assert stages.item_stage(reopened, job)[0] == "doing"
+    assert stages.item_stage(reopened | {"status": "done"}, job)[0] == "done"
+
+
+@pytest.mark.parametrize("ref", ["a/b#99999999999", "a/b#0", "a/b#1234567890"])
+def test_a_pr_number_that_overflows_or_is_zero_is_refused(ref):
+    with pytest.raises(ValidationError):
+        router.SessionLink(pr=ref)
+
+
+def test_a_git_suffix_is_not_part_of_the_repo():
+    cols = router.SessionLink(pr="https://github.com/tharpep/sazed.git/pull/5").columns()
+    assert cols["pr_repo"] == "tharpep/sazed"
+
+
+async def test_a_partial_link_keeps_the_earlier_fields():
+    first = await _patch(router.ItemUpdate(link=router.SessionLink(session="cc-7", branch="b")))
+    second = await _patch(router.ItemUpdate(link=router.SessionLink(pr="tharpep/sazed#12")))
+    assert first == {"session_label": "cc-7", "session_branch": "b"}
+    assert second == {"pr_repo": "tharpep/sazed", "pr_number": 12}
+
+
+async def test_a_merge_that_closed_cards_is_recorded_as_accepted():
+    row = {"action_taken": None, "job_id": None, "item_id": None, "id": uuid.uuid4()}
+    with (
+        patch.object(service.backlog_store, "close_for_merged_pr", AsyncMock(return_value=[1])),
+        patch.object(service, "_facts", AsyncMock(return_value=policy.Facts())),
+        patch.object(service.store, "record", AsyncMock(return_value=row)) as record,
+    ):
+        await service.route_github(_event())
+    assert record.call_args.kwargs["decision"] == "accept"
+    assert "closed 1 linked" in record.call_args.kwargs["reason"]

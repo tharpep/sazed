@@ -44,7 +44,7 @@ class ItemCreate(BaseModel):
 
 
 _PR_REF = re.compile(
-    r"^(?:https://github\.com/)?(?P<repo>[\w.-]+/[\w.-]+?)(?:/pull/|#)(?P<number>\d+)/?$"
+    r"^(?:https://github\.com/)?(?P<repo>[\w.-]+/[\w.-]+?)(?:\.git)?(?:/pull/|#)(?P<number>[1-9]\d{0,8})/?$"
 )
 
 
@@ -64,13 +64,17 @@ class SessionLink(BaseModel):
         return self
 
     def columns(self) -> dict:
-        found = _PR_REF.match(self.pr.strip()) if self.pr else None
-        return {
-            "session_label": self.session,
-            "session_branch": self.branch,
-            "pr_repo": found["repo"] if found else None,
-            "pr_number": int(found["number"]) if found else None,
-        }
+        """Only the fields the caller sent, so a later partial link keeps the earlier ones."""
+        cols: dict = {}
+        if "session" in self.model_fields_set:
+            cols["session_label"] = self.session
+        if "branch" in self.model_fields_set:
+            cols["session_branch"] = self.branch
+        if "pr" in self.model_fields_set:
+            found = _PR_REF.match(self.pr.strip()) if self.pr else None
+            cols["pr_repo"] = found["repo"] if found else None
+            cols["pr_number"] = int(found["number"]) if found else None
+        return cols
 
 
 _NO_LINK = {"session_label": None, "session_branch": None, "pr_repo": None, "pr_number": None}

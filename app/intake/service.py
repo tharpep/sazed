@@ -85,6 +85,8 @@ async def route_github(ev: policy.GithubEvent) -> dict[str, Any]:
             verdict, reason = "ignore", f"{decision.action} refused: {e}"
         if refs.get("duplicate"):
             reason = "already in the backlog; linked the existing card"
+    if closed and verdict == "ignore" and decision.action is None:
+        verdict, reason = "accept", f"merged PR closed {len(closed)} linked card(s)"
     row = await store.record(
         source="github",
         event=ev.event,
