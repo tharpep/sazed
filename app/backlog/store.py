@@ -88,8 +88,15 @@ async def all_titles() -> list[str]:
     return [r["title"] for r in await get_pool().fetch("SELECT title FROM backlog_items")]
 
 
-async def find_duplicate(title: str) -> dict[str, Any] | None:
-    for rec in await get_pool().fetch("SELECT id, title, status FROM backlog_items"):
+async def find_duplicate(
+    title: str, statuses: tuple[str, ...] | None = None
+) -> dict[str, Any] | None:
+    """First recorded item whose title is similar; `statuses` limits the search (default: all)."""
+    rows = await get_pool().fetch(
+        "SELECT id, title, status FROM backlog_items WHERE $1::text[] IS NULL OR status = ANY($1)",
+        list(statuses) if statuses else None,
+    )
+    for rec in rows:
         if similar(title, rec["title"]):
             return dict(rec)
     return None
@@ -110,13 +117,14 @@ async def create_item(
     plan_id: uuid.UUID | None = None,
     plan_section: str | None = None,
     plan_version: int | None = None,
+    note: str | None = None,
 ) -> dict[str, Any]:
     rec = await get_pool().fetchrow(
         """
         INSERT INTO backlog_items
             (type, title, summary, why, repos, effort, impact, sources, fingerprint, source,
-             workstream_id, plan_id, plan_section, plan_version)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14)
+             workstream_id, plan_id, plan_section, plan_version, note)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15)
         RETURNING *
         """,
         type_,
@@ -133,6 +141,7 @@ async def create_item(
         plan_id,
         plan_section,
         plan_version,
+        note,
     )
     return _row(rec)
 

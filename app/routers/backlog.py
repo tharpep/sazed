@@ -7,7 +7,9 @@ import uuid
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, model_validator
 
 from app.backlog import service, store
 from app.board import plans, projects
@@ -30,6 +32,14 @@ class ItemCreate(BaseModel):
     workstream_id: uuid.UUID | None = None
     plan: str | None = Field(None, max_length=80)
     plan_section: str | None = Field(None, max_length=80)
+    allow_similar: bool = False
+    similar_reason: str | None = Field(None, max_length=500)
+
+    @model_validator(mode="after")
+    def _reason_for_override(self):
+        if self.allow_similar and not (self.similar_reason or "").strip():
+            raise ValueError("similar_reason is required when allow_similar is true")
+        return self
 
 
 class ItemUpdate(BaseModel):
@@ -93,10 +103,29 @@ async def _plan_link(slug: str | None, section: str | None) -> dict:
 async def create_item(body: ItemCreate):
     await _check_workstream(body.workstream_id)
     link = await _plan_link(body.plan, body.plan_section) if body.plan else {}
-    fields = body.model_dump(exclude={"plan", "plan_section"}) | link
-    item, duplicate = await service.add_item(source="console", **fields)
+    fields = body.model_dump(exclude={"plan", "plan_section", "similar_reason"}) | link
+    if body.allow_similar:
+        fields["note"] = f"Filed despite a similar item: {body.similar_reason.strip()}"
+    # Parked items don't block: a parked idea shouldn't silently stop a different card. They are
+    # reported on the response instead, so the filer learns the parked card exists.
+    item, duplicate = await service.add_item(
+        source="console", duplicate_statuses=store.OPEN, **fields
+    )
     if duplicate:
-        raise HTTPException(409, f"Already in the backlog: {duplicate['title']}")
+        existing = jsonable_encoder(duplicate)
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": (
+                    f"Already in the backlog: {duplicate['title']} "
+                    f"({duplicate['status']}, id {duplicate['id']})"
+                ),
+                "existing": existing,
+            },
+        )
+    parked = None if body.allow_similar else await store.find_duplicate(body.title, ("parked",))
+    if parked:
+        return jsonable_encoder(item) | {"similar_parked": jsonable_encoder(parked)}
     return item
 
 

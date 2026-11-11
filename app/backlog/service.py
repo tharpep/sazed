@@ -19,12 +19,23 @@ class BacklogError(ValueError):
 
 
 async def add_item(
-    *, type: str, title: str, source: str, **fields: Any
+    *,
+    type: str,
+    title: str,
+    source: str,
+    duplicate_statuses: tuple[str, ...] | None = None,
+    allow_similar: bool = False,
+    **fields: Any,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Returns (new item, None), or (None, the existing item) when it's already recorded."""
-    duplicate = await store.find_duplicate(title)
-    if duplicate:
-        return None, duplicate
+    """Returns (new item, None), or (None, the existing item) when it's already recorded.
+
+    `duplicate_statuses` limits which items count (default all, which automated filers rely on
+    so dismissed ideas stay dismissed); `allow_similar` skips the check.
+    """
+    if not allow_similar:
+        duplicate = await store.find_duplicate(title, duplicate_statuses)
+        if duplicate:
+            return None, duplicate
     return await store.create_item(type_=type, title=title, source=source, **fields), None
 
 
