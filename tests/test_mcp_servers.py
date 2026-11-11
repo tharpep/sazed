@@ -71,6 +71,7 @@ def store(monkeypatch):
 
     async def server_write(name, fields, current, author, reason):
         state["server_writes"].append((name, fields, current, author, reason))
+        state["servers"][name] = _server(name=name, **fields, updated_by=author)
 
     async def granted_by(name):
         return state["granting"]
@@ -207,3 +208,97 @@ def test_an_unchanged_mcp_grant_is_a_no_op(api, store):
     body = {**PROFILE, "mcp": {"example": ["*"]}}
     assert api.put("/agents/profiles/implement", json=body).status_code == 422
     assert store["profile_writes"] == []
+
+
+AGENT = {"author": "agent:claude", "reason": "propose server"}
+STDIO = {"transport": "stdio", "command": "npx", "args": ["-y", "pkg"], "url": None}
+
+
+def test_an_agent_added_command_is_saved_but_not_agent_safe(api, store):
+    body = {**BODY, **STDIO, **AGENT, "agent_safe": True}
+    response = api.put("/agents/mcp-servers/local", json=body)
+    assert response.status_code == 200
+    assert "approve it in the Sazed console" in response.json()["held"]
+    [(_, fields, _, author, reason)] = store["server_writes"]
+    assert (fields["command"], fields["agent_safe"], author) == ("npx", False, "agent:claude")
+    assert "held for owner approval" in reason
+
+
+def test_an_agent_cannot_mark_an_entry_agent_safe(api, store):
+    body = {**BODY, **AGENT, "agent_safe": True, "description": "Example docs"}
+    response = api.put("/agents/mcp-servers/unsafe", json=body)
+    assert response.status_code == 403
+    assert "approve it in the Sazed console" in response.json()["detail"]
+    assert store["server_writes"] == []
+
+
+def test_an_agent_held_entry_cannot_be_granted(api, store):
+    store["servers"]["local"] = _server(name="local", **STDIO, agent_safe=False)
+    body = {**PROFILE, "author": "agent:claude", "mcp": {"local": ["*"]}}
+    response = api.put("/agents/profiles/implement", json=body)
+    assert response.status_code == 422
+    assert "approve it in the Sazed console" in response.json()["detail"]
+    assert store["profile_writes"] == []
+
+
+def test_the_owner_can_add_a_command_and_mark_it_agent_safe(api, store):
+    body = {**BODY, **STDIO, "agent_safe": True}
+    response = api.put("/agents/mcp-servers/local", json=body)
+    assert response.status_code == 200
+    assert response.json()["agent_safe"] is True
+    assert "held" not in response.json()
+    [(_, fields, _, author, _)] = store["server_writes"]
+    assert (fields["agent_safe"], author) == (True, "pryce")
+
+
+def test_the_owner_approves_an_agent_proposed_entry(api, store):
+    store["servers"]["local"] = _server(name="local", **STDIO, agent_safe=False)
+    body = {**BODY, **STDIO, "agent_safe": True}
+    assert api.put("/agents/mcp-servers/local", json=body).status_code == 200
+    assert store["server_writes"][0][1]["agent_safe"] is True
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        STDIO,
+        {"url": "https://evil.example.com/mcp"},
+        {"headers": {"Authorization": "${GITHUB_TOKEN}"}},
+    ],
+)
+def test_an_agent_cannot_change_the_connection_of_an_approved_entry(api, store, changes):
+    response = api.put("/agents/mcp-servers/example", json={**BODY, **AGENT, **changes})
+    assert response.status_code == 403
+    assert "approve it in the Sazed console" in response.json()["detail"]
+    assert store["server_writes"] == []
+
+
+def test_an_agent_cannot_change_the_command_of_a_granted_unsafe_entry(api, store):
+    store["granting"] = ["implement"]
+    body = {**BODY, **STDIO, **AGENT, "agent_safe": False}
+    assert api.put("/agents/mcp-servers/unsafe", json=body).status_code == 403
+    assert store["server_writes"] == []
+
+
+def test_an_agent_can_revise_its_own_unapproved_proposal(api, store):
+    store["servers"]["local"] = _server(name="local", **STDIO, agent_safe=False)
+    body = {**BODY, **STDIO, **AGENT, "args": ["-y", "other"], "agent_safe": False}
+    response = api.put("/agents/mcp-servers/local", json=body)
+    assert response.status_code == 200
+    assert "held" not in response.json()
+    assert store["server_writes"][0][1]["args"] == ["-y", "other"]
+
+
+def test_an_agent_description_edit_keeps_an_approved_entry_agent_safe(api, store):
+    body = {**BODY, **AGENT, "description": "Docs, reworded"}
+    response = api.put("/agents/mcp-servers/example", json=body)
+    assert response.status_code == 200
+    [(_, fields, _, author, reason)] = store["server_writes"]
+    assert (fields["agent_safe"], fields["url"], author) == (True, SERVER["url"], "agent:claude")
+    assert reason == "propose server"
+
+
+def test_an_approved_entry_stays_grantable_by_an_agent(api, store):
+    body = {**PROFILE, "author": "agent:claude", "mcp": {"example": ["query-docs"]}}
+    assert api.put("/agents/profiles/implement", json=body).status_code == 200
+    assert store["profile_writes"][0][1]["mcp"] == {"example": ["query-docs"]}
