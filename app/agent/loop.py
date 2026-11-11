@@ -819,6 +819,47 @@ async def run_turn(
     return session_id, response_text
 
 
+class _TurnTiming:
+    """Stamps for the voice latency log; ms are None for any stage that never happened."""
+
+    _NOT_CONTENT = ("thinking", "redacted_thinking")
+
+    def __init__(self) -> None:
+        self._entry = time.perf_counter()
+        self._llm_start: float | None = None
+        self._ttft: float | None = None
+        self._first_text: float | None = None
+        self._in_first_call = False
+
+    def llm_call_started(self) -> None:
+        self._in_first_call = self._llm_start is None
+        if self._in_first_call:
+            self._llm_start = time.perf_counter()
+
+    def block_started(self, block_type: str) -> None:
+        if self._in_first_call and self._ttft is None and block_type not in self._NOT_CONTENT:
+            self._ttft = time.perf_counter()
+
+    def text_yielded(self) -> None:
+        if self._first_text is None:
+            self._first_text = time.perf_counter()
+
+    def payload(self) -> dict[str, dict[str, int | None]]:
+        def ms(start: float | None, end: float | None) -> int | None:
+            return None if start is None or end is None else int((end - start) * 1000)
+
+        return {
+            "timing": {
+                "setup_ms": ms(self._entry, self._llm_start),
+                "llm_ttft_ms": ms(self._llm_start, self._ttft),
+                "first_text_ms": ms(self._entry, self._first_text),
+            }
+        }
+
+    def done_event(self) -> str:
+        return f"event: done\ndata: {json.dumps(self.payload())}\n\n"
+
+
 async def run_turn_stream(
     session_id: str | None,
     user_message: str,
@@ -847,8 +888,9 @@ async def run_turn_stream(
         event: tool_done  data: {"name": "...", "status": "success"|"error"|"awaiting_confirmation", ...}
         event: ui_block   data: {"component": "...", "props": {...}}   — tool cards, ConfirmCard
         event: text_delta data: {"text": "..."}                                    — streaming text tokens
-        event: done       data: {}                                                 — after session persisted
+        event: done       data: {"timing": {...}} or {} on early exits             — after session persisted
     """
+    timing = _TurnTiming()
     if not session_id:
         session_id = str(uuid.uuid4())
 
@@ -898,6 +940,7 @@ async def run_turn_stream(
 
             try:
                 async with asyncio.timeout(settings.turn_timeout_seconds):
+                    timing.llm_call_started()
                     async with client.messages.stream(
                         model=model,
                         **model_params(model, _voice_effort(mode, model)),
@@ -906,8 +949,13 @@ async def run_turn_stream(
                         tools=tools,
                         max_tokens=16000,  # Sonnet/Opus think; thinking counts toward max_tokens
                     ) as stream:
-                        async for text in stream.text_stream:
-                            yield f"event: text_delta\ndata: {json.dumps({'text': text})}\n\n"
+                        async for event in stream:
+                            if event.type == "content_block_start":
+                                timing.block_started(event.content_block.type)
+                            elif event.type == "text":
+                                timing.text_yielded()
+                                data = json.dumps({"text": event.text})
+                                yield f"event: text_delta\ndata: {data}\n\n"
                         response = await stream.get_final_message()
             except asyncio.TimeoutError:
                 logger.warning(
@@ -916,7 +964,7 @@ async def run_turn_stream(
                 timeout_msg = "Request timed out — please try again."
                 yield f"event: text_delta\ndata: {json.dumps({'text': timeout_msg})}\n\n"
                 await _finalize_turn(pool, sid)
-                yield f"event: done\ndata: {{}}\n\n"
+                yield timing.done_event()
                 return
 
             duration_ms = int((time.perf_counter() - t0) * 1000)
@@ -1082,6 +1130,7 @@ async def run_turn_stream(
                         max_tokens=16000,  # Sonnet/Opus think; thinking counts toward max_tokens
                     ) as stream:
                         async for text in stream.text_stream:
+                            timing.text_yielded()
                             yield f"event: text_delta\ndata: {json.dumps({'text': text})}\n\n"
                         synth = await stream.get_final_message()
             except asyncio.TimeoutError:
@@ -1099,7 +1148,7 @@ async def run_turn_stream(
 
         await _finalize_turn(pool, sid)
         logger.debug(f"stream session {session_id}: done")
-        yield f"event: done\ndata: {{}}\n\n"
+        yield timing.done_event()
     except Exception as e:
         logger.exception(f"stream session {session_id}: unhandled error")
         try:
