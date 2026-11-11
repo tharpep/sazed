@@ -884,7 +884,7 @@ async def run_turn_stream(
 
     Events yielded:
         event: session    data: {"session_id": "..."}                              — before first LLM call
-        event: tool_intent data: {"name": "..."}                — a tool_use block opened, input unwritten
+        event: tool_intent data: {"name": "..."}   — tool_use block opened, input unwritten
         event: tool_start data: {"name": "..."}                                    — before each tool execution
         event: tool_done  data: {"name": "...", "status": "success"|"error"|"awaiting_confirmation", ...}
         event: ui_block   data: {"component": "...", "props": {...}}   — tool cards, ConfirmCard
