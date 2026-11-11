@@ -31,6 +31,7 @@ class ItemCreate(BaseModel):
     impact: Literal["low", "medium", "high"] | None = None
     sources: list[str] = Field(default_factory=list, max_length=20)
     workstream_id: uuid.UUID | None = None
+    rank: int | None = Field(None, ge=1, le=999)  # same as /move with this position
     plan: str | None = Field(None, max_length=80)
     plan_section: str | None = Field(None, max_length=80)
     allow_similar: bool = False
@@ -87,6 +88,8 @@ class ItemUpdate(BaseModel):
     title: str | None = Field(None, min_length=3, max_length=200)
     summary: str | None = Field(None, max_length=8000)
     why: str | None = Field(None, max_length=4000)
+    effort: Literal["S", "M", "L"] | None = None
+    impact: Literal["low", "medium", "high"] | None = None
     rank: int | None = Field(None, ge=1, le=999)  # same as /move with this position
     workstream_id: uuid.UUID | None = None  # sent as null, it takes the item off its workstream
     plan: str | None = Field(None, max_length=80)  # sent as null, it unlinks the plan
@@ -142,7 +145,7 @@ async def _plan_link(slug: str | None, section: str | None) -> dict:
 async def create_item(body: ItemCreate):
     await _check_workstream(body.workstream_id)
     link = await _plan_link(body.plan, body.plan_section) if body.plan else {}
-    fields = body.model_dump(exclude={"plan", "plan_section", "similar_reason"}) | link
+    fields = body.model_dump(exclude={"plan", "plan_section", "similar_reason", "rank"}) | link
     if body.allow_similar:
         fields["note"] = f"Filed despite a similar item: {body.similar_reason.strip()}"
     # Parked items don't block: a parked idea shouldn't silently stop a different card. They are
@@ -162,6 +165,8 @@ async def create_item(body: ItemCreate):
                 "existing": existing,
             },
         )
+    if body.rank is not None:
+        item = await store.move_item(item["id"], body.rank)
     parked = None if body.allow_similar else await store.find_duplicate(body.title, ("parked",))
     if parked:
         return jsonable_encoder(item) | {"similar_parked": jsonable_encoder(parked)}
