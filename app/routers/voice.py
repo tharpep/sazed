@@ -18,6 +18,7 @@ MS_COLUMNS = (
     "tts_first_byte_ms",
     "tts_first_sound_ms",
     "first_sound_ms",
+    "filler_ms",
 )
 
 Ms = Field(default=None, ge=0)
@@ -38,6 +39,7 @@ class VoiceTurn(BaseModel):
     tts_first_byte_ms: int | None = Ms
     tts_first_sound_ms: int | None = Ms
     first_sound_ms: int | None = Ms
+    filler_ms: int | None = Ms
 
 
 _INSERT_COLUMNS = ("session_id", "kiosk", "outcome", "tool_turn", "engine", *MS_COLUMNS)
@@ -57,19 +59,26 @@ async def create_turn(body: VoiceTurn) -> dict:
 
 @router.get("/turns/summary")
 async def turns_summary(
-    days: int = Query(7, ge=1, le=365), kiosk: bool | None = None
+    days: int = Query(7, ge=1, le=365),
+    kiosk: bool | None = None,
+    tool_turn: bool | None = None,
 ) -> dict:
     args: list = [days]
     where = "created_at > NOW() - make_interval(days => $1)"
-    if kiosk is not None:
-        args.append(kiosk)
-        where += " AND kiosk = $2"
+    for column, value in (("kiosk", kiosk), ("tool_turn", tool_turn)):
+        if value is not None:
+            args.append(value)
+            where += f" AND {column} = ${len(args)}"
     # percentile_cont skips NULLs, so each slice only counts turns that reached its stage.
+    # first_audio_ms is the first sound of any kind: the filler clip or the reply, whichever came
+    # first (LEAST ignores NULLs).
+    slice_exprs = {c: c for c in MS_COLUMNS}
+    slice_exprs["first_audio_ms"] = "LEAST(filler_ms, first_sound_ms)"
     slices = ", ".join(
-        f"count({c}) AS {c}_n, "
-        f"percentile_cont(0.5) WITHIN GROUP (ORDER BY {c}) AS {c}_p50, "
-        f"percentile_cont(0.9) WITHIN GROUP (ORDER BY {c}) AS {c}_p90"
-        for c in MS_COLUMNS
+        f"count({e}) AS {name}_n, "
+        f"percentile_cont(0.5) WITHIN GROUP (ORDER BY {e}) AS {name}_p50, "
+        f"percentile_cont(0.9) WITHIN GROUP (ORDER BY {e}) AS {name}_p90"
+        for name, e in slice_exprs.items()
     )
     row = await get_pool().fetchrow(
         f"SELECT count(*) AS turns, {slices} FROM voice_turns WHERE {where}", *args
@@ -87,6 +96,6 @@ async def turns_summary(
                 "p50": pct(row[f"{c}_p50"]),
                 "p90": pct(row[f"{c}_p90"]),
             }
-            for c in MS_COLUMNS
+            for c in slice_exprs
         },
     }
