@@ -884,6 +884,7 @@ async def run_turn_stream(
 
     Events yielded:
         event: session    data: {"session_id": "..."}                              — before first LLM call
+        event: tool_intent data: {"name": "..."}   — tool_use block opened, input unwritten
         event: tool_start data: {"name": "..."}                                    — before each tool execution
         event: tool_done  data: {"name": "...", "status": "success"|"error"|"awaiting_confirmation", ...}
         event: ui_block   data: {"component": "...", "props": {...}}   — tool cards, ConfirmCard
@@ -952,6 +953,9 @@ async def run_turn_stream(
                         async for event in stream:
                             if event.type == "content_block_start":
                                 timing.block_started(event.content_block.type)
+                                if event.content_block.type == "tool_use":
+                                    intent = json.dumps({"name": event.content_block.name})
+                                    yield f"event: tool_intent\ndata: {intent}\n\n"
                             elif event.type == "text":
                                 timing.text_yielded()
                                 data = json.dumps({"text": event.text})

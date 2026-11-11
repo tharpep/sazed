@@ -123,6 +123,21 @@ async def test_confirm_card_follows_awaiting_confirmation(stream_env, mode):
     assert card["props"]["expires_at"]
 
 
+async def test_tool_intent_fires_at_tool_use_block_start_before_tool_start(stream_env):
+    """tool_intent carries the tool name and is emitted before the tool_start of the same turn."""
+    stream_env(
+        [
+            _response("tool_use", _tool_use("get_tasks", {})),
+            _response("end_turn", SimpleNamespace(type="text", text="Done.")),
+        ]
+    )
+    events = await _events("voice")
+    names = [name for name, _ in events]
+    assert names.count("tool_intent") == 1
+    assert events[names.index("tool_intent")][1] == {"name": "get_tasks"}
+    assert names.index("tool_intent") < names.index("tool_start")
+
+
 async def test_mapped_ui_block_is_emitted_in_voice(stream_env, monkeypatch):
     stream_env(
         [
