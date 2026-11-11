@@ -39,6 +39,7 @@ async def items() -> list[dict[str, Any]]:
         """
         SELECT id, type, status, title, repos, effort, impact, rank, job_id, workstream_id,
                plan_id, plan_section, plan_version,
+               session_label, session_branch, pr_repo, pr_number,
                created_at, updated_at
         FROM backlog_items WHERE status <> ALL($1::text[])
         ORDER BY rank NULLS LAST, created_at DESC
