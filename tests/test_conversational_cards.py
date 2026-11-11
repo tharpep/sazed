@@ -39,6 +39,15 @@ class FakeStream:
     async def __aexit__(self, *exc):
         return False
 
+    def __aiter__(self):
+        async def gen():
+            for block in self.response.content:
+                yield SimpleNamespace(type="content_block_start", content_block=block)
+                if block.type == "text":
+                    yield SimpleNamespace(type="text", text=block.text)
+
+        return gen()
+
     @property
     def text_stream(self):
         async def gen():
@@ -219,3 +228,14 @@ async def test_screen_lines_are_capped_and_stored_in_the_prefix(monkeypatch):
 def test_no_screen_leaves_the_prefix_unchanged():
     assert loop._screen_block(None) == ""
     assert loop._screen_block(["", "  "]) == ""
+
+
+async def test_done_event_carries_timing_stamps(stream_env):
+    """A normal streamed turn ends with a done event holding all three integer timing stamps."""
+    stream_env([_response("end_turn", SimpleNamespace(type="text", text="Hi."))])
+    events = await _events("voice")
+    name, data = events[-1]
+    assert name == "done"
+    assert set(data["timing"]) == {"setup_ms", "llm_ttft_ms", "first_text_ms"}
+    assert all(isinstance(v, int) and v >= 0 for v in data["timing"].values())
+    assert [d["text"] for n, d in events if n == "text_delta"] == ["Hi."]

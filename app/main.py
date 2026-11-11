@@ -46,6 +46,7 @@ from app.routers import (
     procedures,
     think,
     tools,
+    voice,
     worker,
 )
 
@@ -126,6 +127,9 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(
     audio.router, prefix="/audio", tags=["audio"], dependencies=[Depends(verify_api_key)]
+)
+app.include_router(
+    voice.router, prefix="/voice", tags=["voice"], dependencies=[Depends(verify_api_key)]
 )
 app.include_router(
     chat.router, prefix="/chat", tags=["chat"], dependencies=[Depends(verify_api_key)]
