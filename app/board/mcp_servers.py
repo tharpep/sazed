@@ -7,6 +7,11 @@ from app.db import get_pool
 
 FIELDS = ("transport", "url", "command", "args", "headers", "agent_safe", "description")
 JSON_FIELDS = ("args", "headers")
+# What the worker connects to or runs, and which ${VAR} secrets it sends there.
+CONNECTION = ("transport", "url", "command", "args", "headers")
+# Only the console saves as the owner: the gateway's MCP tools always stamp "agent:<name>".
+OWNER = "pryce"
+ASK_OWNER = "ask Pryce to approve it in the Sazed console (Profiles, MCP servers)"
 
 
 class ServerError(Exception):
@@ -67,7 +72,10 @@ async def check_grants(mcp: dict[str, list[str]]) -> None:
         if found is None:
             raise ServerError(f"no MCP server {server!r}", 422)
         if not found["agent_safe"]:
-            raise ServerError(f"MCP server {server!r} is not agent_safe", 422)
+            raise ServerError(
+                f"MCP server {server!r} is not agent_safe, so no profile can grant it; {ASK_OWNER}",
+                422,
+            )
 
 
 async def write(
@@ -134,10 +142,44 @@ async def save(
             "read it again and reapply your change",
             409,
         )
+    fields = {k: fields[k] for k in FIELDS}
+    held = False
+    if author != OWNER:
+        fields, held = await _hold(name, fields, current)
     if current and all(current[k] == fields[k] for k in FIELDS):
+        if held:
+            raise ServerError(f"marking {name!r} agent-safe needs the owner; {ASK_OWNER}", 403)
         raise ServerError("nothing changed", 422)
-    await write(name, {k: fields[k] for k in FIELDS}, current, author, reason)
-    return await fetch(name)
+    if held:
+        reason = f"{reason} [agent_safe requested, held for owner approval]"
+    await write(name, fields, current, author, reason)
+    saved = await fetch(name)
+    if held and saved is not None:
+        return {
+            **saved,
+            "held": f"saved, but not agent-safe: no profile can grant {name!r} until the owner "
+            f"approves it; {ASK_OWNER}",
+        }
+    return saved
+
+
+async def _hold(
+    name: str, fields: dict[str, Any], current: dict[str, Any] | None
+) -> tuple[dict[str, Any], bool]:
+    """An agent's save: refuse connection changes to live entries, drop an agent_safe it set."""
+    connection_changed = current is None or any(current[k] != fields[k] for k in CONNECTION)
+    if current and connection_changed:
+        # The worker runs whatever a profile grants without rechecking agent_safe, so a
+        # granted entry's connection can't change under it, approved or not.
+        if current["agent_safe"] or await granted_by(name):
+            raise ServerError(
+                f"{name!r} is approved or granted, so an agent can't change its transport, url, "
+                f"command, args or headers; {ASK_OWNER}",
+                403,
+            )
+    if fields["agent_safe"] and (connection_changed or not current["agent_safe"]):
+        return {**fields, "agent_safe": False}, True
+    return fields, False
 
 
 async def remove_row(
