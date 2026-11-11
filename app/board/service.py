@@ -53,6 +53,17 @@ def _job_fields(chain: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _session_link(item: dict[str, Any]) -> dict[str, Any] | None:
+    if not (item["session_label"] or item["session_branch"] or item["pr_number"]):
+        return None
+    return {
+        "session": item["session_label"],
+        "branch": item["session_branch"],
+        "pr_repo": item["pr_repo"],
+        "pr_number": item["pr_number"],
+    }
+
+
 def _item_card(item: dict[str, Any], chain: list[dict[str, Any]]) -> dict[str, Any]:
     live = chain if item["status"] == "approved" else []
     tail = live[-1] if live else None
@@ -77,6 +88,7 @@ def _item_card(item: dict[str, Any], chain: list[dict[str, Any]]) -> dict[str, A
         "plan_id": str(item["plan_id"]) if item["plan_id"] else None,
         "plan_section": item["plan_section"],
         "plan_version": item["plan_version"],
+        "session_link": _session_link(item),
         "actions": actions.describe(tail),
         **_job_fields(live),
     }
@@ -101,6 +113,7 @@ def _job_card(job: dict[str, Any]) -> dict[str, Any]:
         "plan_id": None,
         "plan_section": None,
         "plan_version": None,
+        "session_link": None,
         "actions": actions.describe(job),
         **_job_fields([job]),
     }

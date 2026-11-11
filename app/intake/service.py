@@ -4,6 +4,7 @@ import uuid
 from typing import Any
 
 from app.backlog import service as backlog
+from app.backlog import store as backlog_store
 from app.intake import policy, store
 from app.jobs import service as jobs
 from app.jobs import store as job_store
@@ -69,6 +70,9 @@ async def _act(ev: policy.GithubEvent, action: str, facts: policy.Facts) -> dict
 
 
 async def route_github(ev: policy.GithubEvent) -> dict[str, Any]:
+    closed = []
+    if ev.event == "pull_request" and ev.action == "closed" and ev.merged:
+        closed = await backlog_store.close_for_merged_pr(ev.repo, ev.number)
     facts = await _facts(ev)
     decision = policy.decide(ev, facts)
     refs: dict[str, Any] = {}
@@ -91,7 +95,7 @@ async def route_github(ev: policy.GithubEvent) -> dict[str, Any]:
         reason=reason,
         action_taken=decision.action if verdict == "accept" else None,
         job_id=refs.get("job_id"),
-        item_id=refs.get("item_id"),
+        item_id=refs.get("item_id") or (closed[0] if closed else None),
     )
     return {
         "decision": verdict,

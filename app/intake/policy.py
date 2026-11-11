@@ -28,6 +28,7 @@ class GithubEvent:
     body: str = ""
     branch: str | None = None
     draft: bool = False
+    merged: bool = False
     url: str = ""
     path: str | None = None
     line: int | None = None

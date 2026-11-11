@@ -70,6 +70,9 @@ def item_stage(
     # An open item may still hold a job from an earlier try (a closed PR puts it back in Open).
     if status == "approved" and job is not None:
         return job_stage(job, now)
+    # A terminal session building the card; its PR merging closes it (backlog.close_for_merged_pr).
+    if item.get("session_label") or item.get("session_branch") or item.get("pr_number"):
+        return "doing", "Being built in a terminal session"
     # A card filed under a workstream is committed work on a project's ladder, not one to triage.
     if status == "shortlisted" or item.get("rank") is not None or item.get("workstream_id"):
         return "next", "Approve it to start"

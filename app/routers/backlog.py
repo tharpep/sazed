@@ -3,6 +3,7 @@
 Nothing here deletes: a dismissed item stays as a record so the scout never proposes it again.
 """
 
+import re
 import uuid
 from typing import Literal
 
@@ -42,6 +43,39 @@ class ItemCreate(BaseModel):
         return self
 
 
+_PR_REF = re.compile(
+    r"^(?:https://github\.com/)?(?P<repo>[\w.-]+/[\w.-]+?)(?:/pull/|#)(?P<number>\d+)/?$"
+)
+
+
+class SessionLink(BaseModel):
+    """A session building the card: a label, a branch, the PR it will merge. Null unlinks."""
+
+    session: str | None = Field(None, min_length=1, max_length=200)
+    branch: str | None = Field(None, min_length=1, max_length=255)
+    pr: str | None = Field(None, max_length=300, description="PR URL, or owner/repo#number")
+
+    @model_validator(mode="after")
+    def _something_to_link(self):
+        if not (self.session or self.branch or self.pr):
+            raise ValueError("link needs a session, a branch or a pr")
+        if self.pr and not _PR_REF.match(self.pr.strip()):
+            raise ValueError("pr must be a GitHub PR URL or owner/repo#number")
+        return self
+
+    def columns(self) -> dict:
+        found = _PR_REF.match(self.pr.strip()) if self.pr else None
+        return {
+            "session_label": self.session,
+            "session_branch": self.branch,
+            "pr_repo": found["repo"] if found else None,
+            "pr_number": int(found["number"]) if found else None,
+        }
+
+
+_NO_LINK = {"session_label": None, "session_branch": None, "pr_repo": None, "pr_number": None}
+
+
 class ItemUpdate(BaseModel):
     status: Literal["new", "shortlisted", "done", "dismissed", "parked"] | None = None
     type: ItemType | None = None
@@ -53,6 +87,7 @@ class ItemUpdate(BaseModel):
     workstream_id: uuid.UUID | None = None  # sent as null, it takes the item off its workstream
     plan: str | None = Field(None, max_length=80)  # sent as null, it unlinks the plan
     plan_section: str | None = Field(None, max_length=80)
+    link: SessionLink | None = None
 
 
 class ApproveRequest(BaseModel):
@@ -131,7 +166,9 @@ async def create_item(body: ItemCreate):
 
 @router.patch("/{item_id}")
 async def update_item(item_id: uuid.UUID, body: ItemUpdate):
-    fields = body.model_dump(exclude_none=True, exclude={"plan", "plan_section"})
+    fields = body.model_dump(exclude_none=True, exclude={"plan", "plan_section", "link"})
+    if "link" in body.model_fields_set:
+        fields |= body.link.columns() if body.link else _NO_LINK
     if "plan" in body.model_fields_set:
         fields |= await _plan_link(body.plan, body.plan_section)
     if "workstream_id" in body.model_fields_set:

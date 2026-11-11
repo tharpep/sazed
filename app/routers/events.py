@@ -19,6 +19,7 @@ class GithubEventIn(BaseModel):
     body: str = Field("", max_length=8000)
     branch: str | None = Field(None, max_length=255)
     draft: bool = False
+    merged: bool = False
     url: str = Field("", max_length=500)
     path: str | None = Field(None, max_length=500)
     line: int | None = None
