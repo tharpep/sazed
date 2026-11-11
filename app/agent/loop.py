@@ -888,7 +888,7 @@ async def run_turn_stream(
         event: tool_done  data: {"name": "...", "status": "success"|"error"|"awaiting_confirmation", ...}
         event: ui_block   data: {"component": "...", "props": {...}}   — tool cards, ConfirmCard
         event: text_delta data: {"text": "..."}                                    — streaming text tokens
-        event: done       data: {"timing": {...}} or {} on early exits             — after session persisted
+        event: done       data: {"timing": {...}}, {} on early exits — after session persisted
     """
     timing = _TurnTiming()
     if not session_id:
