@@ -45,6 +45,7 @@ class Facts:
     owner_job_id: str | None = None
     owner_continuable: bool = False
     review_open: bool = False
+    auto_reviews_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,8 @@ def decide(ev: GithubEvent, facts: Facts) -> Decision:
         return Decision("observe", "bot events are recorded, never acted on")
 
     if ev.event == "pull_request":
+        if not facts.auto_reviews_enabled:
+            return Decision("ignore", "automatic PR reviews disabled")
         if ev.action not in REVIEWED_PR_ACTIONS:
             return Decision("ignore", f"action {ev.action}")
         if ev.draft:

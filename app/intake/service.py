@@ -5,6 +5,7 @@ from typing import Any
 
 from app.backlog import service as backlog
 from app.backlog import store as backlog_store
+from app.config import settings
 from app.intake import policy, store
 from app.jobs import service as jobs
 from app.jobs import store as job_store
@@ -23,6 +24,7 @@ async def _facts(ev: policy.GithubEvent) -> policy.Facts:
             owner and owner["status"] in _CONTINUABLE and owner.get("agent_session_id")
         ),
         review_open=review_open,
+        auto_reviews_enabled=settings.enable_pr_auto_reviews,
     )
 
 
