@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     # Which agent runs a review task, by who asked (ai-context research/agent-stack.md, D1):
     # automatic PR reviews from the GitHub webhook go to agy; any source not listed runs Claude.
     review_agent_by_source: dict[str, str] = {"webhook": "agy"}
+    enable_pr_auto_reviews: bool = False
     # Repos Sazed never runs code tasks on (dormant; the gateway's bot refuses them too).
     code_task_excluded_repos: list[str] = [
         "tharpep/Trusted-Model-Registry",

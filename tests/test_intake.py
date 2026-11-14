@@ -78,6 +78,7 @@ def test_an_issue_from_pryce_becomes_a_card_unless_it_mentions_sazed():
     "facts, kw, verdict",
     [
         (Facts(), {}, "accept"),
+        (Facts(auto_reviews_enabled=False), {}, "ignore"),
         (Facts(), {"draft": True}, "ignore"),
         (Facts(), {"action": "closed"}, "ignore"),
         (Facts(review_open=True), {}, "ignore"),
@@ -87,6 +88,14 @@ def test_an_issue_from_pryce_becomes_a_card_unless_it_mentions_sazed():
 def test_pull_requests_from_pryce_get_one_review(facts, kw, verdict):
     ev = _ev(**({"event": "pull_request", "action": "opened"} | kw))
     assert policy.decide(ev, facts).verdict == verdict
+
+
+def test_pr_review_ignored_when_auto_reviews_disabled():
+    ev = _ev(event="pull_request", action="opened")
+    decision = policy.decide(ev, Facts(auto_reviews_enabled=False))
+    assert decision.verdict == "ignore"
+    assert decision.reason == "automatic PR reviews disabled"
+    assert decision.action is None
 
 
 def test_thread_keys_name_the_repo_and_number():
