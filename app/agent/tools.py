@@ -61,6 +61,89 @@ _CACHEABLE_TOOLS: frozenset[str] = frozenset({
     "get_journal_summary", "export_journal",
 })
 
+_CATEGORY_READS: dict[str, frozenset[str]] = {
+    "calendar": frozenset({"get_events", "check_availability", "search_events"}),
+    "tasks": frozenset({"get_task_lists", "get_tasks"}),
+    "emails": frozenset({"list_emails", "search_emails", "get_email"}),
+    "kb": frozenset({"search_knowledge_base", "get_kb_index", "read_kb_source", "list_kb_sources"}),
+    "files": frozenset({"list_files", "list_folders", "get_file_info", "read_file"}),
+    "sheets": frozenset({"get_spreadsheet_info", "read_sheet"}),
+    "finance": frozenset({
+        "get_subscriptions", "get_budget", "get_income",
+        "get_upcoming_bills", "get_monthly_summary",
+    }),
+    "journal": frozenset({
+        "list_journal_entries", "get_journal_entry", "list_journal_subcategories",
+        "get_journal_summary", "export_journal",
+    }),
+    "github": frozenset({
+        "list_repos", "get_repo", "list_issues", "get_issue", "list_prs", "get_pr",
+        "get_github_file", "list_commits", "list_branches", "list_releases", "get_latest_release",
+    }),
+}
+
+_WRITE_CATEGORIES: dict[str, str] = {
+    "create_event": "calendar",
+    "update_event": "calendar",
+    "delete_event": "calendar",
+    "create_task_list": "tasks",
+    "rename_task_list": "tasks",
+    "create_task": "tasks",
+    "update_task": "tasks",
+    "delete_task": "tasks",
+    "draft_email": "emails",
+    "send_email": "emails",
+    "reply_to_email": "emails",
+    "delete_kb_source": "kb",
+    "ingest_text": "kb",
+    "ingest_url": "kb",
+    "create_folder": "files",
+    "create_file": "files",
+    "update_file": "files",
+    "append_to_file": "files",
+    "copy_file": "files",
+    "copy_file_from_github": "files",
+    "move_file": "files",
+    "delete_file": "files",
+    "create_spreadsheet": "sheets",
+    "write_sheet": "sheets",
+    "append_sheet_rows": "sheets",
+    "clear_sheet_range": "sheets",
+    "add_subscription": "finance",
+    "update_subscription": "finance",
+    "delete_subscription": "finance",
+    "set_budget_limit": "finance",
+    "delete_budget": "finance",
+    "add_income_source": "finance",
+    "delete_income": "finance",
+    "create_journal_entry": "journal",
+    "update_journal_entry": "journal",
+    "delete_journal_entry": "journal",
+    "sync_journal_to_kb": "journal",
+    "create_issue": "github",
+    "update_issue": "github",
+    "add_issue_comment": "github",
+    "add_pr_comment": "github",
+    "create_pr": "github",
+}
+
+
+def invalidate_tool_cache(tool_or_category: str) -> None:
+    read_tools = _CATEGORY_READS.get(tool_or_category)
+    if not read_tools:
+        category = _WRITE_CATEGORIES.get(tool_or_category)
+        if category:
+            read_tools = _CATEGORY_READS.get(category, frozenset())
+    if not read_tools:
+        return
+    for key in list(_TOOL_CACHE.keys()):
+        if key[0] in read_tools:
+            _TOOL_CACHE.pop(key, None)
+
+
+def clear_tool_cache() -> None:
+    _TOOL_CACHE.clear()
+
 
 @dataclass
 class ToolDef:
@@ -3116,7 +3199,10 @@ async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
         return _err(f"Unknown tool: {name}")
 
     if tool.method == "INTERNAL":
-        return await _execute_internal(name, args, t0)
+        res = await _execute_internal(name, args, t0)
+        if res.status == "success":
+            invalidate_tool_cache(name)
+        return res
 
     # Cache lookup — read-only tools only
     cache_key = None
@@ -3182,6 +3268,7 @@ async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
                 client, "DELETE", url, headers=headers, timeout=timeout
             )
             if resp.status_code == 204:
+                invalidate_tool_cache(name)
                 return _ok("Deleted successfully.")
         else:
             return _err(f"Unsupported method: {tool.method}")
@@ -3200,6 +3287,9 @@ async def execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
 
     if cache_key:
         _TOOL_CACHE[cache_key] = result  # cache clean content before wrapping
+
+    if result.status == "success":
+        invalidate_tool_cache(name)
 
     # Layer B: label content from untrusted sources so the LLM treats it as data, not instructions
     if result.status == "success" and name in settings.untrusted_content_tools:
