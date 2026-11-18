@@ -102,3 +102,48 @@ def test_automation_jobs_show_only_when_they_need_pryce():
     assert not service._shows_alone(running, set())
     assert service._shows_alone(waiting, set())
     assert not service._shows_alone({**running, "requested_by": "console"}, {1})
+
+
+def _done_item(title, finished):
+    return {
+        "id": title,
+        "type": "bug",
+        "status": "done",
+        "title": title,
+        "repos": [],
+        "effort": None,
+        "impact": None,
+        "rank": None,
+        "job_id": None,
+        "workstream_id": None,
+        "plan_id": None,
+        "plan_section": None,
+        "plan_version": None,
+        "session_label": None,
+        "session_branch": None,
+        "pr_repo": None,
+        "pr_number": None,
+        "created_at": finished,
+        "updated_at": datetime.now(UTC),
+        "decided_at": finished,
+    }
+
+
+async def test_done_counts_its_window_from_the_finish_not_the_last_edit(monkeypatch):
+    now = datetime.now(UTC)
+    old, recent = _done_item("old", now - timedelta(days=30)), _done_item("recent", now)
+
+    async def items():
+        return [old, recent]
+
+    async def none():
+        return {}
+
+    async def no_jobs():
+        return []
+
+    monkeypatch.setattr(service.store, "items", items)
+    monkeypatch.setattr(service.store, "chains", none)
+    monkeypatch.setattr(service.store, "active_jobs", no_jobs)
+    assert [c["title"] for c in await service.cards()] == ["recent"]
+    assert len(await service.cards(all_done=True)) == 2
