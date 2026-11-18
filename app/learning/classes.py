@@ -19,15 +19,13 @@ CLASSES: dict[str, FailureClass] = {
     "quota_exhausted": FailureClass("stop", "Usage quota used up"),
     "shutdown": FailureClass("stop", "Worker shut down mid-job"),
     "cancelled": FailureClass("stop", "Cancelled"),
+    # The reaper's verdict on a run whose worker went silent: an operational stop (seam 4, S4-5),
+    # since a dead process teaches no rule the agent could follow.
+    "worker_lost": FailureClass("stop", "Worker stopped reporting"),
     "worker_error": FailureClass(
         "lesson",
         "Worker error",
         "a worker preflight check that catches the failing setup step before the agent starts",
-    ),
-    "worker_lost": FailureClass(
-        "lesson",
-        "Worker stopped reporting",
-        "a heartbeat or progress check that surfaces a silent worker before the job expires",
     ),
     "agent_error": FailureClass(
         "lesson",

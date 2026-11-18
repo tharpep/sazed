@@ -20,7 +20,7 @@ from app.dependencies import verify_api_key
 from app import spend_alert
 from app.http_client import shutdown as http_client_shutdown
 from app.http_client import startup as http_client_startup
-from app.jobs import ci_watch
+from app.jobs import ci_watch, reaper
 from app.routers import (
     activity,
     agent_profiles,
@@ -91,6 +91,7 @@ async def lifespan(app: FastAPI):
     await http_client_startup()
     await automation_runner.start()
     await ci_watch.start()
+    await reaper.start()
     await idle_sessions.start()
     await spend_alert.start()
     await activity_live.start()
@@ -102,6 +103,7 @@ async def lifespan(app: FastAPI):
     await activity_live.stop()
     await automation_runner.stop()
     await ci_watch.stop()
+    await reaper.stop()
     await idle_sessions.stop()
     await spend_alert.stop()
     await http_client_shutdown()

@@ -4,6 +4,7 @@ import json
 import uuid
 from typing import Any
 
+from app.config import settings
 from app.db import get_pool
 from app.policy import counts_toward_cap
 from app.policy.decide import _CAPPED_PREFIXES
@@ -15,9 +16,6 @@ FINAL_STATUSES = ("succeeded", "failed", "cancelled", "timed_out")
 # paused (plans/10 P1.7): a change job stopped by its timeout, tool cap or a worker restart, its
 # work so far on a draft PR; resume_job continues it. Not final either.
 SETTLED_STATUSES = (*FINAL_STATUSES, "needs_input", "paused")
-
-# A running job whose worker hasn't reported in this long is presumed dead.
-_HEARTBEAT_GRACE_S = 120
 
 
 # Claim order (plans/10 P1.3, migration 011): lower runs first, then oldest.
@@ -213,18 +211,21 @@ async def bakeoff_arms(bakeoff_id: str) -> list[dict[str, Any]]:
 
 
 async def expire_stale() -> list[dict[str, Any]]:
-    """Mark running jobs whose worker went silent (or overran their timeout) as timed_out."""
+    """Mark running jobs whose worker went silent (or overran their timeout) as timed_out.
+    Safe to run concurrently: a second UPDATE re-checks status = 'running' after the first
+    commits, so each job is returned to exactly one caller."""
     rows = await get_pool().fetch(
-        f"""
+        """
         UPDATE jobs SET status = 'timed_out', finished_at = NOW(),
                error = COALESCE(error, 'worker stopped reporting')
         WHERE status = 'running'
-          AND (heartbeat_at < NOW() - INTERVAL '{_HEARTBEAT_GRACE_S} seconds'
+          AND (heartbeat_at < NOW() - make_interval(secs => $1::int)
                OR started_at + make_interval(
-                    secs => COALESCE((params->>'timeout_s')::int, 300) + {_HEARTBEAT_GRACE_S}
+                    secs => COALESCE((params->>'timeout_s')::int, 300) + $1::int
                   ) < NOW())
         RETURNING *
-        """
+        """,
+        settings.job_heartbeat_grace_s,
     )
     return [_row(r) for r in rows]
 

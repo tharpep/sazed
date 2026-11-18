@@ -102,6 +102,49 @@ async def insert_steps(plan: str, task: str, steps: list[dict]) -> None:
     )
 
 
+async def heartbeat(plan: str, task: str) -> None:
+    await get_pool().execute(
+        """
+        INSERT INTO dispatch_heartbeats (plan, task) VALUES ($1, $2)
+        ON CONFLICT (plan, task) DO UPDATE SET beat_at = NOW()
+        """,
+        plan,
+        task,
+    )
+
+
+async def reap_silent(grace_s: int) -> list[dict[str, Any]]:
+    """Fail each task whose latest row is running and that has sent neither a row nor a heartbeat
+    for grace_s, with a line saying since when. The failed row's ts is the running row's plus
+    1 ms: the same for every caller, so a second reaper's insert hits the unique key and does
+    nothing, and any real row the task writes later (a sync replay) still sorts after it."""
+    rows = await get_pool().fetch(
+        """
+        WITH latest AS (
+            SELECT DISTINCT ON (plan, task) plan, task, ts, state, received_at
+            FROM dispatch_rows
+            ORDER BY plan, task, ts DESC, id DESC
+        ), silent AS (
+            SELECT l.plan, l.task, l.ts, GREATEST(l.received_at, h.beat_at) AS last_seen
+            FROM latest l
+            LEFT JOIN dispatch_heartbeats h ON h.plan = l.plan AND h.task = l.task
+            WHERE l.state = 'running'
+              AND GREATEST(l.received_at, h.beat_at) < NOW() - make_interval(secs => $1::int)
+        )
+        INSERT INTO dispatch_rows (plan, task, ts, state, line, meta)
+        SELECT plan, task, ts + 0.001, 'failed',
+               'no heartbeat since '
+                   || to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') || ' UTC',
+               jsonb_build_object('stop_reason', 'no_heartbeat', 'last_heartbeat', last_seen)
+        FROM silent
+        ON CONFLICT (plan, task, ts, state) DO NOTHING
+        RETURNING plan, task, line
+        """,
+        grace_s,
+    )
+    return [dict(r) for r in rows]
+
+
 def run_start(rows: list[dict[str, Any]]) -> float | None:
     """ts of the first row after the last cleaned row; 0 with none; None if nothing follows."""
     start = 0.0

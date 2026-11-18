@@ -1,4 +1,4 @@
-"""Dispatch plans, rows and steps from sazed-worker (migrations 024, 027)."""
+"""Dispatch plans, rows, steps and heartbeats from sazed-worker (migrations 024, 027, 034)."""
 
 from datetime import UTC, datetime
 from typing import Literal
@@ -46,6 +46,11 @@ class RowIn(BaseModel):
     meta: dict = Field(default_factory=dict)
 
 
+class HeartbeatIn(BaseModel):
+    plan: str = Field(..., min_length=1, max_length=200)
+    task: str = Field(..., min_length=1, max_length=200)
+
+
 class StepIn(BaseModel):
     ts: float
     seq: int
@@ -73,6 +78,12 @@ async def post_plan(body: PlanIn):
 @router.post("/rows", status_code=201)
 async def post_row(body: RowIn):
     await dispatch.insert_row(**body.model_dump())
+    return {"ok": True}
+
+
+@router.post("/heartbeat")
+async def post_heartbeat(body: HeartbeatIn):
+    await dispatch.heartbeat(body.plan, body.task)
     return {"ok": True}
 
 

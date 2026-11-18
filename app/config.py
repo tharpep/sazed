@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     # the quota real jobs use (My-AI plans/14).
     jobs_daily_cap_bakeoff: int = 12
     research_wait_seconds: int = 60  # how long the research tool waits before handing back a job id
+    # Stuck-run reaper (app/jobs/reaper.py). Grace plus interval must stay under five minutes, so
+    # a dead run leaves `running` within that. Workers beat every 20 s, dispatch tasks every 30 s.
+    job_heartbeat_grace_s: int = 120
+    dispatch_heartbeat_grace_s: int = 150
+    reaper_interval_s: int = 60
     # Which agent runs a review task, by who asked (ai-context research/agent-stack.md, D1):
     # automatic PR reviews from the GitHub webhook go to agy; any source not listed runs Claude.
     review_agent_by_source: dict[str, str] = {"webhook": "agy"}
