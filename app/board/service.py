@@ -73,7 +73,7 @@ def _item_card(item: dict[str, Any], chain: list[dict[str, Any]]) -> dict[str, A
     updated = max(times)
     # decided_at is stamped when an item turns done, and later edits leave it alone. An approved
     # item whose PR merged is done until sync_pr_states marks it so, minutes later.
-    finished = item["decided_at"] if item["status"] == "done" else updated
+    finished = (item["decided_at"] if item["status"] == "done" else None) or updated
     repo = (tail.get("params") or {}).get("repo") if tail else None
     return {
         "id": f"item:{item['id']}",
@@ -101,6 +101,7 @@ def _item_card(item: dict[str, Any], chain: list[dict[str, Any]]) -> dict[str, A
 
 def _job_card(job: dict[str, Any]) -> dict[str, Any]:
     stage, next_step = stages.job_stage(job)
+    updated = job["finished_at"] or job["started_at"] or job["created_at"]
     return {
         "id": f"job:{job['id']}",
         "kind": "job",
@@ -108,8 +109,8 @@ def _job_card(job: dict[str, Any]) -> dict[str, Any]:
         "title": job["title"],
         "stage": stage,
         "next": next_step,
-        "updated_at": job["finished_at"] or job["started_at"] or job["created_at"],
-        "done_at": job["finished_at"] if stage == "done" else None,
+        "updated_at": updated,
+        "done_at": updated if stage == "done" else None,
         "repo": _short_repo((job.get("params") or {}).get("repo")),
         "item_type": None,
         "effort": None,
