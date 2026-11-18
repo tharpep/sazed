@@ -70,6 +70,10 @@ def _item_card(item: dict[str, Any], chain: list[dict[str, Any]]) -> dict[str, A
     stage, next_step = stages.item_stage(item, tail)
     times = [item["updated_at"]]
     times += [t for job in live for t in (job["created_at"], job["finished_at"]) if t]
+    updated = max(times)
+    # decided_at is stamped when an item turns done, and later edits leave it alone. An approved
+    # item whose PR merged is done until sync_pr_states marks it so, minutes later.
+    finished = (item["decided_at"] if item["status"] == "done" else None) or updated
     repo = (tail.get("params") or {}).get("repo") if tail else None
     return {
         "id": f"item:{item['id']}",
@@ -78,7 +82,8 @@ def _item_card(item: dict[str, Any], chain: list[dict[str, Any]]) -> dict[str, A
         "title": item["title"],
         "stage": stage,
         "next": next_step,
-        "updated_at": max(times),
+        "updated_at": updated,
+        "done_at": finished if stage == "done" else None,
         "repo": _short_repo(repo or (item["repos"][0] if item["repos"] else None)),
         "item_type": item["type"],
         "effort": item["effort"],
@@ -96,6 +101,7 @@ def _item_card(item: dict[str, Any], chain: list[dict[str, Any]]) -> dict[str, A
 
 def _job_card(job: dict[str, Any]) -> dict[str, Any]:
     stage, next_step = stages.job_stage(job)
+    updated = job["finished_at"] or job["started_at"] or job["created_at"]
     return {
         "id": f"job:{job['id']}",
         "kind": "job",
@@ -103,7 +109,8 @@ def _job_card(job: dict[str, Any]) -> dict[str, Any]:
         "title": job["title"],
         "stage": stage,
         "next": next_step,
-        "updated_at": job["finished_at"] or job["started_at"] or job["created_at"],
+        "updated_at": updated,
+        "done_at": updated if stage == "done" else None,
         "repo": _short_repo((job.get("params") or {}).get("repo")),
         "item_type": None,
         "effort": None,
@@ -146,7 +153,7 @@ async def cards(*, all_done: bool = False) -> list[dict[str, Any]]:
     result += [_job_card(job) for job in active if _shows_alone(job, linked)]
     if not all_done:
         cutoff = datetime.now(UTC) - DONE_WINDOW
-        result = [c for c in result if c["stage"] != "done" or c["updated_at"] >= cutoff]
+        result = [c for c in result if c["stage"] != "done" or c["done_at"] >= cutoff]
     return sorted(result, key=_order)
 
 

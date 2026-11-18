@@ -102,3 +102,70 @@ def test_automation_jobs_show_only_when_they_need_pryce():
     assert not service._shows_alone(running, set())
     assert service._shows_alone(waiting, set())
     assert not service._shows_alone({**running, "requested_by": "console"}, {1})
+
+
+def _done_item(title, finished):
+    return {
+        "id": title,
+        "type": "bug",
+        "status": "done",
+        "title": title,
+        "repos": [],
+        "effort": None,
+        "impact": None,
+        "rank": None,
+        "job_id": None,
+        "workstream_id": None,
+        "plan_id": None,
+        "plan_section": None,
+        "plan_version": None,
+        "session_label": None,
+        "session_branch": None,
+        "pr_repo": None,
+        "pr_number": None,
+        "created_at": finished,
+        "updated_at": datetime.now(UTC),
+        "decided_at": finished,
+    }
+
+
+def _board(monkeypatch, items, jobs=()):
+    async def all_items():
+        return list(items)
+
+    async def no_chains():
+        return {}
+
+    async def active():
+        return list(jobs)
+
+    monkeypatch.setattr(service.store, "items", all_items)
+    monkeypatch.setattr(service.store, "chains", no_chains)
+    monkeypatch.setattr(service.store, "active_jobs", active)
+
+
+async def test_done_counts_its_window_from_the_finish_not_the_last_edit(monkeypatch):
+    now = datetime.now(UTC)
+    old, recent = _done_item("old", now - timedelta(days=30)), _done_item("recent", now)
+    _board(monkeypatch, [old, recent])
+    assert [c["title"] for c in await service.cards()] == ["recent"]
+    assert len(await service.cards(all_done=True)) == 2
+
+
+async def test_a_done_card_missing_its_finish_time_falls_back_to_its_last_update(monkeypatch):
+    now = datetime.now(UTC)
+    item = _done_item("item", None)
+    job = {
+        "id": "j",
+        "status": "succeeded",
+        "title": "job",
+        "requested_by": "console",
+        "params": {},
+        "meta": {"pr_number": 7, "ci_state": "merged"},
+        "created_at": now,
+        "started_at": now,
+        "finished_at": None,
+    }
+    _board(monkeypatch, [item], [job])
+    cards = await service.cards()
+    assert {c["title"]: c["done_at"] for c in cards} == {"item": item["updated_at"], "job": now}
