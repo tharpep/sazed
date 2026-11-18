@@ -40,8 +40,8 @@ async def test_a_pass_finishes_each_silent_job_without_any_claim(monkeypatch):
     """S4-1: the reaper, not /worker/claim, expires the job and runs the finish hooks."""
     finished, expired = [], []
 
-    async def expire_stale():
-        expired.append(True)
+    async def expire_stale(silent_only=False):
+        expired.append(silent_only)
         return [_reaped_job()]
 
     async def on_finished(job):
@@ -53,7 +53,7 @@ async def test_a_pass_finishes_each_silent_job_without_any_claim(monkeypatch):
     monkeypatch.setattr(store, "expire_stale", expire_stale)
     monkeypatch.setattr(service, "on_finished", on_finished)
     monkeypatch.setattr(dispatch, "reap_silent", reap_silent)
-    await reaper.reap_once()
+    assert await reaper.reap_once() is True
     assert expired == [True]
     assert finished == [JOB_ID]
 
@@ -62,7 +62,7 @@ async def test_a_second_pass_that_reaps_nothing_finishes_nothing(monkeypatch):
     """S4-4: on_finished runs only for rows this pass's UPDATE returned."""
     finished = []
 
-    async def nothing(*args):
+    async def nothing(*args, **kwargs):
         return []
 
     async def on_finished(job):
@@ -78,7 +78,7 @@ async def test_a_second_pass_that_reaps_nothing_finishes_nothing(monkeypatch):
 async def test_a_failing_job_pass_still_reaps_dispatch(monkeypatch):
     reaped = []
 
-    async def broken():
+    async def broken(silent_only=False):
         raise RuntimeError("db down")
 
     async def reap_silent(grace_s):
@@ -87,13 +87,14 @@ async def test_a_failing_job_pass_still_reaps_dispatch(monkeypatch):
 
     monkeypatch.setattr(store, "expire_stale", broken)
     monkeypatch.setattr(dispatch, "reap_silent", reap_silent)
-    await reaper.reap_once()
+    assert await reaper.reap_once() is False
     assert reaped == [settings.dispatch_heartbeat_grace_s]
 
 
 async def test_expire_stale_only_takes_running_jobs_past_the_grace_setting(monkeypatch):
     """S4-4 and S4-6: the UPDATE re-checks status = 'running', so a concurrent second pass gets
-    nothing back; the grace is the setting, a parameter rather than SQL text."""
+    nothing back; the grace is the setting, a parameter rather than SQL text. The claim path
+    still judges the wall clock, as on main."""
     pool = _Pool()
     monkeypatch.setattr(store, "get_pool", lambda: pool)
     monkeypatch.setattr(store.settings, "job_heartbeat_grace_s", 77)
@@ -101,7 +102,57 @@ async def test_expire_stale_only_takes_running_jobs_past_the_grace_setting(monke
     sql, args = pool.calls[0]
     assert "WHERE status = 'running'" in sql
     assert "RETURNING *" in sql
-    assert args == (77,)
+    assert "(NOT $2::boolean AND started_at + make_interval(" in sql
+    assert args == (77, False)
+
+
+async def test_the_timer_never_reaps_a_long_job_that_still_beats(monkeypatch):
+    """S4-6: a job past started_at + timeout_s + grace with a fresh heartbeat is left alone by
+    the timer, which passes silent_only so the wall-clock branch is switched off."""
+    pool = _Pool()
+
+    async def nothing(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(store, "get_pool", lambda: pool)
+    monkeypatch.setattr(dispatch, "reap_silent", nothing)
+    assert await reaper.reap_once() is True
+    sql, args = pool.calls[0]
+    assert "heartbeat_at < NOW() - make_interval(secs => $1::int)" in sql
+    assert args == (settings.job_heartbeat_grace_s, True)
+
+
+async def test_no_pass_runs_until_the_process_has_listened_for_a_grace(monkeypatch):
+    """R2: beats sent while Sazed was down were lost, so start-up waits one grace."""
+    passes = []
+
+    async def reap_once():
+        passes.append(True)
+        return True
+
+    monkeypatch.setattr(reaper, "reap_once", reap_once)
+    gate = reaper.Gate(1000.0)
+    assert await gate.tick(1000.0 + reaper.hold_s() - 1) is False
+    assert passes == []
+    assert await gate.tick(1000.0 + reaper.hold_s()) is True
+    assert passes == [True]
+
+
+async def test_a_failed_pass_holds_reaping_for_another_grace(monkeypatch):
+    """R2: a pass that failed (database unreachable) means beats were lost meanwhile too."""
+    results = [False, True]
+
+    async def reap_once():
+        return results.pop(0)
+
+    monkeypatch.setattr(reaper, "reap_once", reap_once)
+    gate = reaper.Gate(0.0)
+    hold = reaper.hold_s()
+    assert await gate.tick(hold) is True
+    assert await gate.tick(hold + 60) is False
+    assert await gate.tick(2 * hold - 1) is False
+    assert await gate.tick(2 * hold) is True
+    assert results == []
 
 
 def test_thresholds_are_settings_whose_defaults_keep_jobs_as_before():
@@ -115,8 +166,9 @@ def test_thresholds_are_settings_whose_defaults_keep_jobs_as_before():
 
 async def test_dispatch_reap_fails_silent_running_tasks_once_and_says_since_when(monkeypatch):
     """S4-2 and S4-4: a running task with no row or beat inside the grace gets a failed row
-    saying since when; its ts is derived from the running row, so a second reaper's insert hits
-    the unique key and does nothing."""
+    saying since when. Its ts is the last beat's time, never before the running row's, so the
+    console shows how long it ran; both come from rows every reaper reads alike, so a second
+    reaper's insert hits the unique key and does nothing."""
     pool = _Pool([{"plan": "p", "task": "t", "line": "no heartbeat since 2026-11-18 10:00:00 UTC"}])
     monkeypatch.setattr(dispatch, "get_pool", lambda: pool)
     out = await dispatch.reap_silent(150)
@@ -124,7 +176,8 @@ async def test_dispatch_reap_fails_silent_running_tasks_once_and_says_since_when
     assert args == (150,)
     assert "l.state = 'running'" in sql
     assert "GREATEST(l.received_at, h.beat_at)" in sql
-    assert "ts + 0.001, 'failed'" in sql
+    assert "GREATEST(l.ts + 0.001, extract(epoch FROM h.beat_at)::float8) AS reaped_ts" in sql
+    assert "SELECT plan, task, reaped_ts, 'failed'" in sql
     assert "'no heartbeat since '" in sql
     assert "'stop_reason', 'no_heartbeat'" in sql
     assert "ON CONFLICT (plan, task, ts, state) DO NOTHING" in sql

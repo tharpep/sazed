@@ -115,9 +115,11 @@ async def heartbeat(plan: str, task: str) -> None:
 
 async def reap_silent(grace_s: int) -> list[dict[str, Any]]:
     """Fail each task whose latest row is running and that has sent neither a row nor a heartbeat
-    for grace_s, with a line saying since when. The failed row's ts is the running row's plus
-    1 ms: the same for every caller, so a second reaper's insert hits the unique key and does
-    nothing, and any real row the task writes later (a sync replay) still sorts after it."""
+    for grace_s, with a line saying since when. The failed row's ts is the last heartbeat's time,
+    or the running row's ts plus 1 ms when it never beat or its beat predates that row, so the
+    console shows how long it ran and the row still sorts after the running one. Every caller
+    reads the same pair (a newer beat would make the task not silent), so a second reaper's
+    insert hits the unique key and does nothing."""
     rows = await get_pool().fetch(
         """
         WITH latest AS (
@@ -125,14 +127,16 @@ async def reap_silent(grace_s: int) -> list[dict[str, Any]]:
             FROM dispatch_rows
             ORDER BY plan, task, ts DESC, id DESC
         ), silent AS (
-            SELECT l.plan, l.task, l.ts, GREATEST(l.received_at, h.beat_at) AS last_seen
+            SELECT l.plan, l.task,
+                   GREATEST(l.ts + 0.001, extract(epoch FROM h.beat_at)::float8) AS reaped_ts,
+                   GREATEST(l.received_at, h.beat_at) AS last_seen
             FROM latest l
             LEFT JOIN dispatch_heartbeats h ON h.plan = l.plan AND h.task = l.task
             WHERE l.state = 'running'
               AND GREATEST(l.received_at, h.beat_at) < NOW() - make_interval(secs => $1::int)
         )
         INSERT INTO dispatch_rows (plan, task, ts, state, line, meta)
-        SELECT plan, task, ts + 0.001, 'failed',
+        SELECT plan, task, reaped_ts, 'failed',
                'no heartbeat since '
                    || to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') || ' UTC',
                jsonb_build_object('stop_reason', 'no_heartbeat', 'last_heartbeat', last_seen)

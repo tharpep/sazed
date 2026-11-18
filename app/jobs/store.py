@@ -210,22 +210,25 @@ async def bakeoff_arms(bakeoff_id: str) -> list[dict[str, Any]]:
     return out
 
 
-async def expire_stale() -> list[dict[str, Any]]:
+async def expire_stale(silent_only: bool = False) -> list[dict[str, Any]]:
     """Mark running jobs whose worker went silent (or overran their timeout) as timed_out.
-    Safe to run concurrently: a second UPDATE re-checks status = 'running' after the first
-    commits, so each job is returned to exactly one caller."""
+    The reaper passes silent_only: a healthy job can outlast timeout_s plus the grace (repo prep,
+    a fix round and a repair round each get a fresh budget), and only an idle worker's claim may
+    judge the wall clock. Safe to run concurrently: a second UPDATE re-checks
+    status = 'running' after the first commits, so each job is returned to exactly one caller."""
     rows = await get_pool().fetch(
         """
         UPDATE jobs SET status = 'timed_out', finished_at = NOW(),
                error = COALESCE(error, 'worker stopped reporting')
         WHERE status = 'running'
           AND (heartbeat_at < NOW() - make_interval(secs => $1::int)
-               OR started_at + make_interval(
+               OR (NOT $2::boolean AND started_at + make_interval(
                     secs => COALESCE((params->>'timeout_s')::int, 300) + $1::int
-                  ) < NOW())
+                  ) < NOW()))
         RETURNING *
         """,
         settings.job_heartbeat_grace_s,
+        silent_only,
     )
     return [_row(r) for r in rows]
 
