@@ -7,7 +7,7 @@ from typing import Any
 from app.board import service
 from app.db import get_pool
 
-NEEDS_STATES = ("waiting", "failed", "conflict", "blocked")
+NEEDS_STATES = ("waiting", "failed", "conflict", "blocked", "timed_out")
 NEEDS_WINDOW_S = 24 * 3600
 STEP_TEXT_MAX = 300
 PLAN_STEPS_MAX = 80
@@ -16,6 +16,7 @@ _NEXT = {
     "failed": "Fix the plan and run it again",
     "conflict": "Fix the plan and run it again",
     "blocked": "Fix the plan and run it again",
+    "timed_out": "Fix the plan and run it again",
 }
 
 

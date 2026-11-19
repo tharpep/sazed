@@ -37,9 +37,8 @@ OLD_KEYS = (
     "updated_at",
     "version",
 )
-PROTECTED = frozenset(
-    {"implement", "flash", "research_quick", "research_deep", "second_opinion", "review", "change"}
-)
+JOB_PROFILES = frozenset({"research_quick", "research_deep", "second_opinion", "review", "change"})
+PROTECTED = frozenset({"implement", "flash", *JOB_PROFILES})
 MODELS = {
     "claude": re.compile(r"^(haiku|sonnet|opus|fable|claude-[\w.\-\[\]]+)$"),
     "agy": re.compile(r"^gemini-[\w.\-]+$"),
@@ -151,7 +150,7 @@ async def write(
             version,
             author,
             reason,
-            json.dumps(fields),
+            json.dumps({**fields, "read_only": fields["capability"] != "change"}),
         )
 
 
@@ -204,6 +203,12 @@ async def save(
             409,
         )
     fields = _complete(fields, read_only, current)
+    # A job's worker profile (and so its write access) and review_agent_by_source both follow the
+    # capability, so a job profile keeps the one it was seeded with.
+    if current and name in JOB_PROFILES and fields["capability"] != current["capability"]:
+        raise ProfileError(
+            f"{name!r} is a job profile; its capability stays {current['capability']!r}", 409
+        )
     try:
         await mcp_servers.check_grants(fields["mcp"])
     except mcp_servers.ServerError as e:
@@ -240,5 +245,6 @@ async def delete(name: str, *, author: str, reason: str) -> dict[str, Any]:
     if await count() <= 1:
         raise ProfileError("can't delete the last profile", 409)
     version = current["version"] + 1
-    await remove_row(name, version, {k: current[k] for k in FIELDS}, author, reason)
+    snapshot = {**{k: current[k] for k in FIELDS}, "read_only": current["read_only"]}
+    await remove_row(name, version, snapshot, author, reason)
     return {"name": name, "removed": True, "version": version}

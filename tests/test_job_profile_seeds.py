@@ -6,7 +6,7 @@ import re
 import pytest
 
 from app.board import profiles as registry
-from app.jobs import profiles
+from app.jobs import profiles, service
 from app.migrations import _MIGRATIONS_DIR
 
 # The table app/jobs/profiles.py held until migration 035: name -> (engine, capability, model,
@@ -101,3 +101,40 @@ async def test_a_registry_edit_reaches_the_next_job(monkeypatch):
     rows["research_deep"] = {**rows["research_deep"], "timeout_s": 900, "max_tool_calls": 120}
     run = await profiles.resolve("research_deep", source="console")
     assert (run.timeout_s, run.max_tool_calls) == (900, 120)
+
+
+async def _created_research(monkeypatch, depth):
+    created = []
+
+    async def create_job(**kwargs):
+        created.append(kwargs)
+        return kwargs
+
+    async def no_cap(*args):
+        return None
+
+    monkeypatch.setattr(service.settings, "worker_key", "test-key")
+    monkeypatch.setattr(service.store, "create_job", create_job)
+    monkeypatch.setattr(service, "_check_cap", no_cap)
+    await service.create_research("Best NVMe?", depth, requested_by="console")
+    return created[0]
+
+
+async def test_deep_research_runs_on_its_own_profile_not_the_quick_one(monkeypatch):
+    rows = fake_registry(monkeypatch)
+    rows["research_quick"] = {**rows["research_quick"], "model": "gemini-quick-edit"}
+    rows["research_deep"] = {**rows["research_deep"], "model": "gemini-3.8-pro"}
+    monkeypatch.setattr(service.settings, "agy_models", ["gemini-3.8-pro", "gemini-quick-edit"])
+    job = await _created_research(monkeypatch, "deep")
+    assert (job["agent"], job["model"], job["params"]["timeout_s"]) == (
+        "agy",
+        "gemini-3.8-pro",
+        600,
+    )
+
+
+async def test_a_missing_job_profile_is_a_job_error(monkeypatch):
+    rows = fake_registry(monkeypatch)
+    del rows["research_deep"]
+    with pytest.raises(service.JobError, match="research_deep"):
+        await _created_research(monkeypatch, "deep")

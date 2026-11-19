@@ -192,3 +192,12 @@ async def test_a_reaped_task_still_needs_pryce_with_its_heartbeat_line(monkeypat
     [needs] = result["needs"]
     assert needs["next"] == "Fix the plan and run it again"
     assert needs["title"].startswith("ui")
+
+
+async def test_a_task_the_worker_timed_out_needs_pryce(monkeypatch):
+    rows = [_mapped("api", "running", "running", 900), _mapped("api", "timed_out", "timed_out", 60)]
+    result = await _summary_with(monkeypatch, rows)
+    [needs] = result["needs"]
+    assert needs["id"] == "dispatch:ui-pass:api"
+    assert needs["next"] == "Fix the plan and run it again"
+    assert result["working"] == []

@@ -146,13 +146,32 @@ def _context_line(context: str) -> str:
     return f"\nContext from the conversation: {context.strip()}\n" if context.strip() else ""
 
 
+async def _resolve(name: str, **kwargs: Any) -> profiles.Resolved:
+    try:
+        return await profiles.resolve(name, **kwargs)
+    except LookupError as e:
+        raise JobError(f"{e}; the agent_profiles registry is missing a job profile") from e
+
+
 async def _create_agy_job(
     kind: str, title: str, prompt: str, params: dict[str, Any], requested_by: str, model: str | None
 ) -> dict[str, Any]:
+    """An agent step's agy job: always agy, on the model the step names."""
+    capability = "second_opinion" if kind == "second_opinion" else "research_quick"
+    run = await _resolve(capability, source=requested_by, agent="agy", model=model)
+    return await _create_resolved_job(kind, title, prompt, params, requested_by, run)
+
+
+async def _create_resolved_job(
+    kind: str,
+    title: str,
+    prompt: str,
+    params: dict[str, Any],
+    requested_by: str,
+    run: profiles.Resolved,
+) -> dict[str, Any]:
     if not settings.worker_key:
         raise JobError("the worker isn't configured here (WORKER_KEY is empty)")
-    capability = "second_opinion" if kind == "second_opinion" else "research_quick"
-    run = await profiles.resolve(capability, source=requested_by, agent="agy", model=model)
     _check_model(run.agent, run.model)
     await _check_cap(run.agent, requested_by)
     return await store.create_job(
@@ -177,7 +196,7 @@ async def create_research(
 ) -> dict[str, Any]:
     if depth not in RESEARCH_DEPTHS:
         raise JobError(f"depth must be one of: {', '.join(RESEARCH_DEPTHS)}")
-    limits = await profiles.resolve(f"research_{depth}", source=requested_by, model=model)
+    run = await _resolve(f"research_{depth}", source=requested_by, model=model)
     prompt = (
         _RESEARCH_PROMPT.format(
             question=question.strip(), context=_context_line(context), shape=RESEARCH_DEPTHS[depth]
@@ -186,12 +205,12 @@ async def create_research(
     )
     params = {
         "depth": depth,
-        "timeout_s": limits.timeout_s,
-        "max_tool_calls": limits.max_tool_calls,
+        "timeout_s": run.timeout_s,
+        "max_tool_calls": run.max_tool_calls,
         "save_to_kb": save_to_kb,
         "question": question.strip(),
     }
-    return await _create_agy_job("research", question, prompt, params, requested_by, model)
+    return await _create_resolved_job("research", question, prompt, params, requested_by, run)
 
 
 async def create_second_opinion(
@@ -201,9 +220,9 @@ async def create_second_opinion(
         _SECOND_OPINION_PROMPT.format(subject=subject.strip(), context=_context_line(context))
         + _ASK_RULE
     )
-    limits = await profiles.resolve("second_opinion", source=requested_by, model=model)
-    params = {"timeout_s": limits.timeout_s, "max_tool_calls": limits.max_tool_calls}
-    return await _create_agy_job("second_opinion", subject, prompt, params, requested_by, model)
+    run = await _resolve("second_opinion", source=requested_by, model=model)
+    params = {"timeout_s": run.timeout_s, "max_tool_calls": run.max_tool_calls}
+    return await _create_resolved_job("second_opinion", subject, prompt, params, requested_by, run)
 
 
 DEFAULT_GITHUB_OWNER = "tharpep"
@@ -335,7 +354,7 @@ async def create_code_task(
         repo = f"{DEFAULT_GITHUB_OWNER}/{repo}"
     if not _REPO_RE.match(repo):
         raise JobError(f"'{repo}' isn't a repo name like owner/name")
-    run = await profiles.resolve(mode, source=requested_by, agent=agent, model=model)
+    run = await _resolve(mode, source=requested_by, agent=agent, model=model)
     _require(policy.StartJob(run.agent, requested_by, repo=repo))
     info = await _repo_info(repo)
     _check_model(run.agent, run.model)
@@ -346,12 +365,15 @@ async def create_code_task(
         template = _PR_REVIEW_PROMPT
     else:
         template = _REVIEW_PROMPT
-    prompt = template.format(
-        repo=info.get("full_name") or repo,
-        instruction=instruction.strip(),
-        context=_context_line(context),
-        pr_number=pr_number or 0,
-    ) + _ASK_RULE
+    prompt = (
+        template.format(
+            repo=info.get("full_name") or repo,
+            instruction=instruction.strip(),
+            context=_context_line(context),
+            pr_number=pr_number or 0,
+        )
+        + _ASK_RULE
+    )
     params = {
         "repo": repo,
         "mode": mode,

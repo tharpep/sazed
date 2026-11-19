@@ -1,5 +1,6 @@
 """Agent profiles: validation, versioned saves, protected deletes, dispatch links to the board."""
 
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -152,7 +153,7 @@ def test_deleting_a_profile_writes_a_removed_history_row(api, store):
     assert response.status_code == 200
     [(name, version, profile, author, reason)] = store["removed"]
     assert (name, version, author, reason) == ("smoke", 4, "pryce", "unused")
-    assert set(profile) == set(profiles.FIELDS)
+    assert set(profile) == {*profiles.FIELDS, "read_only"}
 
 
 async def test_a_dispatch_plan_post_carries_project_and_board_plan(monkeypatch):
@@ -338,3 +339,59 @@ def test_protected_profiles_cannot_be_deleted(api, store, name):
     response = api.delete(f"/agents/profiles/{name}", params={"author": "pryce", "reason": "tidy"})
     assert response.status_code == 409
     assert store["removed"] == []
+
+
+@pytest.mark.parametrize(("read_only", "capability"), [(False, None), (None, "change")])
+def test_a_job_profile_keeps_its_capability(api, store, read_only, capability):
+    store["profiles"]["research_deep"] = RESEARCH
+    body = {**BODY, "model": "gemini-3.8-flash-high", "read_only": read_only}
+    if capability:
+        body |= {"engine": "agy", "capability": capability}
+    response = api.put("/agents/profiles/research_deep", json=body)
+    assert response.status_code == 409
+    assert "job profile" in response.json()["detail"]
+    assert store["writes"] == []
+
+
+def test_a_job_profile_can_move_to_another_engine(api, store):
+    store["profiles"]["research_deep"] = RESEARCH
+    body = {
+        **BODY,
+        "model": "sonnet",
+        "read_only": None,
+        "engine": "claude",
+        "capability": "research",
+    }
+    assert api.put("/agents/profiles/research_deep", json=body).status_code == 200
+    [(_, fields, _, _, _)] = store["writes"]
+    assert (fields["engine"], fields["capability"]) == ("claude", "research")
+
+
+async def test_a_saves_history_row_carries_read_only(monkeypatch):
+    executed = []
+
+    class Conn:
+        async def fetchval(self, sql, *args):
+            return 3
+
+        async def execute(self, sql, *args):
+            executed.append((sql, args))
+
+        def transaction(self):
+            return self
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Conn()
+
+    monkeypatch.setattr(profiles, "get_pool", lambda: Pool())
+    fields = {k: v for k, v in RESEARCH.items() if k in profiles.FIELDS}
+    await profiles.write("research_deep", fields, RESEARCH, "pryce", "tune")
+    [snapshot] = [a[-1] for sql, a in executed if "agent_profile_versions" in sql]
+    assert json.loads(snapshot)["read_only"] is True
