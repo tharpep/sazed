@@ -133,6 +133,7 @@ async def test_a_follow_up_names_the_pr_it_continues(monkeypatch):
 async def test_a_refused_follow_up_keeps_the_work_out_of_github(monkeypatch):
     class _Resp:
         is_success = False
+        status_code = 409
         text = "conflict"
 
         def json(self):

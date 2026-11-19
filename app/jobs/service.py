@@ -115,6 +115,19 @@ class JobError(ValueError):
     """A job request that breaks a rule (unknown model, cap reached, ...)."""
 
 
+class GatewayUnreachable(JobError):
+    """The gateway, or GitHub behind it, could not be reached or failed on its side."""
+
+
+class PullRequestError(JobError):
+    """The gateway answered a PR request with an error; status is its HTTP status."""
+
+    def __init__(self, status: int, detail: Any):
+        super().__init__(f"couldn't open the PR: {detail}")
+        self.status = status
+        self.detail = str(detail)
+
+
 def _require(action: policy.StartJob) -> None:
     """Raise JobError with the policy's reason if it blocks this job."""
     decision = policy.decide(action)
@@ -315,7 +328,7 @@ invariants the change relies on, what you could not verify, and open questions.
 _REPO_RE = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
 
 
-async def _repo_info(repo: str) -> dict[str, Any]:
+async def repo_info(repo: str) -> dict[str, Any]:
     owner, name = repo.split("/", 1)
     try:
         resp = await get_client().get(
@@ -324,12 +337,24 @@ async def _repo_info(repo: str) -> dict[str, Any]:
             timeout=20.0,
         )
     except httpx.HTTPError as e:
-        raise JobError(f"couldn't look up {repo}: {e}") from e
+        raise GatewayUnreachable(f"couldn't look up {repo}: {e}") from e
     if resp.status_code == 404:
         raise JobError(f"repo {repo} not found")
+    if resp.status_code >= 500:
+        raise GatewayUnreachable(f"couldn't look up {repo} (HTTP {resp.status_code})")
     if not resp.is_success:
         raise JobError(f"couldn't look up {repo} (HTTP {resp.status_code})")
     return resp.json()
+
+
+def full_repo(repo: str) -> str:
+    """owner/name from a GitHub URL, owner/name, or a bare name under the default owner."""
+    repo = repo.strip().removeprefix("https://github.com/").removesuffix(".git").strip("/")
+    if "/" not in repo:
+        repo = f"{DEFAULT_GITHUB_OWNER}/{repo}"
+    if not _REPO_RE.match(repo):
+        raise JobError(f"'{repo}' isn't a repo name like owner/name")
+    return repo
 
 
 async def create_code_task(
@@ -349,14 +374,10 @@ async def create_code_task(
         raise JobError("the worker isn't configured here (WORKER_KEY is empty)")
     if mode not in CODE_MODES:
         raise JobError(f"mode must be one of: {', '.join(CODE_MODES)}")
-    repo = repo.strip().removeprefix("https://github.com/").removesuffix(".git").strip("/")
-    if "/" not in repo:
-        repo = f"{DEFAULT_GITHUB_OWNER}/{repo}"
-    if not _REPO_RE.match(repo):
-        raise JobError(f"'{repo}' isn't a repo name like owner/name")
+    repo = full_repo(repo)
     run = await _resolve(mode, source=requested_by, agent=agent, model=model)
     _require(policy.StartJob(run.agent, requested_by, repo=repo))
-    info = await _repo_info(repo)
+    info = await repo_info(repo)
     _check_model(run.agent, run.model)
     await _check_cap(run.agent, requested_by)
     if mode == "change":
@@ -750,9 +771,8 @@ async def open_pull_request(
         f"Opened by Sazed's worker (Claude Code, `{job['model']}`) for job `{job['id']}`.\n"
         f"Task: {instruction}"
     )
-    resp = await get_client().post(
-        f"{settings.gateway_url}/github/app/pull-request",
-        json={
+    return await _post_pull_request(
+        {
             "repo": params["repo"],
             "branch": parent.get("branch") or f"sazed/{job['id']}",
             "title": title,
@@ -763,7 +783,43 @@ async def open_pull_request(
             "ready": not draft and bool(parent.get("pr_draft")),
             # A follow-up continues its parent's PR; the gateway refuses if it was closed.
             "pr_number": parent.get("pr_number"),
-        },
+        }
+    )
+
+
+async def open_plan_pull_request(
+    plan: str,
+    repo: str,
+    base: str,
+    base_sha: str,
+    title: str,
+    body: str,
+    files: dict[str, str | None],
+    modes: dict[str, str],
+    pr_number: int | None,
+) -> dict:
+    """Have the gateway's bot open (or update) a dispatch plan's draft PR (One stack seam 6)."""
+    return await _post_pull_request(
+        {
+            "repo": repo,
+            "branch": f"sazed/plan-{plan}",
+            "title": title,
+            "body": body,
+            "commit_message": f"{title}\n\nSazed dispatch plan {plan}",
+            "files": files,
+            "draft": True,
+            "pr_number": pr_number,
+            "base": base,
+            "base_sha": base_sha,
+            "modes": modes,
+        }
+    )
+
+
+async def _post_pull_request(payload: dict[str, Any]) -> dict:
+    resp = await get_client().post(
+        f"{settings.gateway_url}/github/app/pull-request",
+        json=payload,
         headers={"X-API-Key": settings.gateway_api_key},
         timeout=120.0,
     )
@@ -772,7 +828,7 @@ async def open_pull_request(
             detail = resp.json().get("detail", resp.text)
         except ValueError:
             detail = resp.text
-        raise JobError(f"couldn't open the PR: {detail}")
+        raise PullRequestError(resp.status_code, detail)
     return resp.json()
 
 

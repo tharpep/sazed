@@ -6,13 +6,17 @@ can reach only these three routes. Disabled (503) when WORKER_KEY is empty.
 
 import hmac
 import logging
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, ValidationError
 
+from app.board import dispatch
 from app.claude_usage import stats as usage_stats
 from app.claude_usage import store as usage_store
 from app.config import settings
@@ -202,6 +206,112 @@ async def finish(job_id: uuid.UUID, body: FinishRequest):
     logger.info("Job %s finished: %s", job_id, body.status)
     await service.on_finished(job)
     return {"recorded": True}
+
+
+class ExportIn(BaseModel):
+    repo: str
+    base: str = Field(..., min_length=1)
+    base_sha: str = Field(..., pattern=r"^[0-9a-f]{40}$")
+    title: str = Field(..., min_length=1, max_length=256)
+    body: str = Field("", max_length=60_000)
+    files: dict[str, str | None]
+    modes: dict[str, str] = Field(default_factory=dict)
+
+
+class ExportRefused(Exception):
+    def __init__(self, status: int, reason: str, detail: str):
+        super().__init__(detail)
+        self.status, self.reason, self.detail = status, reason, detail
+
+
+GATEWAY_MAX_FILES = 200
+GATEWAY_MAX_BASE64_CHARS = 5 * 1024 * 1024 * 4 // 3
+# pinned by test_plan_export.py::test_a_branch_whose_history_moved_is_refused_not_pr_closed
+_GATEWAY_PR_CLOSED = "not reopening it"
+# pinned by test_plan_export.py::test_a_plan_id_that_cant_form_a_branch_is_refused
+_PLAN_ID_RE = re.compile(r"^(?!.*\.\.)(?!.*\.$)(?!.*\.lock$)[A-Za-z0-9._-]{1,75}$")
+
+
+async def _export(plan: str, body: ExportIn) -> dict[str, Any]:
+    if not _PLAN_ID_RE.match(plan):
+        raise ExportRefused(422, "refused", f"plan id '{plan}' can't form a branch name")
+    found = await dispatch.plan_row(plan)
+    if found is None:
+        raise ExportRefused(404, "refused", f"plan '{plan}' isn't known here")
+    try:
+        repo = service.full_repo(found["repo"])
+        sent = service.full_repo(body.repo)
+    except service.JobError as e:
+        raise ExportRefused(422, "refused", str(e)) from e
+    if repo.lower() != sent.lower() or body.base != found["base"]:
+        raise ExportRefused(
+            422,
+            "refused",
+            f"plan '{plan}' is for {repo} at {found['base']}, not {sent} at {body.base}",
+        )
+    if len(body.files) > GATEWAY_MAX_FILES:
+        raise ExportRefused(
+            413, "export_too_large", f"too many files ({len(body.files)} > {GATEWAY_MAX_FILES})"
+        )
+    if sum(len(c or "") for c in body.files.values()) > GATEWAY_MAX_BASE64_CHARS:
+        raise ExportRefused(413, "export_too_large", "the changes are larger than 5 MiB")
+    try:
+        await service.repo_info(repo)
+        pr = await service.open_plan_pull_request(
+            plan,
+            repo,
+            body.base,
+            body.base_sha,
+            body.title,
+            body.body,
+            body.files,
+            body.modes,
+            found.get("pr_number"),
+        )
+    except httpx.HTTPError as e:
+        raise ExportRefused(
+            424, "export_unreachable", f"the gateway couldn't be reached ({type(e).__name__})"
+        ) from e
+    except service.GatewayUnreachable as e:
+        raise ExportRefused(424, "export_unreachable", str(e)) from e
+    except service.PullRequestError as e:
+        if e.status == 409 and _GATEWAY_PR_CLOSED in e.detail:
+            raise ExportRefused(409, "pr_closed", e.detail) from e
+        if e.status == 409:
+            raise ExportRefused(409, "refused", e.detail) from e
+        if e.status >= 500:
+            raise ExportRefused(424, "export_unreachable", e.detail) from e
+        raise ExportRefused(422, "refused", e.detail) from e
+    except service.JobError as e:
+        raise ExportRefused(422, "refused", str(e)) from e
+    await dispatch.record_export(plan, pr["url"], pr["number"], pr.get("head_sha"))
+    logger.info("Plan %s exported to %s", plan, pr["url"])
+    return {
+        "url": pr["url"],
+        "number": pr["number"],
+        "branch": pr["branch"],
+        "head_sha": pr.get("head_sha"),
+        "updated": bool(pr.get("updated")),
+        "base_moved": bool(pr.get("base_moved")),
+    }
+
+
+@router.post("/dispatch/plans/{plan}/export")
+async def export_plan(plan: str, request: Request):
+    """Open or update a dispatch plan's draft PR from integ/<plan>'s changed files (seam 6)."""
+    try:
+        body = ExportIn.model_validate_json(await request.body())
+    except ValidationError as e:
+        first = e.errors()[0]
+        where = ".".join(str(p) for p in first["loc"]) or "body"
+        return JSONResponse(
+            {"detail": f"{where}: {first['msg']}", "reason": "refused"}, status_code=422
+        )
+    try:
+        return await _export(plan, body)
+    except ExportRefused as e:
+        logger.warning("Plan %s export refused (%s): %s", plan, e.reason, e.detail)
+        return JSONResponse({"detail": e.detail, "reason": e.reason}, status_code=e.status)
 
 
 @router.post("/limits/due")

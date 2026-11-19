@@ -143,7 +143,7 @@ async def test_the_change_prompt_asks_for_the_block_and_ends_with_the_ask_rule(m
     monkeypatch.setattr(service.settings, "worker_key", "test-key")
     monkeypatch.setattr(service.store, "create_job", fake_create_job)
     monkeypatch.setattr(service, "_check_cap", no_cap)
-    monkeypatch.setattr(service, "_repo_info", fake_repo_info)
+    monkeypatch.setattr(service, "repo_info", fake_repo_info)
     fake_registry(monkeypatch)
 
     await service.create_code_task("tharpep/kelsier", "retry sync", "change", "console")
