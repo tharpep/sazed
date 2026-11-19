@@ -207,28 +207,60 @@ async def plan_row(plan: str) -> dict[str, Any] | None:
 
 
 async def rows_for(plan: str | None = None) -> list[dict[str, Any]]:
+    """Rows in order, each with its raw word as state and dispatch_state's word (migration 035)
+    as run_state. A cleaned row is mapped with the latest row before it that is not cleaned."""
     rows = await get_pool().fetch(
         """
-        SELECT plan, task, ts, state, line, ref, cost_usd, session, meta, received_at
-        FROM dispatch_rows
-        WHERE $1::text IS NULL OR plan = $1
-        ORDER BY ts, id
+        SELECT r.plan, r.task, r.ts, r.state,
+               dispatch_state(r.state, r.meta, b.state, b.meta) AS run_state,
+               r.line, r.ref, r.cost_usd, r.session, r.meta, r.received_at
+        FROM dispatch_rows r
+        LEFT JOIN LATERAL (
+            SELECT p.state, p.meta
+            FROM dispatch_rows p
+            WHERE r.state = 'cleaned' AND p.plan = r.plan AND p.task = r.task
+              AND p.state <> 'cleaned' AND (p.ts, p.id) < (r.ts, r.id)
+            ORDER BY p.ts DESC, p.id DESC
+            LIMIT 1
+        ) b ON TRUE
+        WHERE $1::text IS NULL OR r.plan = $1
+        ORDER BY r.ts, r.id
         """,
         plan,
     )
     return [{**dict(r), "meta": _json(r["meta"])} for r in rows]
 
 
+def shaped_row(row: dict[str, Any] | None, v2: bool) -> dict[str, Any] | None:
+    """The old shape keeps the raw word in state; the new one moves it to phase."""
+    if row is None:
+        return None
+    out = {k: v for k, v in row.items() if k != "run_state"}
+    return {**out, "state": row["run_state"], "phase": row["state"]} if v2 else out
+
+
 def _latest(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
     return {(r["plan"], r["task"]): r for r in rows}
 
 
-def _summary(plan: dict[str, Any], latest: dict[tuple[str, str], dict[str, Any]]) -> dict:
-    states: dict[str, int] = {}
-    for t in plan["tasks"]:
-        row = latest.get((plan["plan"], t["id"]))
-        state = row["state"] if row else "planned"
-        states[state] = states.get(state, 0) + 1
+def _count(words: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for w in words:
+        counts[w] = counts.get(w, 0) + 1
+    return counts
+
+
+def _summary(
+    plan: dict[str, Any], latest: dict[tuple[str, str], dict[str, Any]], v2: bool = False
+) -> dict:
+    rows = [latest.get((plan["plan"], t["id"])) for t in plan["tasks"]]
+    phases = _count([r["state"] if r else "planned" for r in rows])
+    counts = {"states": phases}
+    if v2:
+        counts = {
+            "states": _count([r["run_state"] if r else "planned" for r in rows]),
+            "phases": phases,
+        }
     return {
         "plan": plan["plan"],
         "repo": plan["repo"],
@@ -238,26 +270,27 @@ def _summary(plan: dict[str, Any], latest: dict[tuple[str, str], dict[str, Any]]
         "board_plan": plan.get("board_plan"),
         "updated_at": plan["updated_at"],
         "tasks_total": len(plan["tasks"]),
-        "states": states,
+        **counts,
     }
 
 
-async def list_plans() -> list[dict[str, Any]]:
+async def list_plans(v2: bool = False) -> list[dict[str, Any]]:
     latest = _latest(await rows_for())
-    return [_summary(p, latest) for p in await plan_rows()]
+    return [_summary(p, latest, v2) for p in await plan_rows()]
 
 
-async def runs_for_project(slug: str) -> list[dict[str, Any]]:
+async def runs_for_project(slug: str, v2: bool = False) -> list[dict[str, Any]]:
     latest = _latest(await rows_for())
+    keys = ("plan", "updated_at", "tasks_total", "states", "phases")
     runs = []
     for p in await plan_rows():
         if p.get("project") == slug:
-            s = _summary(p, latest)
-            runs.append({k: s[k] for k in ("plan", "updated_at", "tasks_total", "states")})
+            s = _summary(p, latest, v2)
+            runs.append({k: s[k] for k in keys if k in s})
     return runs
 
 
-async def get_plan(plan: str) -> dict[str, Any] | None:
+async def get_plan(plan: str, v2: bool = False) -> dict[str, Any] | None:
     found = await plan_row(plan)
     if not found:
         return None
@@ -276,8 +309,8 @@ async def get_plan(plan: str) -> dict[str, Any] | None:
         tasks.append(
             {
                 **t,
-                "latest": (history.get(t["id"]) or [None])[-1],
-                "rows": history.get(t["id"], []),
+                "latest": shaped_row((history.get(t["id"]) or [None])[-1], v2),
+                "rows": [shaped_row(r, v2) for r in history.get(t["id"], [])],
                 "steps": [
                     {k: v for k, v in s.items() if k not in ("plan", "task")}
                     for s in run[-PLAN_STEPS_MAX:]
@@ -285,7 +318,8 @@ async def get_plan(plan: str) -> dict[str, Any] | None:
                 "tools": sum(1 for s in run if s["kind"] == "tool"),
             }
         )
-    return {**_summary(found, _latest([r for rs in history.values() for r in rs])), "tasks": tasks}
+    latest = _latest([r for rs in history.values() for r in rs])
+    return {**_summary(found, latest, v2), "tasks": tasks}
 
 
 def _title(task: dict[str, Any]) -> str:

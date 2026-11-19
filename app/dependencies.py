@@ -1,8 +1,19 @@
 """Shared dependencies for FastAPI routes."""
 
-from fastapi import HTTPException, Request
+from typing import Annotated
+
+from fastapi import Depends, Header, HTTPException, Request
 
 from app.config import settings
+
+
+def _shape_v2(x_sazed_shape: Annotated[str | None, Header()] = None) -> bool:
+    return x_sazed_shape == "2"
+
+
+# One stack seam 1: dispatch and profile routes answer in the pre-035 shape unless the caller
+# sends X-Sazed-Shape: 2, until the worker and console have moved to the new one.
+ShapeV2 = Annotated[bool, Depends(_shape_v2)]
 
 
 def verify_api_key(request: Request) -> None:

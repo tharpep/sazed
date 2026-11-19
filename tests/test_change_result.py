@@ -8,6 +8,7 @@ import pytest
 
 from app.jobs import change_result, service
 from app.routers import worker
+from tests.test_job_profile_seeds import fake_registry
 
 JOB_ID = uuid.UUID("33333333-3333-3333-3333-333333333333")
 
@@ -143,9 +144,13 @@ async def test_the_change_prompt_asks_for_the_block_and_ends_with_the_ask_rule(m
     monkeypatch.setattr(service.store, "create_job", fake_create_job)
     monkeypatch.setattr(service, "_check_cap", no_cap)
     monkeypatch.setattr(service, "_repo_info", fake_repo_info)
+    fake_registry(monkeypatch)
 
     await service.create_code_task("tharpep/kelsier", "retry sync", "change", "console")
     prompt = created[0]["prompt"]
+    job = created[0]
+    assert (job["agent"], job["model"], job["profile"]) == ("claude", "claude-sonnet-5-5", "change")
+    assert (job["params"]["timeout_s"], job["params"]["max_tool_calls"]) == (1800, 200)
 
     assert '{"summary":' in prompt  # the format rule's braces survived .format()
     for key in FIELDS:

@@ -23,7 +23,7 @@ from app.pricing import estimate_cost_usd
 
 logger = logging.getLogger(__name__)
 
-# depth -> answer shape; the limits per depth live in profiles.CAPABILITIES (research_<depth>).
+# depth -> answer shape; the limits per depth are the registry's research_<depth> profile.
 RESEARCH_DEPTHS: dict[str, str] = {
     "quick": "a direct answer in 2-6 sentences",
     "deep": (
@@ -152,7 +152,7 @@ async def _create_agy_job(
     if not settings.worker_key:
         raise JobError("the worker isn't configured here (WORKER_KEY is empty)")
     capability = "second_opinion" if kind == "second_opinion" else "research_quick"
-    run = profiles.resolve(capability, source=requested_by, agent="agy", model=model)
+    run = await profiles.resolve(capability, source=requested_by, agent="agy", model=model)
     _check_model(run.agent, run.model)
     await _check_cap(run.agent, requested_by)
     return await store.create_job(
@@ -177,7 +177,7 @@ async def create_research(
 ) -> dict[str, Any]:
     if depth not in RESEARCH_DEPTHS:
         raise JobError(f"depth must be one of: {', '.join(RESEARCH_DEPTHS)}")
-    limits = profiles.resolve(f"research_{depth}", source=requested_by, model=model)
+    limits = await profiles.resolve(f"research_{depth}", source=requested_by, model=model)
     prompt = (
         _RESEARCH_PROMPT.format(
             question=question.strip(), context=_context_line(context), shape=RESEARCH_DEPTHS[depth]
@@ -201,14 +201,14 @@ async def create_second_opinion(
         _SECOND_OPINION_PROMPT.format(subject=subject.strip(), context=_context_line(context))
         + _ASK_RULE
     )
-    limits = profiles.resolve("second_opinion", source=requested_by, model=model)
+    limits = await profiles.resolve("second_opinion", source=requested_by, model=model)
     params = {"timeout_s": limits.timeout_s, "max_tool_calls": limits.max_tool_calls}
     return await _create_agy_job("second_opinion", subject, prompt, params, requested_by, model)
 
 
 DEFAULT_GITHUB_OWNER = "tharpep"
 
-CODE_MODES = ("review", "change")  # each is also a capability in profiles.CAPABILITIES
+CODE_MODES = ("review", "change")  # each is also a job profile in the agent_profiles registry
 
 _CHANGE_PROMPT = """You are making a change to the GitHub repository {repo} for Pryce. A copy of its
 default branch is in the current directory (no .git). You can read, search, edit and create
@@ -335,7 +335,7 @@ async def create_code_task(
         repo = f"{DEFAULT_GITHUB_OWNER}/{repo}"
     if not _REPO_RE.match(repo):
         raise JobError(f"'{repo}' isn't a repo name like owner/name")
-    run = profiles.resolve(mode, source=requested_by, agent=agent, model=model)
+    run = await profiles.resolve(mode, source=requested_by, agent=agent, model=model)
     _require(policy.StartJob(run.agent, requested_by, repo=repo))
     info = await _repo_info(repo)
     _check_model(run.agent, run.model)

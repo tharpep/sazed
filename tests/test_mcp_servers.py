@@ -34,13 +34,22 @@ PROFILE = {
 }
 
 
+# What a row from before migration 035 reads as after it: an implement-like writable row.
+STORED_DEFAULTS = {
+    "engine": "claude",
+    "capability": "change",
+    "max_tool_calls": None,
+    "read_only": False,
+}
+
+
 def _server(**over):
     stored = {"name": "example", **SERVER, "version": 2, "updated_by": "pryce"}
     return stored | {"updated_at": NOW} | over
 
 
 def _profile(**over):
-    base = {k: PROFILE[k] for k in profiles.FIELDS}
+    base = {**STORED_DEFAULTS, **{k: PROFILE[k] for k in profiles.FIELDS if k in PROFILE}}
     stored = {"name": "implement", **base, "updated_by": "pryce", "updated_at": NOW}
     return stored | {"version": 3} | over
 

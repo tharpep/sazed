@@ -10,6 +10,7 @@ from app.automations import runner
 from app.jobs import service, store
 from app.jobs import tools as job_tools
 from app.routers import worker
+from tests.test_job_profile_seeds import fake_registry
 
 JOB_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
@@ -82,12 +83,29 @@ async def test_job_prompts_tell_the_worker_how_to_ask(monkeypatch):
     monkeypatch.setattr(service.settings, "worker_key", "test-key")
     monkeypatch.setattr(service.store, "create_job", fake_create_job)
     monkeypatch.setattr(service, "_check_cap", no_cap)
+    fake_registry(monkeypatch)
 
     await service.create_research("Best NVMe?", "quick", requested_by="console")
+    await service.create_research("Best NVMe?", "deep", requested_by="console")
     await service.create_second_opinion("Is this plan sound?", requested_by="console")
 
     for job in created:
         assert "NEEDS_INPUT: <one short question>" in job["prompt"]
+    runs = [
+        (
+            j["agent"],
+            j["model"],
+            j["profile"],
+            j["params"]["timeout_s"],
+            j["params"]["max_tool_calls"],
+        )
+        for j in created
+    ]
+    assert runs == [
+        ("agy", "gemini-3.8-flash-high", "research", 300, 30),
+        ("agy", "gemini-3.8-flash-high", "research", 600, 80),
+        ("agy", "gemini-3.8-flash-high", "research", 300, 20),
+    ]
 
 
 # ---------------------------------------------------------------- worker finish

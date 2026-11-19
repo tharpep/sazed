@@ -84,6 +84,7 @@ async def _summary_with(monkeypatch, rows, steps=()):
         return []
 
     monkeypatch.setattr(dispatch, "plan_rows", plan_rows)
+
     async def steps_since(starts):
         return {
             k: [s for s in steps if (s["plan"], s["task"]) == k and s["ts"] >= start]
@@ -120,3 +121,74 @@ async def test_home_summary_leaves_out_a_dispatch_need_older_than_a_day(monkeypa
     result = await _summary_with(monkeypatch, rows)
     assert [n["id"] for n in result["needs"]] == ["dispatch:ui-pass:docs"]
     assert result["needs"][0]["next"] == "Fix the plan and run it again"
+
+
+def _mapped(task, state, run_state, age_s, line=""):
+    return {**_row(task, state, age_s, line), "run_state": run_state}
+
+
+MAPPED_ROWS = [
+    _mapped("api", "running", "running", 300),
+    _mapped("api", "done", "succeeded", 60),
+    _mapped("ui", "running", "running", 400),
+    _mapped("ui", "failed", "timed_out", 30, "no heartbeat since 2026-11-19 10:00:00 UTC"),
+]
+
+
+def _fake_store(monkeypatch, rows):
+    async def plan_rows():
+        return [PLAN]
+
+    async def plan_row(plan):
+        return PLAN
+
+    async def rows_for(plan=None):
+        return rows
+
+    async def steps_since(starts):
+        return {}
+
+    monkeypatch.setattr(dispatch, "plan_rows", plan_rows)
+    monkeypatch.setattr(dispatch, "plan_row", plan_row)
+    monkeypatch.setattr(dispatch, "rows_for", rows_for)
+    monkeypatch.setattr(dispatch, "steps_since", steps_since)
+
+
+async def test_without_the_header_rows_and_summaries_keep_the_raw_word(monkeypatch):
+    _fake_store(monkeypatch, MAPPED_ROWS)
+    [summary] = await router.list_plans(v2=False)
+    assert summary["states"] == {"done": 1, "failed": 1, "planned": 1}
+    assert "phases" not in summary
+    found = await router.get_plan("ui-pass", v2=False)
+    ui = found["tasks"][1]
+    assert ui["latest"]["state"] == "failed"
+    assert "phase" not in ui["latest"] and "run_state" not in ui["latest"]
+    assert [r["state"] for r in ui["rows"]] == ["running", "failed"]
+
+
+async def test_with_the_header_state_is_mapped_and_phase_is_raw(monkeypatch):
+    _fake_store(monkeypatch, MAPPED_ROWS)
+    [summary] = await router.list_plans(v2=True)
+    assert summary["states"] == {"succeeded": 1, "timed_out": 1, "planned": 1}
+    assert summary["phases"] == {"done": 1, "failed": 1, "planned": 1}
+    found = await router.get_plan("ui-pass", v2=True)
+    ui = found["tasks"][1]
+    assert (ui["latest"]["state"], ui["latest"]["phase"]) == ("timed_out", "failed")
+    assert ui["latest"]["line"].startswith("no heartbeat since ")
+    assert [(r["state"], r["phase"]) for r in ui["rows"]] == [
+        ("running", "running"),
+        ("timed_out", "failed"),
+    ]
+    assert found["states"] == summary["states"]
+
+
+def test_a_timed_out_row_from_the_worker_is_accepted():
+    assert router.RowIn(plan="p", task="t", ts=1.0, state="timed_out").state == "timed_out"
+
+
+async def test_a_reaped_task_still_needs_pryce_with_its_heartbeat_line(monkeypatch):
+    rows = [_mapped("ui", "failed", "timed_out", 30, "no heartbeat since 2026-11-19 10:00:00 UTC")]
+    result = await _summary_with(monkeypatch, rows)
+    [needs] = result["needs"]
+    assert needs["next"] == "Fix the plan and run it again"
+    assert needs["title"].startswith("ui")
