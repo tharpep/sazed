@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     # Which agent runs a review task, by who asked (ai-context research/agent-stack.md, D1):
     # automatic PR reviews from the GitHub webhook go to agy; any source not listed runs Claude.
     review_agent_by_source: dict[str, str] = {"webhook": "agy"}
+    # The model a job gets when its agent is not its registry profile's engine (a review moved to
+    # agy above). Pryce's call (2026-10-18): Gemini 3.8 Flash at its highest effort suits research
+    # best; the effort is part of the model id, and agy rejects a conflicting --effort.
+    default_model_by_engine: dict[str, str] = {
+        "agy": "gemini-3.8-flash-high",
+        "claude": "claude-sonnet-5-5",
+    }
     enable_pr_auto_reviews: bool = False
     # Repos Sazed never runs code tasks on (dormant; the gateway's bot refuses them too).
     code_task_excluded_repos: list[str] = [

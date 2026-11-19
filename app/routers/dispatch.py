@@ -7,11 +7,22 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.board import dispatch
+from app.dependencies import ShapeV2
 
 router = APIRouter()
 
+# Raw words; dispatch_state (migration 035) maps each onto the run states. Adding one here needs
+# a branch there (pinned by tests/test_dispatch_state.py).
 RowState = Literal[
-    "running", "done", "waiting", "failed", "landed", "conflict", "blocked", "cleaned"
+    "running",
+    "done",
+    "waiting",
+    "failed",
+    "landed",
+    "conflict",
+    "blocked",
+    "cleaned",
+    "timed_out",
 ]
 
 
@@ -94,13 +105,13 @@ async def post_steps(body: StepsIn):
 
 
 @router.get("/plans")
-async def list_plans():
-    return await dispatch.list_plans()
+async def list_plans(v2: ShapeV2):
+    return await dispatch.list_plans(v2)
 
 
 @router.get("/plans/{plan}")
-async def get_plan(plan: str):
-    found = await dispatch.get_plan(plan)
+async def get_plan(plan: str, v2: ShapeV2):
+    found = await dispatch.get_plan(plan, v2)
     if not found:
         raise HTTPException(404, "Plan not found")
     return {**found, "now": datetime.now(UTC).isoformat()}

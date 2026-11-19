@@ -1,17 +1,18 @@
-"""Agent profiles for dispatch: model, effort, budget, timeout and write access (migration 028)."""
+"""Agent profiles for dispatch and worker jobs (migrations 028 and 035), and MCP servers (029)."""
 
 import re
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Path, Query
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.board import mcp_servers, profiles
+from app.dependencies import ShapeV2
 
 router = APIRouter()
 
 AUTHOR = r"^(pryce|agent:[\w.:-]{1,60}|dispatch:[\w.:-]{1,60})$"
-Name = Annotated[str, Path(pattern=r"^[a-z][a-z0-9-]{1,30}$")]
+Name = Annotated[str, Path(pattern=r"^[a-z][a-z0-9_-]{1,30}$")]
 ServerName = Annotated[str, Path(pattern=r"^[a-z][a-z0-9_-]{1,30}$")]
 SERVER_NAME = re.compile(r"^[a-z][a-z0-9_-]{1,30}$")
 TOOL = re.compile(r"^([A-Za-z0-9_-]{1,64}|\*)$")
@@ -19,11 +20,17 @@ ENV_REF = re.compile(r"^\$\{[A-Z][A-Z0-9_]*\}$")
 
 
 class ProfileIn(BaseModel):
-    model: str = Field(..., pattern=r"^(haiku|sonnet|opus|fable|claude-[\w.\-\[\]]+)$")
-    effort: str = Field(..., pattern=r"^(low|medium|high|xhigh|max)$")
-    budget_usd: float = Field(..., ge=0.05, le=50)
+    """engine, capability and max_tool_calls are optional so a client from before migration 035
+    (read_only, no capability) can still save; profiles.save fills them from the row."""
+
+    engine: Literal["claude", "agy"] | None = None
+    capability: Literal["research", "review", "change", "browse"] | None = None
+    model: str = Field(..., pattern=r"^[\w.\-\[\]]{1,100}$")
+    effort: str | None = Field(None, pattern=r"^(low|medium|high|xhigh|max)$")
+    budget_usd: float | None = Field(None, ge=0.05, le=50)
     timeout_s: int = Field(..., ge=60, le=7200)
-    read_only: bool
+    max_tool_calls: int | None = Field(None, ge=1, le=1000)
+    read_only: bool | None = None
     evidence_required: bool = False
     description: str = Field("", max_length=300)
     mcp: dict[str, list[str]] = Field(default_factory=dict)
@@ -81,24 +88,28 @@ def _http(e: profiles.ProfileError) -> HTTPException:
 
 
 @router.get("/profiles")
-async def list_profiles():
-    return await profiles.list_profiles()
+async def list_profiles(v2: ShapeV2):
+    rows = await profiles.list_profiles()
+    return [profiles.shaped(p, v2) for p in rows if v2 or profiles.old_client_can_show(p)]
 
 
 @router.get("/profiles/{name}")
-async def get_profile(name: Name):
+async def get_profile(name: Name, v2: ShapeV2):
     try:
-        return await profiles.get(name)
+        found = await profiles.get(name)
     except profiles.ProfileError as e:
         raise _http(e) from e
+    return {**profiles.shaped(found, v2), "history": found["history"]}
 
 
 @router.put("/profiles/{name}")
-async def put_profile(name: Name, body: ProfileIn):
+async def put_profile(name: Name, body: ProfileIn, v2: ShapeV2):
+    unset = {"max_tool_calls"} - body.model_fields_set
     try:
-        return await profiles.save(name, **body.model_dump())
+        saved = await profiles.save(name, **body.model_dump(exclude=unset))
     except profiles.ProfileError as e:
         raise _http(e) from e
+    return profiles.shaped(saved, v2) if saved else saved
 
 
 @router.delete("/profiles/{name}")

@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.board import actions, command, dispatch, plans, projects, service
+from app.dependencies import ShapeV2
 
 router = APIRouter()
 
@@ -82,11 +83,11 @@ async def create_project(body: ProjectCreate):
 
 
 @router.get("/projects/{slug}")
-async def get_project(slug: str):
+async def get_project(slug: str, v2: ShapeV2):
     found = await projects.get_project(slug)
     if found is None:
         raise HTTPException(404, "Project not found")
-    return {**found, "dispatch_runs": await dispatch.runs_for_project(slug)}
+    return {**found, "dispatch_runs": await dispatch.runs_for_project(slug, v2)}
 
 
 @router.patch("/projects/{slug}")
