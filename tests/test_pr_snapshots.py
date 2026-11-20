@@ -571,3 +571,20 @@ def test_the_stricter_review_wins_and_none_is_no_review():
     assert prs.stricter(approve, changes) == changes
     assert prs.stricter(None, approve) == approve
     assert prs.stricter(None, None) is None
+
+
+def test_a_fenced_example_does_not_override_the_real_review():
+    body = (
+        "## Review\nVerdict: request changes\n\n"
+        "The format:\n```\n## Review\nVerdict: approve\n```\n"
+    )
+    assert prs.body_review(body)["verdict"] == "request_changes"
+
+
+def test_a_padded_review_section_parses_quickly():
+    import time
+
+    start = time.monotonic()
+    assert prs.body_review("## Review\n" + " " * 65000 + "x") is None
+    assert prs.body_review("## Review\nVerdict: approve" + " " * 65000)["verdict"] == "approve"
+    assert time.monotonic() - start < 1

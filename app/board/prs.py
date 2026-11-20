@@ -250,15 +250,25 @@ def review(job: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 _REVIEW_SECTION = re.compile(r"^##\s*Review\s*$(.*?)(?=^##\s|\Z)", re.MULTILINE | re.DOTALL)
-_FIELD = re.compile(r"^\s*[-*]?\s*\**(Verdict|Reviewer)\**\s*:\s*(.+?)\s*$", re.MULTILINE)
+_FENCED = re.compile(r"```.*?```", re.DOTALL)
+_FIELD = re.compile(
+    r"^[ 	]*[-*]?[ 	]*\**(Verdict|Reviewer)\**[ 	]*:[ 	]*(\S.*)$", re.MULTILINE
+)
+# Bounds the regex work on a body anyone with write access can edit; GitHub allows 65,536.
+_SECTION_MAX = 2000
 
 
 def body_review(body: Any) -> dict[str, Any] | None:
     """The `## Review` section a session writes into the PR body when the change was reviewed
     before the PR opened. Only the last section counts; no readable Verdict line is no review."""
-    if not isinstance(body, str) or not (sections := _REVIEW_SECTION.findall(body)):
+    if not isinstance(body, str):
         return None
-    fields = {name.lower(): value for name, value in _FIELD.findall(sections[-1])}
+    sections = _REVIEW_SECTION.findall(_FENCED.sub("", body))
+    if not sections:
+        return None
+    fields = {
+        name.lower(): value.strip() for name, value in _FIELD.findall(sections[-1][:_SECTION_MAX])
+    }
     if not (verdict := _verdict_word(fields.get("verdict"))):
         return None
     return {"verdict": verdict, "source": fields.get("reviewer", "PR body")[:120], "url": None}
