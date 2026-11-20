@@ -57,7 +57,7 @@ def block(ref: dict[str, Any] | None, snap: dict[str, Any] | None) -> dict[str, 
         return None
     url = f"https://github.com/{ref['repo']}/pull/{ref['number']}"
     out = {"repo": ref["repo"], "number": ref["number"], "url": url}
-    if snap is None:
+    if snap is None or snap["fetched_at"] is None:
         return out | {
             "state": ref["known"],
             "checks": None,
@@ -85,14 +85,32 @@ def block(ref: dict[str, Any] | None, snap: dict[str, Any] | None) -> dict[str, 
     }
 
 
+def backoff(failures: int) -> timedelta:
+    """How long a ref waits after its latest failed fetch: SNAPSHOT_AGE, doubling to 32x."""
+    return SNAPSHOT_AGE * 2 ** min(max(failures, 1) - 1, 5)
+
+
 def _wanted(snap: dict[str, Any] | None, done_at: datetime | None, now: datetime) -> bool:
     if snap is None:
         return True
     if snap["state"] in ("merged", "closed"):
         return False
+    if snap["failures"]:
+        return now - snap["attempted_at"] >= backoff(snap["failures"])
     if done_at is not None:
         return snap["fetched_at"] < done_at
     return now - snap["fetched_at"] >= SNAPSHOT_AGE
+
+
+def _order(pair: tuple[dict[str, Any], dict[str, Any] | None], now: datetime) -> tuple:
+    """Healthy refs first (never tried, then the oldest snapshot), refs that keep failing last,
+    so a run of broken refs can't take every slot of a pass."""
+    snap = pair[1]
+    if snap is None:
+        return 0, now
+    if snap["failures"]:
+        return 2, snap["attempted_at"]
+    return 1, snap["fetched_at"]
 
 
 def due(
@@ -103,9 +121,9 @@ def due(
     now: datetime,
     done_window: timedelta,
 ) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
-    """PRs to fetch, never-fetched first, then the oldest snapshot. An open card's PR is fetched
-    every SNAPSHOT_AGE; a done card's once after it turned done, and only while the board still
-    shows it; a merged or closed snapshot never again."""
+    """PRs to fetch, in _order. An open card's PR is fetched every SNAPSHOT_AGE; a done card's
+    once after it turned done, and only while the board still shows it; a merged or closed
+    snapshot never again; a ref whose last fetch failed after its backoff."""
     found: dict[Key, dict[str, Any]] = {}
     for item in items:
         ref = item_ref(item, chains.get(item["id"], []))
@@ -123,7 +141,7 @@ def due(
         if ref and _wanted(snaps.get(key(ref["repo"], ref["number"])), None, now):
             found.setdefault(key(ref["repo"], ref["number"]), ref)
     pairs = [(ref, snaps.get(k)) for k, ref in found.items()]
-    return sorted(pairs, key=lambda p: (p[1] is not None, p[1]["fetched_at"] if p[1] else now))
+    return sorted(pairs, key=lambda p: _order(p, now))
 
 
 def checks(ci: Any) -> dict[str, Any]:
@@ -156,19 +174,21 @@ def head_sha(pr: dict[str, Any]) -> str | None:
     return sha if isinstance(sha, str) and sha else None
 
 
+def state(pr: dict[str, Any]) -> str:
+    if pr.get("merged"):
+        return "merged"
+    if pr.get("state") == "closed":
+        return "closed"
+    return "draft" if pr.get("draft") else "open"
+
+
 def snapshot(
-    pr: dict[str, Any], pr_checks: dict[str, Any], review: dict[str, Any] | None
+    pr: dict[str, Any], pr_checks: dict[str, Any] | None, review: dict[str, Any] | None
 ) -> dict[str, Any]:
     """The row to store from the gateway's PR reply. A gateway that predates head_sha and the
     diff counts still gives state and merged time."""
-    if pr.get("merged"):
-        state = "merged"
-    elif pr.get("state") == "closed":
-        state = "closed"
-    else:
-        state = "draft" if pr.get("draft") else "open"
     return {
-        "state": state,
+        "state": state(pr),
         "head_sha": head_sha(pr),
         "merged_at": _time(pr.get("merged_at")),
         "additions": _int(pr.get("additions")),
@@ -182,6 +202,7 @@ def snapshot(
 
 _JSON_BLOCK = re.compile(r"```json\s*(.*?)```", re.DOTALL)
 _VERDICT_LINE = re.compile(r"^#+\s*Verdict\s*$\s*\**([A-Za-z ]+)", re.MULTILINE)
+_STRICTNESS = ("approve", "approve_with_nits", "request_changes")
 
 
 def _verdict_word(value: Any) -> str | None:
@@ -197,21 +218,29 @@ def _verdict_word(value: Any) -> str | None:
     return None
 
 
+def _json_verdict(text: str) -> str | None:
+    """Only the last JSON block is the review's own; an earlier one may quote the PR."""
+    blocks = _JSON_BLOCK.findall(text)
+    if not blocks:
+        return None
+    try:
+        data = json.loads(blocks[-1])
+    except (ValueError, RecursionError):
+        return None
+    return _verdict_word(data.get("verdict")) if isinstance(data, dict) else None
+
+
 def parse_verdict(text: Any) -> str | None:
-    """The verdict of a review job's result (jobs.service._PR_REVIEW_PROMPT): the JSON block's
-    `verdict` first, then the bold word under `## Verdict`. None when neither reads cleanly."""
+    """The verdict of a review job's result (jobs.service._PR_REVIEW_PROMPT), from the last JSON
+    block and the last `## Verdict` heading. When both read and disagree, the stricter wins, so
+    quoted PR text can only make a verdict stricter. None when neither reads cleanly."""
     if not isinstance(text, str):
         return None
-    for raw in reversed(_JSON_BLOCK.findall(text)):
-        try:
-            data = json.loads(raw)
-        except (ValueError, RecursionError):
-            continue
-        if isinstance(data, dict) and (word := _verdict_word(data.get("verdict"))):
-            return word
-    if found := _VERDICT_LINE.search(text):
-        return _verdict_word(found.group(1))
-    return None
+    headings = _VERDICT_LINE.findall(text)
+    found = [
+        w for w in (_json_verdict(text), _verdict_word(headings[-1] if headings else None)) if w
+    ]
+    return max(found, key=_STRICTNESS.index) if found else None
 
 
 def review(job: dict[str, Any] | None) -> dict[str, Any] | None:

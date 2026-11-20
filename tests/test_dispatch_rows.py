@@ -130,6 +130,13 @@ async def test_a_running_dispatch_item_carries_its_last_heartbeat(monkeypatch):
     assert by_task == {"api": beat, "ui": None}
 
 
+async def test_a_rerun_after_a_failed_row_drops_the_earlier_runs_beat(monkeypatch):
+    rows = [_row("api", "running", 600), _row("api", "failed", 400), _row("api", "running", 60)]
+    beats = {("ui-pass", "api"): NOW - timedelta(seconds=300)}
+    result = await _summary_with(monkeypatch, rows, beats=beats)
+    assert result["working"][0]["heartbeat_at"] is None
+
+
 def test_a_heartbeat_from_before_this_run_started_is_not_this_runs():
     start = (NOW - timedelta(minutes=5)).timestamp()
     assert dispatch.this_run_beat(NOW - timedelta(minutes=9), start) is None

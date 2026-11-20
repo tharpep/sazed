@@ -165,6 +165,17 @@ async def heartbeats(keys: list[tuple[str, str]]) -> dict[tuple[str, str], datet
     return {(r["plan"], r["task"]): r["beat_at"] for r in recs}
 
 
+def running_since(rows: list[dict[str, Any]]) -> float:
+    """ts of the first row in the trailing run of running rows: a rerun after a failed row starts
+    there, though run_start (which only cuts at cleaned) reaches back to the earlier run."""
+    start = rows[-1]["ts"]
+    for r in reversed(rows):
+        if r["state"] != "running":
+            break
+        start = r["ts"]
+    return start
+
+
 def this_run_beat(beat: datetime | None, start: float) -> datetime | None:
     """The heartbeat row outlives a run; a beat from before this run started isn't this run's."""
     if beat is None or beat.timestamp() < start:
@@ -405,7 +416,9 @@ async def command_parts(now: datetime) -> tuple[list[dict], list[dict]]:
                     "tools": len(run),
                     "timeout_s": None,
                     "actions": [],
-                    "heartbeat_at": this_run_beat(beats.get((plan, task)), starts[(plan, task)]),
+                    "heartbeat_at": this_run_beat(
+                        beats.get((plan, task)), running_since(history[(plan, task)])
+                    ),
                 }
             )
         elif row["state"] in NEEDS_STATES and age < NEEDS_WINDOW_S:

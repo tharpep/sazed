@@ -35,6 +35,7 @@ PR_SYNC_EVERY = 7  # ticks: about every 10 minutes
 # Each PR is fetched at most every prs.SNAPSHOT_AGE, so this caps a burst (first deploy, many
 # PRs linked at once), not the steady rate.
 SNAPSHOTS_PER_PASS = 10
+SNAPSHOT_BUDGET_S = 45.0
 _task: asyncio.Task | None = None
 
 
@@ -157,32 +158,51 @@ async def _check(job: dict[str, Any]) -> None:
     logger.info("Job %s: CI failed, fix-up %s (attempt %d)", job["id"], fix["id"], attempt)
 
 
-async def _snapshot(ref: dict[str, Any], old: dict[str, Any] | None) -> None:
-    """Store one PR's state, checks and review. A failed gateway call leaves the old snapshot,
-    fetched time included. Passing checks on an unchanged head aren't asked again: the gateway
-    fetches log tails for failing runs, so only running and failing ones cost more than one call."""
-    pr = await _pr(ref["repo"], ref["number"])
-    if pr is None:
-        return
+async def _snapshot_checks(
+    ref: dict[str, Any], pr: dict[str, Any], old: dict[str, Any] | None
+) -> tuple[bool, dict[str, Any] | None]:
+    """(ok, checks to store); not ok when the gateway failed and the old snapshot should stay.
+    Passing checks on an unchanged head aren't asked again: the gateway fetches log tails for
+    failing runs, so only running and failing ones cost more than one call. A merged or closed
+    PR keeps checks already recorded, and a failed /ci call never stops its final state."""
     sha = prs.head_sha(pr)
-    old_checks = (old or {}).get("checks") or {}
-    if sha and old and old["head_sha"] == sha and old_checks.get("state") == "passing":
-        pr_checks = old_checks
-    elif sha:
-        ci = await _ci(ref["repo"], sha)
-        if ci is None:
-            return
-        pr_checks = prs.checks(ci)
-    else:
-        pr_checks = prs.checks(None)
+    old_checks = (old or {}).get("checks")
+    final = prs.state(pr) in ("merged", "closed")
+    if final and old_checks is not None:
+        return True, old_checks
+    if sha and old and old["head_sha"] == sha and (old_checks or {}).get("state") == "passing":
+        return True, old_checks
+    if not sha:
+        return True, prs.checks(None)
+    ci = await _ci(ref["repo"], sha)
+    if ci is None:
+        return final, None
+    return True, prs.checks(ci)
+
+
+async def _snapshot(ref: dict[str, Any], old: dict[str, Any] | None) -> bool:
+    """Store one PR's state, checks and review; False when the gateway failed, leaving the old
+    snapshot and its fetched time in place."""
+    from app.backlog import store as backlog_store  # lazy: keeps the jobs package import-light
+
+    pr = await pull_request(ref["repo"], ref["number"])
+    if pr is None:
+        return False
+    ok, pr_checks = await _snapshot_checks(ref, pr, old)
+    if not ok:
+        return False
     review = prs.review(await board_store.latest_review(ref["repo"], ref["number"]))
-    await board_store.save_pr_snapshot(
-        prs.key(ref["repo"], ref["number"]), prs.snapshot(pr, pr_checks, review)
-    )
+    snap = prs.snapshot(pr, pr_checks, review)
+    await board_store.save_pr_snapshot(prs.key(ref["repo"], ref["number"]), snap)
+    # The webhook closes a linked card when its PR merges; this catches a missed one.
+    if snap["state"] == "merged" and (old or {}).get("state") != "merged":
+        await backlog_store.close_for_merged_pr(ref["repo"], ref["number"])
+    return True
 
 
 async def snapshot_prs() -> None:
-    """Refresh the PR snapshots cards read, at most SNAPSHOTS_PER_PASS per tick."""
+    """Refresh the PR snapshots cards read, at most SNAPSHOTS_PER_PASS per tick. A failed fetch
+    is recorded so the ref backs off and sorts behind healthy ones (prs.due)."""
     from app.board.service import DONE_WINDOW  # lazy: the board service imports the jobs service
 
     due = prs.due(
@@ -195,9 +215,39 @@ async def snapshot_prs() -> None:
     )
     for ref, old in due[:SNAPSHOTS_PER_PASS]:
         try:
-            await _snapshot(ref, old)
+            stored = await _snapshot(ref, old)
         except Exception:
             logger.exception("PR snapshot failed for %s#%s", ref["repo"], ref["number"])
+            stored = False
+        if not stored:
+            await board_store.record_pr_failure(prs.key(ref["repo"], ref["number"]))
+
+
+async def _tick(tick: int, backlog: Any) -> None:
+    try:
+        for job in await store.awaiting_ci():
+            await _check(job)
+    except Exception:
+        logger.exception("CI watcher tick failed")
+    # Jobs paused by Pryce's plan limit resume once it resets (plans/10 P1.2).
+    try:
+        if resumed := await service.resume_rate_limited():
+            logger.info("Resumed %d job(s) after the plan limit reset", resumed)
+    except Exception:
+        logger.exception("Plan-limit resume tick failed")
+    # Merged or closed PRs move their backlog items along; minutes of lag are fine.
+    if tick % PR_SYNC_EVERY == 0:
+        try:
+            await backlog.sync_pr_states()
+        except Exception:
+            logger.exception("Backlog PR sync failed")
+    # Last and bounded, so a hanging gateway never delays the passes above or the next tick.
+    try:
+        await asyncio.wait_for(snapshot_prs(), SNAPSHOT_BUDGET_S)
+    except TimeoutError:
+        logger.warning("PR snapshot pass stopped at its %ss budget", SNAPSHOT_BUDGET_S)
+    except Exception:
+        logger.exception("PR snapshot pass failed")
 
 
 async def _loop() -> None:
@@ -205,27 +255,7 @@ async def _loop() -> None:
 
     tick = 0
     while True:
-        try:
-            for job in await store.awaiting_ci():
-                await _check(job)
-        except Exception:
-            logger.exception("CI watcher tick failed")
-        try:
-            await snapshot_prs()
-        except Exception:
-            logger.exception("PR snapshot pass failed")
-        # Jobs paused by Pryce's plan limit resume once it resets (plans/10 P1.2).
-        try:
-            if resumed := await service.resume_rate_limited():
-                logger.info("Resumed %d job(s) after the plan limit reset", resumed)
-        except Exception:
-            logger.exception("Plan-limit resume tick failed")
-        # Merged or closed PRs move their backlog items along; minutes of lag are fine.
-        if tick % PR_SYNC_EVERY == 0:
-            try:
-                await backlog.sync_pr_states()
-            except Exception:
-                logger.exception("Backlog PR sync failed")
+        await _tick(tick, backlog)
         tick += 1
         await asyncio.sleep(POLL_SECONDS)
 

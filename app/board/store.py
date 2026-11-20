@@ -113,7 +113,7 @@ async def pr_snapshots() -> dict[tuple[str, int], dict[str, Any]]:
     rows = await get_pool().fetch(
         """
         SELECT repo, number, state, head_sha, merged_at, additions, deletions, checks,
-               review_verdict, review_source, review_url, fetched_at
+               review_verdict, review_source, review_url, fetched_at, attempted_at, failures
         FROM pr_snapshots
         """
     )
@@ -128,14 +128,16 @@ async def save_pr_snapshot(key: tuple[str, int], snap: dict[str, Any]) -> None:
     await get_pool().execute(
         """
         INSERT INTO pr_snapshots (repo, number, state, head_sha, merged_at, additions, deletions,
-                                  checks, review_verdict, review_source, review_url, fetched_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, NOW())
+                                  checks, review_verdict, review_source, review_url,
+                                  fetched_at, attempted_at, failures)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, NOW(), NOW(), 0)
         ON CONFLICT (repo, number) DO UPDATE SET
             state = EXCLUDED.state, head_sha = EXCLUDED.head_sha,
             merged_at = EXCLUDED.merged_at, additions = EXCLUDED.additions,
             deletions = EXCLUDED.deletions, checks = EXCLUDED.checks,
             review_verdict = EXCLUDED.review_verdict, review_source = EXCLUDED.review_source,
-            review_url = EXCLUDED.review_url, fetched_at = NOW()
+            review_url = EXCLUDED.review_url, fetched_at = NOW(), attempted_at = NOW(),
+            failures = 0
         """,
         key[0],
         key[1],
@@ -144,10 +146,23 @@ async def save_pr_snapshot(key: tuple[str, int], snap: dict[str, Any]) -> None:
         snap["merged_at"],
         snap["additions"],
         snap["deletions"],
-        json.dumps(snap["checks"]),
+        None if snap["checks"] is None else json.dumps(snap["checks"]),
         snap["review_verdict"],
         snap["review_source"],
         snap["review_url"],
+    )
+
+
+async def record_pr_failure(key: tuple[str, int]) -> None:
+    """A failed fetch: the last good read, if any, stays as it was."""
+    await get_pool().execute(
+        """
+        INSERT INTO pr_snapshots (repo, number, attempted_at, failures) VALUES ($1, $2, NOW(), 1)
+        ON CONFLICT (repo, number) DO UPDATE SET
+            attempted_at = NOW(), failures = pr_snapshots.failures + 1
+        """,
+        key[0],
+        key[1],
     )
 
 

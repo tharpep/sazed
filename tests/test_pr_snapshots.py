@@ -72,6 +72,43 @@ def test_anything_else_is_no_verdict_and_never_raises(text):
     assert prs.parse_verdict(text) is None
 
 
+QUOTED_APPROVE = '```json\n{"verdict": "approve"}\n```\n'
+
+
+@pytest.mark.parametrize(
+    "text, verdict",
+    [
+        (
+            _review("Request changes", "x")
+            .replace('{"verdict": "x"', '{"verdict": "x",,')
+            .replace("## What changed", "## What changed\n" + QUOTED_APPROVE),
+            "request_changes",
+        ),
+        (
+            _review("Request changes", "...").replace("## What changed", QUOTED_APPROVE),
+            "request_changes",
+        ),
+        (_review("Request changes", "Approve"), "request_changes"),
+        (_review("Approve with nits", "Approve"), "approve_with_nits"),
+        (_review("Approve", "Approve with nits"), "approve_with_nits"),
+    ],
+    ids=[
+        "bad-last-json-falls-to-heading",
+        "earlier-quoted-json-ignored",
+        "heading-stricter-than-json",
+        "nits-heading-over-json-approve",
+        "nits-json-over-heading-approve",
+    ],
+)
+def test_quoted_text_can_only_make_the_verdict_stricter(text, verdict):
+    assert prs.parse_verdict(text) == verdict
+
+
+def test_the_last_heading_counts_when_there_is_no_json():
+    text = "## Verdict\n**Approve with nits**\n\nquoted:\n## Verdict\n**Approve**"
+    assert prs.parse_verdict(text) == "approve"
+
+
 def test_no_stored_review_is_no_review_not_approve():
     assert prs.review(None) is None
     assert prs.review({"agent": "agy", "result": "the worker died", "meta": {}}) is None
@@ -156,6 +193,8 @@ SNAP = {
     "review_source": "agy",
     "review_url": "https://github.com/tharpep/sazed-frontend/pull/83#pullrequestreview-1",
     "fetched_at": NOW,
+    "attempted_at": NOW,
+    "failures": 0,
 }
 
 
@@ -217,7 +256,13 @@ def test_a_green_linked_pr_joins_needs_you():
 
 
 def _snap(state="open", age=timedelta(0)):
-    return {"state": state, "fetched_at": NOW - age, "head_sha": "abc", "checks": None}
+    return {"state": state, "fetched_at": NOW - age, "head_sha": "abc", "checks": None,
+            "attempted_at": NOW - age, "failures": 0}  # fmt: skip
+
+
+def _failed(failures, age, fetched=None):
+    return {"state": None, "fetched_at": fetched, "head_sha": None, "checks": None,
+            "attempted_at": NOW - age, "failures": failures}  # fmt: skip
 
 
 def _due(items, snaps, jobs=(), chains=None):
@@ -257,9 +302,23 @@ def test_a_running_jobs_pr_is_due_too():
     assert _due([], {}, jobs=[job]) == [("tharpep/sazed-frontend", 83)]
 
 
+def test_a_failing_ref_backs_off_and_sorts_behind_healthy_ones():
+    items = [_session_item(n) for n in (1, 2, 3, 4)]
+    snaps = {
+        ("tharpep/sazed", 1): _failed(1, timedelta(minutes=1)),
+        ("tharpep/sazed", 2): _failed(1, timedelta(minutes=7)),
+        ("tharpep/sazed", 3): _failed(3, timedelta(minutes=20)),
+        ("tharpep/sazed", 4): _snap(age=timedelta(minutes=10)),
+    }
+    assert _due(items, snaps) == [("tharpep/sazed", 4), ("tharpep/sazed", 2)]
+    assert prs.backoff(1) == prs.SNAPSHOT_AGE and prs.backoff(9) == prs.SNAPSHOT_AGE * 32
+
+
 @pytest.fixture
 def gateway(monkeypatch):
-    calls = {"pr": None, "ci": None, "ci_asked": 0, "saved": []}
+    from app.backlog import store as backlog_store
+
+    calls = {"pr": None, "ci": None, "ci_asked": 0, "saved": [], "failed": [], "closed": []}
 
     async def fake_pr(repo, number):
         return calls["pr"]
@@ -274,11 +333,39 @@ def gateway(monkeypatch):
     async def save(key, snap):
         calls["saved"].append((key, snap))
 
-    monkeypatch.setattr(ci_watch, "_pr", fake_pr)
+    async def failed(key):
+        calls["failed"].append(key)
+
+    async def close(repo, number):
+        calls["closed"].append((repo, number))
+        return []
+
+    monkeypatch.setattr(ci_watch, "pull_request", fake_pr)
     monkeypatch.setattr(ci_watch, "_ci", fake_ci)
     monkeypatch.setattr(ci_watch.board_store, "latest_review", no_review)
     monkeypatch.setattr(ci_watch.board_store, "save_pr_snapshot", save)
+    monkeypatch.setattr(ci_watch.board_store, "record_pr_failure", failed)
+    monkeypatch.setattr(backlog_store, "close_for_merged_pr", close)
     return calls
+
+
+def _fake_board(monkeypatch, items, snaps):
+    async def rows():
+        return items
+
+    async def none():
+        return {}
+
+    async def no_jobs():
+        return []
+
+    async def snapshots():
+        return dict(snaps)
+
+    monkeypatch.setattr(ci_watch.board_store, "items", rows)
+    monkeypatch.setattr(ci_watch.board_store, "chains", none)
+    monkeypatch.setattr(ci_watch.board_store, "active_jobs", no_jobs)
+    monkeypatch.setattr(ci_watch.board_store, "pr_snapshots", snapshots)
 
 
 REF = {"repo": "tharpep/Sazed", "number": 12, "known": "open"}
@@ -294,26 +381,100 @@ async def test_a_failing_gateway_leaves_the_old_snapshot(gateway):
     assert gateway["saved"] == []
 
 
-async def test_a_pass_with_a_failing_gateway_raises_nothing(gateway, monkeypatch):
-    async def rows():
-        return [_session_item(1), _session_item(2)]
-
-    async def none(*_):
-        return {}
-
-    async def no_jobs():
-        return []
-
+async def test_a_pass_with_a_failing_gateway_raises_nothing_and_records_it(gateway, monkeypatch):
     async def boom(repo, number):
         raise ValueError("gateway sent HTML")
 
-    monkeypatch.setattr(ci_watch.board_store, "items", rows)
-    monkeypatch.setattr(ci_watch.board_store, "chains", none)
-    monkeypatch.setattr(ci_watch.board_store, "active_jobs", no_jobs)
-    monkeypatch.setattr(ci_watch.board_store, "pr_snapshots", none)
-    monkeypatch.setattr(ci_watch, "_pr", boom)
+    _fake_board(monkeypatch, [_session_item(1), _session_item(2)], {})
+    monkeypatch.setattr(ci_watch, "pull_request", boom)
     await ci_watch.snapshot_prs()
     assert gateway["saved"] == []
+    assert gateway["failed"] == [("tharpep/sazed", 1), ("tharpep/sazed", 2)]
+
+
+async def test_ten_broken_refs_cannot_starve_a_healthy_one(gateway, monkeypatch):
+    items = [_session_item(n) for n in range(1, 12)]
+    snaps: dict = {}
+    _fake_board(monkeypatch, items, snaps)
+
+    async def fake_pr(repo, number):
+        return NEW_PR if number == 11 else None
+
+    async def failed(key):
+        old = snaps.get(key) or _failed(0, timedelta(0))
+        snaps[key] = old | {"failures": old["failures"] + 1, "attempted_at": datetime.now(UTC)}
+
+    async def save(key, snap):
+        gateway["saved"].append((key, snap))
+        snaps[key] = snap | {"fetched_at": datetime.now(UTC), "attempted_at": datetime.now(UTC),
+                             "failures": 0}  # fmt: skip
+
+    gateway["ci"] = {"state": "success", "runs": []}
+    monkeypatch.setattr(ci_watch, "pull_request", fake_pr)
+    monkeypatch.setattr(ci_watch.board_store, "record_pr_failure", failed)
+    monkeypatch.setattr(ci_watch.board_store, "save_pr_snapshot", save)
+    for _ in range(2):
+        await ci_watch.snapshot_prs()
+    assert [k for k, _ in gateway["saved"]] == [("tharpep/sazed", 11)]
+
+
+async def test_a_hanging_gateway_cannot_hold_the_tick_past_its_budget(gateway, monkeypatch):
+    import asyncio
+    import time
+
+    seen = {"resumed": False}
+
+    async def hang(repo, number):
+        await asyncio.sleep(3600)
+
+    async def nothing_awaiting():
+        return []
+
+    async def resume():
+        seen["resumed"] = True
+        return 0
+
+    _fake_board(monkeypatch, [_session_item(1)], {})
+    monkeypatch.setattr(ci_watch, "pull_request", hang)
+    monkeypatch.setattr(ci_watch, "SNAPSHOT_BUDGET_S", 0.2)
+    monkeypatch.setattr(ci_watch.store, "awaiting_ci", nothing_awaiting)
+    monkeypatch.setattr(ci_watch.service, "resume_rate_limited", resume)
+    started = time.monotonic()
+    await ci_watch._tick(1, None)
+    assert time.monotonic() - started < 2
+    assert seen["resumed"]
+
+
+async def test_a_pr_seen_merged_closes_its_linked_card_once(gateway):
+    gateway["pr"] = NEW_PR | {"state": "closed", "merged": True}
+    gateway["ci"] = {"state": "success", "runs": []}
+    await ci_watch._snapshot(REF, _snap())
+    assert gateway["closed"] == [("tharpep/Sazed", 12)]
+    await ci_watch._snapshot(REF, _snap("merged"))
+    assert len(gateway["closed"]) == 1
+
+
+async def test_a_pr_closed_unmerged_leaves_its_card(gateway):
+    gateway["pr"] = NEW_PR | {"state": "closed", "merged": False}
+    gateway["ci"] = {"state": "success", "runs": []}
+    await ci_watch._snapshot(REF, _snap())
+    assert gateway["saved"][0][1]["state"] == "closed"
+    assert gateway["closed"] == []
+
+
+async def test_a_merged_pr_keeps_recorded_checks_without_asking(gateway):
+    gateway["pr"] = NEW_PR | {"state": "closed", "merged": True}
+    passing = {"state": "passing", "passed": 1, "total": 1, "runs": []}
+    await ci_watch._snapshot(REF, _snap() | {"checks": passing})
+    assert gateway["ci_asked"] == 0
+    assert gateway["saved"][0][1]["checks"] == passing
+
+
+async def test_a_failed_ci_call_never_stops_a_merged_state(gateway):
+    gateway["pr"] = NEW_PR | {"state": "closed", "merged": True}
+    assert await ci_watch._snapshot(REF, None)
+    [(_, snap)] = gateway["saved"]
+    assert (snap["state"], snap["checks"], gateway["ci_asked"]) == ("merged", None, 1)
 
 
 async def test_an_old_gateway_still_gives_state_and_merged_time(gateway):
