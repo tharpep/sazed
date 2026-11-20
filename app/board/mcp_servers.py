@@ -3,6 +3,7 @@
 import json
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.db import get_pool
 
@@ -31,11 +32,22 @@ def _out(row: dict[str, Any]) -> dict[str, Any]:
     return {**out, **{k: _json(out[k]) for k in JSON_FIELDS}}
 
 
-def for_worker(server: dict[str, Any]) -> dict[str, Any]:
-    """A server as the worker key may read it: header values only as ${VAR} references."""
+def _url_may_hold_a_secret(url: str | None) -> bool:
+    if not url:
+        return False
+    parts = urlsplit(url)
+    return bool(parts.query or "@" in parts.netloc)
+
+
+def for_worker(servers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The grantable servers as the worker key may read them, header values only as ${VAR}."""
+    # pinned by test_worker_registry_reads.py::test_only_grantable_servers_reach_the_worker
+    grantable = [s for s in servers if s["agent_safe"] and not _url_may_hold_a_secret(s["url"])]
     # pinned by test_worker_registry_reads.py::test_a_literal_header_value_never_reaches_the_worker
-    headers = {k: v for k, v in server["headers"].items() if ENV_REF.match(str(v))}
-    return {**server, "headers": headers}
+    return [
+        {**s, "headers": {k: v for k, v in s["headers"].items() if ENV_REF.match(str(v))}}
+        for s in grantable
+    ]
 
 
 def _args(fields: dict[str, Any]) -> list[Any]:

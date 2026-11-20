@@ -341,7 +341,7 @@ async def agent_profiles_list():
 
 @router.get("/agents/mcp-servers")
 async def mcp_servers_list():
-    return [mcp_servers.for_worker(s) for s in await agent_profiles.list_mcp_servers()]
+    return mcp_servers.for_worker(await agent_profiles.list_mcp_servers())
 
 
 @router.post("/limits/due")

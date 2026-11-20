@@ -103,9 +103,34 @@ def test_an_unset_worker_key_answers_503(api, rows, monkeypatch, path):
 
 @pytest.mark.parametrize("path", PATHS)
 @pytest.mark.parametrize("method", ["put", "post", "delete"])
-def test_no_write_takes_the_worker_key(api, rows, path, method):
-    response = api.request(method, f"/worker{path}/docs", headers={"X-Worker-Key": "w-key"})
-    assert response.status_code in (404, 405)
+def test_no_write_takes_the_worker_key(api, rows, monkeypatch, path, method):
+    writes = []
+
+    async def record(*args, **kwargs):
+        writes.append((args, kwargs))
+
+    for module in (profiles, mcp_servers):
+        monkeypatch.setattr(module, "save", record)
+        monkeypatch.setattr(module, "delete", record)
+    response = api.request(method, f"/worker{path}", headers={"X-Worker-Key": "w-key"})
+    assert response.status_code == 405
+    assert writes == []
+
+
+@pytest.mark.parametrize(
+    "server",
+    [
+        {**SERVER, "agent_safe": False},
+        {**SERVER, "url": "https://user:hunter2@mcp.example.com/mcp"},
+        {**SERVER, "url": "https://token@mcp.example.com/mcp"},
+        {**SERVER, "url": "https://mcp.example.com/mcp?api_key=hunter2"},
+    ],
+)
+def test_only_grantable_servers_reach_the_worker(api, rows, server):
+    """An entry no profile can grant, or one whose url can carry a credential, is left out."""
+    rows["servers"] = [{**server, "name": "risky"}, SERVER]
+    body = api.get("/worker/agents/mcp-servers", headers={"X-Worker-Key": "w-key"}).json()
+    assert [s["name"] for s in body] == ["docs"]
 
 
 def test_a_literal_header_value_never_reaches_the_worker(api, rows):
