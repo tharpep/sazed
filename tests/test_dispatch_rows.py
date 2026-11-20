@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime, timedelta
 
+from fastapi import BackgroundTasks
+
 from app.board import command, dispatch
 from app.routers import dispatch as router
 
@@ -43,8 +45,8 @@ async def test_a_repeated_row_reaches_the_store_with_its_unique_key(monkeypatch)
 
     monkeypatch.setattr(dispatch, "get_pool", lambda: Pool())
     body = router.RowIn(plan="ui-pass", task="api", ts=1.5, state="running", line="go")
-    assert await router.post_row(body) == {"ok": True}
-    await router.post_row(body)
+    assert await router.post_row(body, BackgroundTasks()) == {"ok": True}
+    await router.post_row(body, BackgroundTasks())
     assert len(seen) == 2
     assert "ON CONFLICT (plan, task, ts, state) DO NOTHING" in seen[0][0]
     assert seen[0][1][:4] == ("ui-pass", "api", 1.5, "running")

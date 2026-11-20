@@ -15,6 +15,7 @@ import time
 from app.board import dispatch
 from app.config import settings
 from app.jobs import service, store
+from app.learning import service as learning
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ async def reap_once() -> bool:
     try:
         for row in await dispatch.reap_silent(settings.dispatch_heartbeat_grace_s):
             logger.warning("Reaped dispatch task %s/%s: %s", row["plan"], row["task"], row["line"])
+            await learning.record_dispatch(row["plan"], row["task"], row["state"], row["meta"])
     except Exception:
         ok = False
         logger.exception("Reaping dispatch tasks failed")

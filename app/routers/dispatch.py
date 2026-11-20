@@ -3,11 +3,12 @@
 from datetime import UTC, datetime
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 
 from app.board import dispatch
 from app.dependencies import ShapeV2
+from app.learning import service as learning
 
 router = APIRouter()
 
@@ -87,8 +88,9 @@ async def post_plan(body: PlanIn):
 
 
 @router.post("/rows", status_code=201)
-async def post_row(body: RowIn):
+async def post_row(body: RowIn, background: BackgroundTasks):
     await dispatch.insert_row(**body.model_dump())
+    background.add_task(learning.record_dispatch, body.plan, body.task, body.state, body.meta)
     return {"ok": True}
 
 
