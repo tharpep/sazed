@@ -190,21 +190,39 @@ def _plan(rec) -> dict[str, Any]:
     return d
 
 
+_PLAN_COLUMNS = (
+    "plan, repo, base, host, tasks, project, board_plan, updated_at, "
+    "pr_url, pr_number, pr_head_sha, exported_at"
+)
+PR_FIELDS = ("pr_url", "pr_number", "pr_head_sha", "exported_at")
+
+
 async def plan_rows() -> list[dict[str, Any]]:
     rows = await get_pool().fetch(
-        "SELECT plan, repo, base, host, tasks, project, board_plan, updated_at "
-        "FROM dispatch_plans ORDER BY updated_at DESC"
+        f"SELECT {_PLAN_COLUMNS} FROM dispatch_plans ORDER BY updated_at DESC"
     )
     return [_plan(r) for r in rows]
 
 
 async def plan_row(plan: str) -> dict[str, Any] | None:
     rec = await get_pool().fetchrow(
-        "SELECT plan, repo, base, host, tasks, project, board_plan, updated_at "
-        "FROM dispatch_plans WHERE plan = $1",
-        plan,
+        f"SELECT {_PLAN_COLUMNS} FROM dispatch_plans WHERE plan = $1", plan
     )
     return _plan(rec) if rec else None
+
+
+async def record_export(plan: str, pr_url: str, pr_number: int, head_sha: str | None) -> None:
+    await get_pool().execute(
+        """
+        UPDATE dispatch_plans
+        SET pr_url = $2, pr_number = $3, pr_head_sha = $4, exported_at = NOW()
+        WHERE plan = $1
+        """,
+        plan,
+        pr_url,
+        pr_number,
+        head_sha,
+    )
 
 
 async def rows_for(plan: str | None = None) -> list[dict[str, Any]]:
@@ -256,12 +274,12 @@ def _summary(
 ) -> dict:
     rows = [latest.get((plan["plan"], t["id"])) for t in plan["tasks"]]
     phases = _count([r["state"] if r else "planned" for r in rows])
-    counts = {"states": phases}
+    shaped: dict[str, Any] = {"states": phases}
     if v2:
-        counts = {
+        shaped = {
             "states": _count([r["run_state"] if r else "planned" for r in rows]),
             "phases": phases,
-        }
+        } | {k: plan.get(k) for k in PR_FIELDS}
     return {
         "plan": plan["plan"],
         "repo": plan["repo"],
@@ -271,7 +289,7 @@ def _summary(
         "board_plan": plan.get("board_plan"),
         "updated_at": plan["updated_at"],
         "tasks_total": len(plan["tasks"]),
-        **counts,
+        **shaped,
     }
 
 

@@ -52,7 +52,7 @@ def watch(monkeypatch):
     async def fake_notify(*args, **kwargs):
         calls["notified"] = True
 
-    monkeypatch.setattr(ci_watch, "_pr", fake_pr)
+    monkeypatch.setattr(ci_watch, "pull_request", fake_pr)
     monkeypatch.setattr(ci_watch, "_ci", fake_ci)
     monkeypatch.setattr(ci_watch.store, "update_outcome", fake_outcome)
     monkeypatch.setattr(ci_watch.service, "create_follow_up", fake_follow_up)
@@ -133,6 +133,7 @@ async def test_a_follow_up_names_the_pr_it_continues(monkeypatch):
 async def test_a_refused_follow_up_keeps_the_work_out_of_github(monkeypatch):
     class _Resp:
         is_success = False
+        status_code = 409
         text = "conflict"
 
         def json(self):
