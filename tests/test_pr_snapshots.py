@@ -523,3 +523,51 @@ async def test_passing_checks_on_an_unchanged_head_are_not_asked_again(gateway):
     await ci_watch._snapshot(REF, _snap() | {"head_sha": "def", "checks": passing})
     assert gateway["ci_asked"] == 0
     assert gateway["saved"][0][1]["checks"] == passing
+
+
+BODY_REVIEWED = (
+    "## Summary\n- Adds things.\n\n## Review\n"
+    "Verdict: approve with nits\nReviewer: Claude Opus subagent, 2026-11-20\n"
+    "Found 1 high, 4 medium; all fixed in this PR.\n"
+)
+
+
+@pytest.mark.parametrize(
+    "body, verdict, source",
+    [
+        (BODY_REVIEWED, "approve_with_nits", "Claude Opus subagent, 2026-11-20"),
+        ("## Review\n- **Verdict:** Approve\n", "approve", "PR body"),
+        (
+            "## Review\nVerdict: approve\n\n## Review\nVerdict: request changes\n",
+            "request_changes",
+            "PR body",
+        ),
+        ("## Summary\nVerdict: approve\n", None, None),
+        ("## Review\nLooks fine to me.\n", None, None),
+        ("## Review\nVerdict: ship it\n", None, None),
+        (None, None, None),
+        (42, None, None),
+    ],
+    ids=[
+        "full",
+        "bold-bullet",
+        "last-section",
+        "outside-section",
+        "no-verdict",
+        "unknown",
+        "none",
+        "not-text",
+    ],
+)
+def test_the_pr_body_review_section(body, verdict, source):
+    got = prs.body_review(body)
+    assert (got or {}).get("verdict") == verdict
+    assert (got or {}).get("source") == source
+
+
+def test_the_stricter_review_wins_and_none_is_no_review():
+    approve = {"verdict": "approve", "source": "PR body", "url": None}
+    changes = {"verdict": "request_changes", "source": "agy", "url": "u"}
+    assert prs.stricter(approve, changes) == changes
+    assert prs.stricter(None, approve) == approve
+    assert prs.stricter(None, None) is None

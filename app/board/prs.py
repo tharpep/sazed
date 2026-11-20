@@ -247,3 +247,24 @@ def review(job: dict[str, Any] | None) -> dict[str, Any] | None:
         return None
     meta = job.get("meta") or {}
     return {"verdict": verdict, "source": job.get("agent"), "url": meta.get("pr_review_url")}
+
+
+_REVIEW_SECTION = re.compile(r"^##\s*Review\s*$(.*?)(?=^##\s|\Z)", re.MULTILINE | re.DOTALL)
+_FIELD = re.compile(r"^\s*[-*]?\s*\**(Verdict|Reviewer)\**\s*:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def body_review(body: Any) -> dict[str, Any] | None:
+    """The `## Review` section a session writes into the PR body when the change was reviewed
+    before the PR opened. Only the last section counts; no readable Verdict line is no review."""
+    if not isinstance(body, str) or not (sections := _REVIEW_SECTION.findall(body)):
+        return None
+    fields = {name.lower(): value for name, value in _FIELD.findall(sections[-1])}
+    if not (verdict := _verdict_word(fields.get("verdict"))):
+        return None
+    return {"verdict": verdict, "source": fields.get("reviewer", "PR body")[:120], "url": None}
+
+
+def stricter(*reviews: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The strictest of the reviews that exist, so a later bot review can only hold a PR back."""
+    found = [r for r in reviews if r]
+    return max(found, key=lambda r: _STRICTNESS.index(r["verdict"])) if found else None

@@ -191,7 +191,8 @@ async def _snapshot(ref: dict[str, Any], old: dict[str, Any] | None) -> bool:
     ok, pr_checks = await _snapshot_checks(ref, pr, old)
     if not ok:
         return False
-    review = prs.review(await board_store.latest_review(ref["repo"], ref["number"]))
+    job_review = prs.review(await board_store.latest_review(ref["repo"], ref["number"]))
+    review = prs.stricter(job_review, prs.body_review(pr.get("body")))
     snap = prs.snapshot(pr, pr_checks, review)
     await board_store.save_pr_snapshot(prs.key(ref["repo"], ref["number"]), snap)
     # The webhook closes a linked card when its PR merges; this catches a missed one.
