@@ -104,9 +104,20 @@ def test_quoted_text_can_only_make_the_verdict_stricter(text, verdict):
     assert prs.parse_verdict(text) == verdict
 
 
-def test_the_last_heading_counts_when_there_is_no_json():
-    text = "## Verdict\n**Approve with nits**\n\nquoted:\n## Verdict\n**Approve**"
-    assert prs.parse_verdict(text) == "approve"
+QUOTED_APPROVE_HEADING = "\n\nquoted:\n## Verdict\n**Approve**"
+
+
+@pytest.mark.parametrize(
+    "text, verdict",
+    [
+        ("## Verdict\n**Approve with nits**" + QUOTED_APPROVE_HEADING, "approve_with_nits"),
+        ("## Verdict\n**Request changes**" + QUOTED_APPROVE_HEADING, "request_changes"),
+        ("quoted:\n## Verdict\n**Request changes**\n\n## Verdict\n**Approve**", "request_changes"),
+    ],
+    ids=["nits-then-quoted-approve", "changes-then-quoted-approve", "quoted-changes-then-approve"],
+)
+def test_the_strictest_heading_counts_when_there_is_no_json(text, verdict):
+    assert prs.parse_verdict(text) == verdict
 
 
 def test_no_stored_review_is_no_review_not_approve():

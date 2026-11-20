@@ -232,14 +232,12 @@ def _json_verdict(text: str) -> str | None:
 
 def parse_verdict(text: Any) -> str | None:
     """The verdict of a review job's result (jobs.service._PR_REVIEW_PROMPT), from the last JSON
-    block and the last `## Verdict` heading. When both read and disagree, the stricter wins, so
-    quoted PR text can only make a verdict stricter. None when neither reads cleanly."""
+    block and every `## Verdict` heading. The strictest one that reads wins, so quoted PR text
+    can only make a verdict stricter. None when nothing reads cleanly."""
     if not isinstance(text, str):
         return None
-    headings = _VERDICT_LINE.findall(text)
-    found = [
-        w for w in (_json_verdict(text), _verdict_word(headings[-1] if headings else None)) if w
-    ]
+    words = [_json_verdict(text), *map(_verdict_word, _VERDICT_LINE.findall(text))]
+    found = [w for w in words if w]
     return max(found, key=_STRICTNESS.index) if found else None
 
 
