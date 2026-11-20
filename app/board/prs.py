@@ -1,0 +1,280 @@
+"""A card's PR: which PR it points at, the snapshot the CI watcher keeps of it, the review
+verdict, and the `pr` block cards carry. Pure functions; the SQL is in `store`, the fetching in
+`jobs.ci_watch`. Gateway replies, review text and card text are untrusted: nothing here raises
+on a malformed value."""
+
+import json
+import re
+from datetime import datetime, timedelta
+from typing import Any
+
+Key = tuple[str, int]
+
+# ci_watch checks a PR again once its snapshot is this old; cards show the age past it.
+SNAPSHOT_AGE = timedelta(minutes=6)
+
+_CHECK_STATES = {"success": "passing", "failure": "failing", "pending": "running"}
+# The gateway's own rule for a run that doesn't fail the commit (routers/github.py ci_status).
+_PASSED = ("success", "skipped", "neutral")
+
+
+def key(repo: str, number: int) -> Key:
+    return repo.lower(), int(number)
+
+
+def _job_ref(chain: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The newest PR in the chain; a follow-up doesn't always repeat it."""
+    for job in reversed(chain):
+        meta = job.get("meta") or {}
+        repo = (job.get("params") or {}).get("repo") or (chain[0].get("params") or {}).get("repo")
+        if meta.get("pr_number") and repo:
+            if meta.get("ci_state") in ("merged", "closed"):
+                known = meta["ci_state"]
+            else:
+                known = "draft" if meta.get("pr_draft") else "open"
+            return {"repo": repo, "number": int(meta["pr_number"]), "known": known}
+    return None
+
+
+def item_ref(item: dict[str, Any], chain: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """A done item keeps its job's PR; an item reopened after a closed PR drops it, as its
+    stage does (stages.item_stage), and falls back to the PR a session linked."""
+    if item["status"] in ("approved", "done") and (found := _job_ref(chain)):
+        return found
+    if item.get("pr_number") and item.get("pr_repo"):
+        known = "merged" if item["status"] == "done" else "open"
+        return {"repo": item["pr_repo"], "number": int(item["pr_number"]), "known": known}
+    return None
+
+
+def job_ref(job: dict[str, Any]) -> dict[str, Any] | None:
+    return _job_ref([job])
+
+
+def block(ref: dict[str, Any] | None, snap: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The card's `pr` field. Before the first fetch, state is what Sazed already knows."""
+    if ref is None:
+        return None
+    url = f"https://github.com/{ref['repo']}/pull/{ref['number']}"
+    out = {"repo": ref["repo"], "number": ref["number"], "url": url}
+    if snap is None or snap["fetched_at"] is None:
+        return out | {
+            "state": ref["known"],
+            "checks": None,
+            "review": None,
+            "additions": None,
+            "deletions": None,
+            "merged_at": None,
+            "fetched_at": None,
+        }
+    review = None
+    if snap["review_verdict"]:
+        review = {
+            "verdict": snap["review_verdict"],
+            "source": snap["review_source"],
+            "url": snap["review_url"] or url,
+        }
+    return out | {
+        "state": snap["state"],
+        "checks": snap["checks"],
+        "review": review,
+        "additions": snap["additions"],
+        "deletions": snap["deletions"],
+        "merged_at": snap["merged_at"],
+        "fetched_at": snap["fetched_at"],
+    }
+
+
+def backoff(failures: int) -> timedelta:
+    """How long a ref waits after its latest failed fetch: SNAPSHOT_AGE, doubling to 32x."""
+    return SNAPSHOT_AGE * 2 ** min(max(failures, 1) - 1, 5)
+
+
+def _wanted(snap: dict[str, Any] | None, done_at: datetime | None, now: datetime) -> bool:
+    if snap is None:
+        return True
+    if snap["state"] in ("merged", "closed"):
+        return False
+    if snap["failures"]:
+        return now - snap["attempted_at"] >= backoff(snap["failures"])
+    if done_at is not None:
+        return snap["fetched_at"] < done_at
+    return now - snap["fetched_at"] >= SNAPSHOT_AGE
+
+
+def _order(pair: tuple[dict[str, Any], dict[str, Any] | None], now: datetime) -> tuple:
+    """Healthy refs first (never tried, then the oldest snapshot), refs that keep failing last,
+    so a run of broken refs can't take every slot of a pass."""
+    snap = pair[1]
+    if snap is None:
+        return 0, now
+    if snap["failures"]:
+        return 2, snap["attempted_at"]
+    return 1, snap["fetched_at"]
+
+
+def due(
+    items: list[dict[str, Any]],
+    chains: dict[Any, list[dict[str, Any]]],
+    jobs: list[dict[str, Any]],
+    snaps: dict[Key, dict[str, Any]],
+    now: datetime,
+    done_window: timedelta,
+) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
+    """PRs to fetch, in _order. An open card's PR is fetched every SNAPSHOT_AGE; a done card's
+    once after it turned done, and only while the board still shows it; a merged or closed
+    snapshot never again; a ref whose last fetch failed after its backoff."""
+    found: dict[Key, dict[str, Any]] = {}
+    for item in items:
+        ref = item_ref(item, chains.get(item["id"], []))
+        if ref is None:
+            continue
+        done_at = None
+        if item["status"] == "done":
+            done_at = item["decided_at"] or item["updated_at"]
+            if now - done_at > done_window:
+                continue
+        if _wanted(snaps.get(key(ref["repo"], ref["number"])), done_at, now):
+            found.setdefault(key(ref["repo"], ref["number"]), ref)
+    for job in jobs:
+        ref = job_ref(job)
+        if ref and _wanted(snaps.get(key(ref["repo"], ref["number"])), None, now):
+            found.setdefault(key(ref["repo"], ref["number"]), ref)
+    pairs = [(ref, snaps.get(k)) for k, ref in found.items()]
+    return sorted(pairs, key=lambda p: _order(p, now))
+
+
+def checks(ci: Any) -> dict[str, Any]:
+    """The gateway's /ci reply as the card's checks; no reply (no head sha) reads as none."""
+    ci = ci if isinstance(ci, dict) else {}
+    runs = [r for r in ci.get("runs") or [] if isinstance(r, dict)]
+    return {
+        "state": _CHECK_STATES.get(ci.get("state"), "none"),
+        "passed": sum(r.get("conclusion") in _PASSED for r in runs),
+        "total": len(runs),
+        "runs": [
+            {"name": str(r.get("name") or ""), "conclusion": r.get("conclusion")} for r in runs
+        ],
+    }
+
+
+def _int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _time(value: Any) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
+
+
+def head_sha(pr: dict[str, Any]) -> str | None:
+    sha = pr.get("head_sha")
+    return sha if isinstance(sha, str) and sha else None
+
+
+def state(pr: dict[str, Any]) -> str:
+    if pr.get("merged"):
+        return "merged"
+    if pr.get("state") == "closed":
+        return "closed"
+    return "draft" if pr.get("draft") else "open"
+
+
+def snapshot(
+    pr: dict[str, Any], pr_checks: dict[str, Any] | None, review: dict[str, Any] | None
+) -> dict[str, Any]:
+    """The row to store from the gateway's PR reply. A gateway that predates head_sha and the
+    diff counts still gives state and merged time."""
+    return {
+        "state": state(pr),
+        "head_sha": head_sha(pr),
+        "merged_at": _time(pr.get("merged_at")),
+        "additions": _int(pr.get("additions")),
+        "deletions": _int(pr.get("deletions")),
+        "checks": pr_checks,
+        "review_verdict": (review or {}).get("verdict"),
+        "review_source": (review or {}).get("source"),
+        "review_url": (review or {}).get("url"),
+    }
+
+
+_JSON_BLOCK = re.compile(r"```json\s*(.*?)```", re.DOTALL)
+_VERDICT_LINE = re.compile(r"^#+\s*Verdict\s*$\s*\**([A-Za-z ]+)", re.MULTILINE)
+_STRICTNESS = ("approve", "approve_with_nits", "request_changes")
+
+
+def _verdict_word(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    words = " ".join(re.findall(r"[a-z]+", value.lower()))
+    if words in ("approve", "approved"):
+        return "approve"
+    if words in ("approve with nits", "approved with nits"):
+        return "approve_with_nits"
+    if words in ("request changes", "changes requested"):
+        return "request_changes"
+    return None
+
+
+def _json_verdict(text: str) -> str | None:
+    """Only the last JSON block is the review's own; an earlier one may quote the PR."""
+    blocks = _JSON_BLOCK.findall(text)
+    if not blocks:
+        return None
+    try:
+        data = json.loads(blocks[-1])
+    except (ValueError, RecursionError):
+        return None
+    return _verdict_word(data.get("verdict")) if isinstance(data, dict) else None
+
+
+def parse_verdict(text: Any) -> str | None:
+    """The verdict of a review job's result (jobs.service._PR_REVIEW_PROMPT), from the last JSON
+    block and every `## Verdict` heading. The strictest one that reads wins, so quoted PR text
+    can only make a verdict stricter. None when nothing reads cleanly."""
+    if not isinstance(text, str):
+        return None
+    words = [_json_verdict(text), *map(_verdict_word, _VERDICT_LINE.findall(text))]
+    found = [w for w in words if w]
+    return max(found, key=_STRICTNESS.index) if found else None
+
+
+def review(job: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The stored review job as the card's review; no job or no readable verdict is no review."""
+    if job is None or not (verdict := parse_verdict(job.get("result"))):
+        return None
+    meta = job.get("meta") or {}
+    return {"verdict": verdict, "source": job.get("agent"), "url": meta.get("pr_review_url")}
+
+
+_REVIEW_SECTION = re.compile(r"^##\s*Review\s*$(.*?)(?=^##\s|\Z)", re.MULTILINE | re.DOTALL)
+_FENCED = re.compile(r"```.*?```", re.DOTALL)
+_FIELD = re.compile(
+    r"^[ \t]*[-*]?[ \t]*\**(Verdict|Reviewer)\**[ \t]*:[ \t]*(\S.*)$", re.MULTILINE
+)
+# Bounds the regex work on a body anyone with write access can edit; GitHub allows 65,536.
+_SECTION_MAX = 2000
+
+
+def body_review(body: Any) -> dict[str, Any] | None:
+    """The `## Review` section a session writes into the PR body when the change was reviewed
+    before the PR opened. Only the last section counts; no readable Verdict line is no review."""
+    if not isinstance(body, str):
+        return None
+    sections = _REVIEW_SECTION.findall(_FENCED.sub("", body))
+    if not sections:
+        return None
+    fields = {
+        name.lower(): value.strip() for name, value in _FIELD.findall(sections[-1][:_SECTION_MAX])
+    }
+    if not (verdict := _verdict_word(fields.get("verdict"))):
+        return None
+    return {"verdict": verdict, "source": fields.get("reviewer", "PR body")[:120], "url": None}
+
+
+def stricter(*reviews: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The strictest of the reviews that exist, so a later bot review can only hold a PR back."""
+    found = [r for r in reviews if r]
+    return max(found, key=lambda r: _STRICTNESS.index(r["verdict"])) if found else None

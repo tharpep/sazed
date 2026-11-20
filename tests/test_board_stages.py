@@ -139,8 +139,12 @@ def _board(monkeypatch, items, jobs=()):
     async def active():
         return list(jobs)
 
+    async def no_snapshots():
+        return {}
+
     monkeypatch.setattr(service.store, "items", all_items)
     monkeypatch.setattr(service.store, "chains", no_chains)
+    monkeypatch.setattr(service.store, "pr_snapshots", no_snapshots)
     monkeypatch.setattr(service.store, "active_jobs", active)
 
 

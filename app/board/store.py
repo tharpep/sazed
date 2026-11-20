@@ -107,3 +107,76 @@ async def finished_since(hours: int) -> list[dict[str, Any]]:
         hours,
     )
     return [dict(r) for r in rows]
+
+
+async def pr_snapshots() -> dict[tuple[str, int], dict[str, Any]]:
+    rows = await get_pool().fetch(
+        """
+        SELECT repo, number, state, head_sha, merged_at, additions, deletions, checks,
+               review_verdict, review_source, review_url, fetched_at, attempted_at, failures
+        FROM pr_snapshots
+        """
+    )
+    return {(r["repo"], r["number"]): dict(r) | {"checks": _checks(r["checks"])} for r in rows}
+
+
+def _checks(value: Any) -> Any:
+    return json.loads(value) if isinstance(value, str) else value
+
+
+async def save_pr_snapshot(key: tuple[str, int], snap: dict[str, Any]) -> None:
+    await get_pool().execute(
+        """
+        INSERT INTO pr_snapshots (repo, number, state, head_sha, merged_at, additions, deletions,
+                                  checks, review_verdict, review_source, review_url,
+                                  fetched_at, attempted_at, failures)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, NOW(), NOW(), 0)
+        ON CONFLICT (repo, number) DO UPDATE SET
+            state = EXCLUDED.state, head_sha = EXCLUDED.head_sha,
+            merged_at = EXCLUDED.merged_at, additions = EXCLUDED.additions,
+            deletions = EXCLUDED.deletions, checks = EXCLUDED.checks,
+            review_verdict = EXCLUDED.review_verdict, review_source = EXCLUDED.review_source,
+            review_url = EXCLUDED.review_url, fetched_at = NOW(), attempted_at = NOW(),
+            failures = 0
+        """,
+        key[0],
+        key[1],
+        snap["state"],
+        snap["head_sha"],
+        snap["merged_at"],
+        snap["additions"],
+        snap["deletions"],
+        None if snap["checks"] is None else json.dumps(snap["checks"]),
+        snap["review_verdict"],
+        snap["review_source"],
+        snap["review_url"],
+    )
+
+
+async def record_pr_failure(key: tuple[str, int]) -> None:
+    """A failed fetch: the last good read, if any, stays as it was."""
+    await get_pool().execute(
+        """
+        INSERT INTO pr_snapshots (repo, number, attempted_at, failures) VALUES ($1, $2, NOW(), 1)
+        ON CONFLICT (repo, number) DO UPDATE SET
+            attempted_at = NOW(), failures = pr_snapshots.failures + 1
+        """,
+        key[0],
+        key[1],
+    )
+
+
+async def latest_review(repo: str, number: int) -> dict[str, Any] | None:
+    """The newest finished review job on a PR; repo is matched lower-case."""
+    rec = await get_pool().fetchrow(
+        """
+        SELECT agent, result, meta FROM jobs
+        WHERE profile = 'review' AND status = 'succeeded' AND result IS NOT NULL
+          AND lower(params->>'repo') = $1 AND params->>'pr_number' = $2
+        ORDER BY finished_at DESC NULLS LAST
+        LIMIT 1
+        """,
+        repo.lower(),
+        str(number),
+    )
+    return _job(rec) if rec else None

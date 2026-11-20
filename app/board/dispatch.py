@@ -150,6 +150,39 @@ async def reap_silent(grace_s: int) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+async def heartbeats(keys: list[tuple[str, str]]) -> dict[tuple[str, str], datetime]:
+    if not keys:
+        return {}
+    recs = await get_pool().fetch(
+        """
+        SELECT h.plan, h.task, h.beat_at
+        FROM dispatch_heartbeats h
+        JOIN unnest($1::text[], $2::text[]) AS k(plan, task) ON h.plan = k.plan AND h.task = k.task
+        """,
+        [k[0] for k in keys],
+        [k[1] for k in keys],
+    )
+    return {(r["plan"], r["task"]): r["beat_at"] for r in recs}
+
+
+def running_since(rows: list[dict[str, Any]]) -> float:
+    """ts of the first row in the trailing run of running rows: a rerun after a failed row starts
+    there, though run_start (which only cuts at cleaned) reaches back to the earlier run."""
+    start = rows[-1]["ts"]
+    for r in reversed(rows):
+        if r["state"] != "running":
+            break
+        start = r["ts"]
+    return start
+
+
+def this_run_beat(beat: datetime | None, start: float) -> datetime | None:
+    """The heartbeat row outlives a run; a beat from before this run started isn't this run's."""
+    if beat is None or beat.timestamp() < start:
+        return None
+    return beat
+
+
 def run_start(rows: list[dict[str, Any]]) -> float | None:
     """ts of the first row after the last cleaned row; 0 with none; None if nothing follows."""
     start = 0.0
@@ -361,6 +394,7 @@ async def command_parts(now: datetime) -> tuple[list[dict], list[dict]]:
             if start is not None:
                 starts[key] = start
     steps = await steps_since(starts)
+    beats = await heartbeats(list(starts))
     for (plan, task), row in latest.items():
         meta = plans.get(plan, {})
         defn = next((t for t in meta.get("tasks", []) if t["id"] == task), {"id": task})
@@ -382,6 +416,9 @@ async def command_parts(now: datetime) -> tuple[list[dict], list[dict]]:
                     "tools": len(run),
                     "timeout_s": None,
                     "actions": [],
+                    "heartbeat_at": this_run_beat(
+                        beats.get((plan, task)), running_since(history[(plan, task)])
+                    ),
                 }
             )
         elif row["state"] in NEEDS_STATES and age < NEEDS_WINDOW_S:
