@@ -252,7 +252,7 @@ def review(job: dict[str, Any] | None) -> dict[str, Any] | None:
 _REVIEW_SECTION = re.compile(r"^##\s*Review\s*$(.*?)(?=^##\s|\Z)", re.MULTILINE | re.DOTALL)
 _FENCED = re.compile(r"```.*?```", re.DOTALL)
 _FIELD = re.compile(
-    r"^[ 	]*[-*]?[ 	]*\**(Verdict|Reviewer)\**[ 	]*:[ 	]*(\S.*)$", re.MULTILINE
+    r"^[ \t]*[-*]?[ \t]*\**(Verdict|Reviewer)\**[ \t]*:[ \t]*(\S.*)$", re.MULTILINE
 )
 # Bounds the regex work on a body anyone with write access can edit; GitHub allows 65,536.
 _SECTION_MAX = 2000
