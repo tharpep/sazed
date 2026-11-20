@@ -6,6 +6,7 @@ needs a branch in dispatch_failure_class and a line here."""
 
 import re
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 import pytest
@@ -17,6 +18,7 @@ from app.learning import store
 from app.learning.classes import CLASSES
 from app.migrations import _discover
 from app.routers import dispatch as router
+from tests.conftest import REAL_CLASS_LOCK
 
 WORKER_REASONS = {
     "timeout",
@@ -74,8 +76,17 @@ def _function() -> str:
 
 
 def _branches(body: str) -> dict[str, str | None]:
+    """Fails on a code with two branches, since SQL would take the first and a dict the last."""
     pairs = re.findall(r"WHEN '(\w+)' THEN (?:'(\w+)'|NULL)", body)
+    codes = [code for code, _ in pairs]
+    dupes = {c for c in codes if codes.count(c) > 1}
+    assert not dupes, f"dispatch_failure_class has more than one branch for {dupes}"
     return {code: cls or None for code, cls in pairs}
+
+
+def test_a_duplicate_branch_fails_the_guard():
+    with pytest.raises(AssertionError, match="more than one branch"):
+        _branches("WHEN 'timeout' THEN 'timed_out' WHEN 'timeout' THEN 'budget'")
 
 
 def test_every_worker_reason_and_the_reapers_has_a_branch():
@@ -226,21 +237,155 @@ async def test_job_and_dispatch_hits_add_up_to_one_guard_naming_both(monkeypatch
     assert len(notified) == 1
 
 
-async def test_dispatch_hits_are_latest_red_rows_one_per_plan_merged_with_jobs(monkeypatch):
+async def test_a_guard_with_dispatch_evidence_speaks_of_runs_and_a_job_only_one_of_jobs(
+    monkeypatch,
+):
+    task = {
+        "plan": "p",
+        "task": "t",
+        "line": "no result",
+        "finished_at": datetime(2026, 11, 4, tzinfo=UTC),
+    }
+    summary = learning._summary("agent_error", [task, task])
+    assert summary.startswith('Goal: stop runs from ending as "Agent error"')
+    assert "First: read the evidence runs and confirm" in summary
+    assert "Done when: a run like the evidence runs is stopped" in summary
+    assert "jobs" not in summary
+
+
+async def test_the_proposal_reads_and_creates_under_the_class_lock_and_notifies_after(
+    monkeypatch,
+):
+    events = []
+
+    @asynccontextmanager
+    async def class_lock(cls):
+        events.append(f"lock {cls}")
+        yield
+        events.append("commit")
+
+    async def guard_items(cls):
+        events.append("guards")
+        return []
+
+    async def hits_since(cls, since, limit=50):
+        events.append("hits")
+        task = {"plan": "p", "task": "t", "finished_at": datetime(2026, 11, 4, tzinfo=UTC)}
+        return [task, {**task, "plan": "q"}]
+
+    async def create_guard(**fields):
+        events.append("create")
+        return fields
+
+    async def notify(*args):
+        events.append("notify")
+
+    monkeypatch.setattr(store, "class_lock", class_lock)
+    monkeypatch.setattr(store, "guard_items", guard_items)
+    monkeypatch.setattr(store, "hits_since", hits_since)
+    monkeypatch.setattr(store, "create_guard", create_guard)
+    monkeypatch.setattr(jobs_service, "notify_simple", notify)
+    await learning.maybe_propose("land_conflict")
+    assert events == ["lock land_conflict", "guards", "hits", "create", "commit", "notify"]
+
+
+async def test_the_class_lock_is_a_transaction_advisory_lock_used_by_the_guard_queries(
+    monkeypatch,
+):
+    seen = []
+
+    class Tx:
+        async def __aenter__(self):
+            seen.append("begin")
+
+        async def __aexit__(self, *exc):
+            seen.append("commit")
+
+    class Conn:
+        def transaction(self):
+            return Tx()
+
+        async def execute(self, sql, *args):
+            seen.append((" ".join(sql.split()), args))
+
+        async def fetch(self, sql, *args):
+            seen.append("fetch on the locked connection")
+            return []
+
+    class Acquire:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, *exc):
+            return None
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    monkeypatch.setattr(store, "get_pool", lambda: Pool())
+    async with REAL_CLASS_LOCK("agent_error"):
+        await store.guard_items("agent_error")
+    assert seen == [
+        "begin",
+        (
+            "SELECT pg_advisory_xact_lock(hashtext('learning_guard'), hashtext($1))",
+            ("agent_error",),
+        ),
+        "fetch on the locked connection",
+        "commit",
+    ]
+
+
+LATEST_RED_TASKS = (
+    "SELECT l.plan, l.task, l.line, l.meta->>'reason' AS reason, to_timestamp(l.ts) AS "
+    "finished_at, dispatch_failure_class(l.state, l.meta) AS cls FROM ( SELECT DISTINCT ON "
+    "(plan, task) plan, task, state, line, meta, ts FROM dispatch_rows WHERE state <> 'cleaned' "
+    "ORDER BY plan, task, ts DESC, id DESC ) l WHERE dispatch_failure_class(l.state, l.meta) IS "
+    "NOT NULL"
+)
+HITS_SQL = [
+    "SELECT * FROM jobs WHERE failure_class = $1 AND ($2::timestamptz IS NULL OR finished_at > "
+    "$2) ORDER BY finished_at DESC LIMIT $3",
+    "SELECT DISTINCT ON (h.plan) h.plan, h.task, h.line, h.reason, h.finished_at, p.repo FROM ( "
+    f"{LATEST_RED_TASKS} ) h LEFT JOIN dispatch_plans p ON p.plan = h.plan WHERE h.cls = $1 AND "
+    "($2::timestamptz IS NULL OR h.finished_at > $2) ORDER BY h.plan, h.finished_at DESC",
+]
+COUNTS_SQL = (
+    "SELECT cls, count(*) AS total, count(*) FILTER (WHERE finished_at > NOW() - INTERVAL "
+    "'30 days') AS last_30d FROM ( SELECT failure_class AS cls, finished_at FROM jobs WHERE "
+    f"failure_class IS NOT NULL UNION ALL SELECT cls, finished_at FROM ( {LATEST_RED_TASKS} ) t "
+    ") hits GROUP BY cls"
+)
+
+
+def _capture(monkeypatch, rows_for):
     calls = []
-    job = {"id": uuid.UUID(int=1), "finished_at": datetime(2026, 11, 3, tzinfo=UTC)}
-    task = {"plan": "p", "task": "t", "finished_at": datetime(2026, 11, 4, tzinfo=UTC)}
 
     class Pool:
         async def fetch(self, sql, *args):
-            calls.append((sql, args))
-            return [job] if "FROM jobs" in sql else [task]
+            calls.append((" ".join(sql.split()), args))
+            return rows_for(sql)
 
     monkeypatch.setattr(store, "get_pool", lambda: Pool())
     monkeypatch.setattr(store, "_jobs", lambda rows: list(rows))
+    return calls
+
+
+async def test_hits_since_runs_the_sql_verified_on_postgres_and_merges_newest_first(monkeypatch):
+    """The text S5-8 ran on Postgres 18.6; a change here needs a new run there."""
+    job = {"id": uuid.UUID(int=1), "finished_at": datetime(2026, 11, 3, tzinfo=UTC)}
+    task = {"plan": "p", "task": "t", "finished_at": datetime(2026, 11, 4, tzinfo=UTC)}
+    calls = _capture(monkeypatch, lambda sql: [job] if "FROM jobs" in sql else [task])
     assert await store.hits_since("agent_error", None) == [task, job]
-    sql, args = calls[1]
-    assert args == ("agent_error", None)
-    assert "SELECT DISTINCT ON (plan, task)" in sql and "WHERE state <> 'cleaned'" in sql
-    assert "SELECT DISTINCT ON (h.plan)" in sql
-    assert "dispatch_failure_class(l.state, l.meta)" in sql
+    assert calls == [
+        (HITS_SQL[0], ("agent_error", None, 50)),
+        (HITS_SQL[1], ("agent_error", None)),
+    ]
+
+
+async def test_class_counts_runs_the_sql_verified_on_postgres(monkeypatch):
+    """The text S5-8 ran on Postgres 18.6; a change here needs a new run there."""
+    calls = _capture(monkeypatch, lambda sql: [{"cls": "agent_error", "total": 2, "last_30d": 1}])
+    assert await store.class_counts() == [{"cls": "agent_error", "total": 2, "last_30d": 1}]
+    assert calls == [(COUNTS_SQL, ())]

@@ -45,16 +45,20 @@ def _teaches(cls: str) -> bool:
     return CLASSES[cls].family == "lesson" and cls != "unclassified"
 
 
+def _is_task(hit: dict[str, Any]) -> bool:
+    return "plan" in hit
+
+
 def _source(hit: dict[str, Any]) -> str:
-    return f"dispatch:{hit['plan']}:{hit['task']}" if "plan" in hit else f"job:{hit['id']}"
+    return f"dispatch:{hit['plan']}:{hit['task']}" if _is_task(hit) else f"job:{hit['id']}"
 
 
 def _repo(hit: dict[str, Any]) -> str | None:
-    return hit.get("repo") if "plan" in hit else (hit.get("params") or {}).get("repo")
+    return hit.get("repo") if _is_task(hit) else (hit.get("params") or {}).get("repo")
 
 
 def _evidence_line(job: dict[str, Any]) -> str:
-    if "plan" in job:
+    if _is_task(job):
         return _task_evidence_line(job)
     meta = job.get("meta") or {}
     detail = (
@@ -80,35 +84,37 @@ def _task_evidence_line(hit: dict[str, Any]) -> str:
 def _summary(cls: str, hits: list[dict[str, Any]]) -> str:
     spec = CLASSES[cls]
     today = "\n".join(_evidence_line(j) for j in hits[:EVIDENCE_JOBS])
+    runs, run = ("runs", "run") if any(_is_task(h) for h in hits) else ("jobs", "job")
     return (
-        f'Goal: stop jobs from ending as "{spec.label}" ({cls}).\n\n'
+        f'Goal: stop {runs} from ending as "{spec.label}" ({cls}).\n\n'
         f"Today: this class has been hit {len(hits)} times since the last guard proposal:\n"
         f"{today}\n\n"
         f"Change: add {spec.guard_hint}. Prefer a harness check or test over a prompt rule. "
         "Write the guard as When / Do not / Unless / Instead.\n\n"
-        "First: read the evidence jobs and confirm they share one cause.\n\n"
-        f"Done when: a job like the evidence jobs is stopped or fixed by the guard, pinned by a "
-        "test."
+        f"First: read the evidence {runs} and confirm they share one cause.\n\n"
+        f"Done when: a {run} like the evidence {runs} is stopped or fixed by the guard, pinned "
+        "by a test."
     )
 
 
 async def maybe_propose(cls: str) -> dict[str, Any] | None:
-    guards = await store.guard_items(cls)
-    if any(g["status"] in store.GUARD_OPEN for g in guards):
-        return None
-    since = guards[0]["created_at"] if guards else None
-    hits = await store.hits_since(cls, since)
-    if len(hits) < HITS_TO_PROPOSE:
-        return None
-    spec = CLASSES[cls]
-    repos = sorted({r for h in hits if (r := _repo(h))})
-    item = await store.create_guard(
-        title=f"Guard: {spec.label}"[:200],
-        summary=_summary(cls, hits),
-        why=f"{cls} hit {len(hits)} times since the last guard proposal.",
-        repos=repos,
-        sources=[f"failure_class:{cls}", *(_source(h) for h in hits[:EVIDENCE_JOBS])],
-    )
+    async with store.class_lock(cls):
+        guards = await store.guard_items(cls)
+        if any(g["status"] in store.GUARD_OPEN for g in guards):
+            return None
+        since = guards[0]["created_at"] if guards else None
+        hits = await store.hits_since(cls, since)
+        if len(hits) < HITS_TO_PROPOSE:
+            return None
+        spec = CLASSES[cls]
+        repos = sorted({r for h in hits if (r := _repo(h))})
+        item = await store.create_guard(
+            title=f"Guard: {spec.label}"[:200],
+            summary=_summary(cls, hits),
+            why=f"{cls} hit {len(hits)} times since the last guard proposal.",
+            repos=repos,
+            sources=[f"failure_class:{cls}", *(_source(h) for h in hits[:EVIDENCE_JOBS])],
+        )
     from app.jobs.service import notify_simple  # lazy: the jobs service imports learning
 
     await notify_simple(

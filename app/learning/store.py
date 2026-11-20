@@ -2,14 +2,39 @@
 and the guard items they feed."""
 
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
+
+import asyncpg
 
 from app.backlog import store as backlog_store
 from app.db import get_pool
 from app.jobs import store as jobs_store
 
 GUARD_OPEN = ("new", "shortlisted", "approved")
+
+_locked: ContextVar[asyncpg.Connection | None] = ContextVar("learning_locked", default=None)
+
+
+def _db() -> asyncpg.Connection | asyncpg.Pool:
+    return _locked.get() or get_pool()
+
+
+@asynccontextmanager
+async def class_lock(cls: str) -> AsyncIterator[None]:
+    """One transaction holding the class's advisory lock; guard reads and writes inside use it."""
+    async with get_pool().acquire() as conn, conn.transaction():
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtext('learning_guard'), hashtext($1))", cls
+        )
+        token = _locked.set(conn)
+        try:
+            yield
+        finally:
+            _locked.reset(token)
 
 
 def _jobs(rows) -> list[dict[str, Any]]:
@@ -44,8 +69,8 @@ async def dispatch_class(state: str, meta: dict) -> str | None:
 
 async def hits_since(cls: str, since: datetime | None, limit: int = 50) -> list[dict[str, Any]]:
     """Jobs of the class and dispatch hits (a task's latest red row, one per plan), newest first."""
-    pool = get_pool()
-    rows = await pool.fetch(
+    db = _db()
+    rows = await db.fetch(
         """
         SELECT * FROM jobs
         WHERE failure_class = $1 AND ($2::timestamptz IS NULL OR finished_at > $2)
@@ -55,7 +80,7 @@ async def hits_since(cls: str, since: datetime | None, limit: int = 50) -> list[
         since,
         limit,
     )
-    tasks = await pool.fetch(
+    tasks = await db.fetch(
         f"""
         SELECT DISTINCT ON (h.plan) h.plan, h.task, h.line, h.reason, h.finished_at, p.repo
         FROM ({_LATEST_RED_TASKS}) h
@@ -73,7 +98,7 @@ async def hits_since(cls: str, since: datetime | None, limit: int = 50) -> list[
 
 async def guard_items(cls: str) -> list[dict[str, Any]]:
     """Every guard item for the class, newest first."""
-    rows = await get_pool().fetch(
+    rows = await _db().fetch(
         """
         SELECT id, title, status, created_at FROM backlog_items
         WHERE type = 'guard' AND sources @> $1::jsonb ORDER BY created_at DESC
@@ -84,7 +109,7 @@ async def guard_items(cls: str) -> list[dict[str, Any]]:
 
 
 async def create_guard(**fields: Any) -> dict[str, Any]:
-    return await backlog_store.create_item(type_="guard", source="learning", **fields)
+    return await backlog_store.create_item(type_="guard", source="learning", db=_db(), **fields)
 
 
 async def open_guards() -> list[dict[str, Any]]:
