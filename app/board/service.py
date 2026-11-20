@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.backlog import store as backlog
-from app.board import actions, stages, store
+from app.board import actions, prs, stages, store
 from app.jobs import store as jobs
 
 DONE_WINDOW = timedelta(days=14)
@@ -64,10 +64,17 @@ def _session_link(item: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _item_card(item: dict[str, Any], chain: list[dict[str, Any]]) -> dict[str, Any]:
+def _pr(ref: dict[str, Any] | None, snaps: dict[prs.Key, dict[str, Any]]) -> dict[str, Any] | None:
+    return prs.block(ref, snaps.get(prs.key(ref["repo"], ref["number"])) if ref else None)
+
+
+def _item_card(
+    item: dict[str, Any], chain: list[dict[str, Any]], snaps: dict[prs.Key, dict[str, Any]]
+) -> dict[str, Any]:
     live = chain if item["status"] == "approved" else []
     tail = live[-1] if live else None
-    stage, next_step = stages.item_stage(item, tail)
+    pr = _pr(prs.item_ref(item, chain), snaps)
+    stage, next_step = stages.item_stage(item, tail, pr=pr)
     times = [item["updated_at"]]
     times += [t for job in live for t in (job["created_at"], job["finished_at"]) if t]
     updated = max(times)
@@ -96,10 +103,11 @@ def _item_card(item: dict[str, Any], chain: list[dict[str, Any]]) -> dict[str, A
         "session_link": _session_link(item),
         "actions": actions.describe(tail),
         **_job_fields(live),
+        "pr": pr,
     }
 
 
-def _job_card(job: dict[str, Any]) -> dict[str, Any]:
+def _job_card(job: dict[str, Any], snaps: dict[prs.Key, dict[str, Any]]) -> dict[str, Any]:
     stage, next_step = stages.job_stage(job)
     updated = job["finished_at"] or job["started_at"] or job["created_at"]
     return {
@@ -123,6 +131,7 @@ def _job_card(job: dict[str, Any]) -> dict[str, Any]:
         "session_link": None,
         "actions": actions.describe(job),
         **_job_fields([job]),
+        "pr": _pr(prs.job_ref(job), snaps),
     }
 
 
@@ -148,9 +157,10 @@ async def cards(*, all_done: bool = False) -> list[dict[str, Any]]:
     items = await store.items()
     chains = await store.chains()
     active = await store.active_jobs()
+    snaps = await store.pr_snapshots()
     linked = {job["id"] for chain in chains.values() for job in chain}
-    result = [_item_card(item, chains.get(item["id"], [])) for item in items]
-    result += [_job_card(job) for job in active if _shows_alone(job, linked)]
+    result = [_item_card(item, chains.get(item["id"], []), snaps) for item in items]
+    result += [_job_card(job, snaps) for job in active if _shows_alone(job, linked)]
     if not all_done:
         cutoff = datetime.now(UTC) - DONE_WINDOW
         result = [c for c in result if c["stage"] != "done" or c["done_at"] >= cutoff]

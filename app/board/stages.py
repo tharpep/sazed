@@ -60,10 +60,37 @@ def _finished(job: dict[str, Any], meta: dict[str, Any], now: datetime) -> Stage
     return "doing", "Waiting for CI"
 
 
+def _linked_pr(pr: dict[str, Any] | None) -> Stage:
+    """A session-linked card's PR, from its last snapshot. Only an open, green PR with no
+    "request changes" verdict is a merge call; no stored review never blocks one."""
+    if pr is None or pr["fetched_at"] is None:
+        return "doing", "Being built in a terminal session"
+    if pr["state"] == "merged":
+        return "doing", "PR merged"
+    if pr["state"] == "closed":
+        return "doing", "PR closed without merging"
+    if pr["state"] == "draft":
+        return "doing", "Draft PR"
+    if (pr["review"] or {}).get("verdict") == "request_changes":
+        return "doing", "Review asked for changes"
+    checks = (pr["checks"] or {}).get("state")
+    if checks == "passing":
+        return "needs_me", "Ready to merge"
+    if checks == "failing":
+        return "doing", "Checks failing"
+    if checks == "running":
+        return "doing", "Checks running"
+    return "doing", "No checks reported yet"
+
+
 def item_stage(
-    item: dict[str, Any], job: dict[str, Any] | None, now: datetime | None = None
+    item: dict[str, Any],
+    job: dict[str, Any] | None,
+    now: datetime | None = None,
+    pr: dict[str, Any] | None = None,
 ) -> Stage:
-    """Stage of a backlog item. `job` is the last job in its chain, the one with the live state."""
+    """Stage of a backlog item. `job` is the last job in its chain, the one with the live state;
+    `pr` is the card's `pr` block (prs.block)."""
     status = item["status"]
     if status == "done":
         return "done", "Done"
@@ -71,7 +98,9 @@ def item_stage(
     if status == "approved" and job is not None:
         return job_stage(job, now)
     # A terminal session building the card; its PR merging closes it (backlog.close_for_merged_pr).
-    if item.get("session_label") or item.get("session_branch") or item.get("pr_number"):
+    if item.get("pr_number"):
+        return _linked_pr(pr)
+    if item.get("session_label") or item.get("session_branch"):
         return "doing", "Being built in a terminal session"
     # A card filed under a workstream is committed work on a project's ladder, not one to triage.
     if status == "shortlisted" or item.get("rank") is not None or item.get("workstream_id"):

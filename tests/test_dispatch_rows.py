@@ -67,7 +67,12 @@ async def test_plan_summary_counts_latest_states_and_planned_tasks(monkeypatch):
     assert summary["states"] == {"done": 1, "waiting": 1, "planned": 1}
 
 
-async def _summary_with(monkeypatch, rows, steps=()):
+async def _summary_with(monkeypatch, rows, steps=(), beats=None):
+    async def heartbeats(keys):
+        return {k: v for k, v in (beats or {}).items() if k in keys}
+
+    monkeypatch.setattr(dispatch, "heartbeats", heartbeats)
+
     async def plan_rows():
         return [PLAN]
 
@@ -114,6 +119,22 @@ async def test_home_summary_lists_running_and_waiting_dispatch_tasks(monkeypatch
     assert needs["question"] == "Which colour?"
     assert needs["repo"] == "sazed"
     assert needs["job_id"] is None
+
+
+async def test_a_running_dispatch_item_carries_its_last_heartbeat(monkeypatch):
+    beat = NOW - timedelta(seconds=20)
+    rows = [_row("api", "running", 90), _row("ui", "running", 90)]
+    beats = {("ui-pass", "api"): beat}
+    result = await _summary_with(monkeypatch, rows, beats=beats)
+    by_task = {w["task"]: w["heartbeat_at"] for w in result["working"]}
+    assert by_task == {"api": beat, "ui": None}
+
+
+def test_a_heartbeat_from_before_this_run_started_is_not_this_runs():
+    start = (NOW - timedelta(minutes=5)).timestamp()
+    assert dispatch.this_run_beat(NOW - timedelta(minutes=9), start) is None
+    assert dispatch.this_run_beat(NOW, start) == NOW
+    assert dispatch.this_run_beat(None, start) is None
 
 
 async def test_home_summary_leaves_out_a_dispatch_need_older_than_a_day(monkeypatch):

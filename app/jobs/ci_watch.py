@@ -8,6 +8,7 @@ read Actions):
 - failure: start a fix-up follow-up on the same branch with the failing log tails, up to
   MAX_FIX_ATTEMPTS per PR (fix-ups count against the daily cap); after that, notify and stop.
 - no runs after NO_CI_AFTER: the repo has no CI; stop watching.
+Each tick also refreshes the snapshot of every PR a board card points at (board.prs).
 Runs only where the worker is configured (WORKER_KEY set), so not on GCP.
 """
 
@@ -18,6 +19,8 @@ from typing import Any
 
 import httpx
 
+from app.board import prs
+from app.board import store as board_store
 from app.config import settings
 from app.http_client import get_client
 from app.jobs import service, store
@@ -29,6 +32,9 @@ POLL_SECONDS = 90
 MAX_FIX_ATTEMPTS = 2
 NO_CI_AFTER = timedelta(minutes=15)
 PR_SYNC_EVERY = 7  # ticks: about every 10 minutes
+# Each PR is fetched at most every prs.SNAPSHOT_AGE, so this caps a burst (first deploy, many
+# PRs linked at once), not the steady rate.
+SNAPSHOTS_PER_PASS = 10
 _task: asyncio.Task | None = None
 
 
@@ -151,6 +157,49 @@ async def _check(job: dict[str, Any]) -> None:
     logger.info("Job %s: CI failed, fix-up %s (attempt %d)", job["id"], fix["id"], attempt)
 
 
+async def _snapshot(ref: dict[str, Any], old: dict[str, Any] | None) -> None:
+    """Store one PR's state, checks and review. A failed gateway call leaves the old snapshot,
+    fetched time included. Passing checks on an unchanged head aren't asked again: the gateway
+    fetches log tails for failing runs, so only running and failing ones cost more than one call."""
+    pr = await _pr(ref["repo"], ref["number"])
+    if pr is None:
+        return
+    sha = prs.head_sha(pr)
+    old_checks = (old or {}).get("checks") or {}
+    if sha and old and old["head_sha"] == sha and old_checks.get("state") == "passing":
+        pr_checks = old_checks
+    elif sha:
+        ci = await _ci(ref["repo"], sha)
+        if ci is None:
+            return
+        pr_checks = prs.checks(ci)
+    else:
+        pr_checks = prs.checks(None)
+    review = prs.review(await board_store.latest_review(ref["repo"], ref["number"]))
+    await board_store.save_pr_snapshot(
+        prs.key(ref["repo"], ref["number"]), prs.snapshot(pr, pr_checks, review)
+    )
+
+
+async def snapshot_prs() -> None:
+    """Refresh the PR snapshots cards read, at most SNAPSHOTS_PER_PASS per tick."""
+    from app.board.service import DONE_WINDOW  # lazy: the board service imports the jobs service
+
+    due = prs.due(
+        await board_store.items(),
+        await board_store.chains(),
+        await board_store.active_jobs(),
+        await board_store.pr_snapshots(),
+        datetime.now(UTC),
+        DONE_WINDOW,
+    )
+    for ref, old in due[:SNAPSHOTS_PER_PASS]:
+        try:
+            await _snapshot(ref, old)
+        except Exception:
+            logger.exception("PR snapshot failed for %s#%s", ref["repo"], ref["number"])
+
+
 async def _loop() -> None:
     from app.backlog import service as backlog  # lazy: backlog imports the jobs service
 
@@ -161,6 +210,10 @@ async def _loop() -> None:
                 await _check(job)
         except Exception:
             logger.exception("CI watcher tick failed")
+        try:
+            await snapshot_prs()
+        except Exception:
+            logger.exception("PR snapshot pass failed")
         # Jobs paused by Pryce's plan limit resume once it resets (plans/10 P1.2).
         try:
             if resumed := await service.resume_rate_limited():
