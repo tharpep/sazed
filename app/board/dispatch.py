@@ -143,11 +143,11 @@ async def reap_silent(grace_s: int) -> list[dict[str, Any]]:
                jsonb_build_object('stop_reason', 'no_heartbeat', 'last_heartbeat', last_seen)
         FROM silent
         ON CONFLICT (plan, task, ts, state) DO NOTHING
-        RETURNING plan, task, line
+        RETURNING plan, task, state, line, meta
         """,
         grace_s,
     )
-    return [dict(r) for r in rows]
+    return [{**r, "meta": _json(r["meta"])} for r in rows]
 
 
 async def heartbeats(keys: list[tuple[str, str]]) -> dict[tuple[str, str], datetime]:

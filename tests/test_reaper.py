@@ -25,6 +25,15 @@ class _Pool:
         self.calls.append((sql, args))
 
 
+_REAPED_ROW = {
+    "plan": "p",
+    "task": "t",
+    "state": "failed",
+    "line": "no heartbeat since 2026-11-18 10:00:00 UTC",
+    "meta": {"stop_reason": "no_heartbeat"},
+}
+
+
 def _reaped_job():
     return {
         "id": JOB_ID,
@@ -83,10 +92,14 @@ async def test_a_failing_job_pass_still_reaps_dispatch(monkeypatch):
 
     async def reap_silent(grace_s):
         reaped.append(grace_s)
-        return [{"plan": "p", "task": "t", "line": "no heartbeat since x"}]
+        return [_REAPED_ROW]
+
+    async def record_dispatch(plan, task, state, meta):
+        return None
 
     monkeypatch.setattr(store, "expire_stale", broken)
     monkeypatch.setattr(dispatch, "reap_silent", reap_silent)
+    monkeypatch.setattr(learning, "record_dispatch", record_dispatch)
     assert await reaper.reap_once() is False
     assert reaped == [settings.dispatch_heartbeat_grace_s]
 
@@ -169,7 +182,7 @@ async def test_dispatch_reap_fails_silent_running_tasks_once_and_says_since_when
     saying since when. Its ts is the last beat's time, never before the running row's, so the
     console shows how long it ran; both come from rows every reaper reads alike, so a second
     reaper's insert hits the unique key and does nothing."""
-    pool = _Pool([{"plan": "p", "task": "t", "line": "no heartbeat since 2026-11-18 10:00:00 UTC"}])
+    pool = _Pool([{**_REAPED_ROW, "meta": '{"stop_reason": "no_heartbeat"}'}])
     monkeypatch.setattr(dispatch, "get_pool", lambda: pool)
     out = await dispatch.reap_silent(150)
     sql, args = pool.calls[0]
@@ -181,7 +194,8 @@ async def test_dispatch_reap_fails_silent_running_tasks_once_and_says_since_when
     assert "'no heartbeat since '" in sql
     assert "'stop_reason', 'no_heartbeat'" in sql
     assert "ON CONFLICT (plan, task, ts, state) DO NOTHING" in sql
-    assert out == [{"plan": "p", "task": "t", "line": "no heartbeat since 2026-11-18 10:00:00 UTC"}]
+    assert "RETURNING plan, task, state, line, meta" in sql
+    assert out == [_REAPED_ROW]
 
 
 async def test_a_heartbeat_refreshes_the_tasks_beat(monkeypatch):
