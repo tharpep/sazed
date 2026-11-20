@@ -1,7 +1,7 @@
 """Worker API (plans/07): the sazed-worker container claims jobs, streams events, posts results.
 
 Authenticated with X-Worker-Key (settings.worker_key), not the console API key, so the worker
-can reach only these three routes. Disabled (503) when WORKER_KEY is empty.
+can reach only these routes. Disabled (503) when WORKER_KEY is empty.
 """
 
 import hmac
@@ -17,11 +17,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from app import policy
-from app.board import dispatch
+from app.board import dispatch, mcp_servers
 from app.claude_usage import stats as usage_stats
 from app.claude_usage import store as usage_store
 from app.config import settings
 from app.jobs import change_result, ci_watch, service, store
+from app.routers import agent_profiles
 
 logger = logging.getLogger(__name__)
 
@@ -330,6 +331,17 @@ async def export_plan(plan: str, request: Request):
     except ExportRefused as e:
         logger.warning("Plan %s export refused (%s): %s", plan, e.reason, e.detail)
         return JSONResponse({"detail": e.detail, "reason": e.reason}, status_code=e.status)
+
+
+@router.get("/agents/profiles")
+async def agent_profiles_list():
+    """Unattended dispatch on the worker host reads the registry fresh; read-only on purpose."""
+    return await agent_profiles.list_profiles(v2=True)
+
+
+@router.get("/agents/mcp-servers")
+async def mcp_servers_list():
+    return [mcp_servers.for_worker(s) for s in await agent_profiles.list_mcp_servers()]
 
 
 @router.post("/limits/due")

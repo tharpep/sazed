@@ -1,6 +1,7 @@
 """MCP server registry (migration 029): servers profiles can grant, one history row per save."""
 
 import json
+import re
 from typing import Any
 
 from app.db import get_pool
@@ -9,6 +10,7 @@ FIELDS = ("transport", "url", "command", "args", "headers", "agent_safe", "descr
 JSON_FIELDS = ("args", "headers")
 # What the worker connects to or runs, and which ${VAR} secrets it sends there.
 CONNECTION = ("transport", "url", "command", "args", "headers")
+ENV_REF = re.compile(r"^\$\{[A-Z][A-Z0-9_]*\}$")
 # Only the console saves as the owner: the gateway's MCP tools always stamp "agent:<name>".
 OWNER = "pryce"
 ASK_OWNER = "ask Pryce to approve it in the Sazed console (Profiles, MCP servers)"
@@ -27,6 +29,13 @@ def _json(value: Any) -> Any:
 def _out(row: dict[str, Any]) -> dict[str, Any]:
     out = {k: row[k] for k in (("name",) + FIELDS + ("version", "updated_by", "updated_at"))}
     return {**out, **{k: _json(out[k]) for k in JSON_FIELDS}}
+
+
+def for_worker(server: dict[str, Any]) -> dict[str, Any]:
+    """A server as the worker key may read it: header values only as ${VAR} references."""
+    # pinned by test_worker_registry_reads.py::test_a_literal_header_value_never_reaches_the_worker
+    headers = {k: v for k, v in server["headers"].items() if ENV_REF.match(str(v))}
+    return {**server, "headers": headers}
 
 
 def _args(fields: dict[str, Any]) -> list[Any]:
