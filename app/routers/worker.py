@@ -16,11 +16,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
+from app import policy
 from app.board import dispatch
 from app.claude_usage import stats as usage_stats
 from app.claude_usage import store as usage_store
 from app.config import settings
-from app.jobs import change_result, service, store
+from app.jobs import change_result, ci_watch, service, store
 
 logger = logging.getLogger(__name__)
 
@@ -215,7 +216,7 @@ class ExportIn(BaseModel):
     title: str = Field(..., min_length=1, max_length=256)
     body: str = Field("", max_length=60_000)
     files: dict[str, str | None]
-    modes: dict[str, str] = Field(default_factory=dict)
+    modes: dict[str, Literal["100644", "100755", "120000"]] = Field(default_factory=dict)
 
 
 class ExportRefused(Exception):
@@ -230,6 +231,19 @@ GATEWAY_MAX_BASE64_CHARS = 5 * 1024 * 1024 * 4 // 3
 _GATEWAY_PR_CLOSED = "not reopening it"
 # pinned by test_plan_export.py::test_a_plan_id_that_cant_form_a_branch_is_refused
 _PLAN_ID_RE = re.compile(r"^(?!.*\.\.)(?!.*\.$)(?!.*\.lock$)[A-Za-z0-9._-]{1,75}$")
+
+
+async def _refuse_a_ready_pr(repo: str, number: int | None) -> None:
+    """Once Pryce marks a plan's PR ready, the worker key no longer rewrites it."""
+    if number is None:
+        return
+    pr = await ci_watch.pull_request(repo, number)
+    if pr is None:
+        raise service.GatewayUnreachable(f"couldn't read PR #{number} on {repo}")
+    if pr.get("state") == "open" and not pr.get("draft"):
+        raise ExportRefused(
+            409, "refused", f"PR #{number} was marked ready, so export won't rewrite it"
+        )
 
 
 async def _export(plan: str, body: ExportIn) -> dict[str, Any]:
@@ -249,6 +263,9 @@ async def _export(plan: str, body: ExportIn) -> dict[str, Any]:
             "refused",
             f"plan '{plan}' is for {repo} at {found['base']}, not {sent} at {body.base}",
         )
+    decision = policy.decide(policy.StartJob("claude", f"dispatch:{plan}", repo=repo))
+    if decision.verdict != "allow":
+        raise ExportRefused(422, "refused", decision.reason)
     if len(body.files) > GATEWAY_MAX_FILES:
         raise ExportRefused(
             413, "export_too_large", f"too many files ({len(body.files)} > {GATEWAY_MAX_FILES})"
@@ -257,6 +274,7 @@ async def _export(plan: str, body: ExportIn) -> dict[str, Any]:
         raise ExportRefused(413, "export_too_large", "the changes are larger than 5 MiB")
     try:
         await service.repo_info(repo)
+        await _refuse_a_ready_pr(repo, found.get("pr_number"))
         pr = await service.open_plan_pull_request(
             plan,
             repo,

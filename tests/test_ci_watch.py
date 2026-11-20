@@ -52,7 +52,7 @@ def watch(monkeypatch):
     async def fake_notify(*args, **kwargs):
         calls["notified"] = True
 
-    monkeypatch.setattr(ci_watch, "_pr", fake_pr)
+    monkeypatch.setattr(ci_watch, "pull_request", fake_pr)
     monkeypatch.setattr(ci_watch, "_ci", fake_ci)
     monkeypatch.setattr(ci_watch.store, "update_outcome", fake_outcome)
     monkeypatch.setattr(ci_watch.service, "create_follow_up", fake_follow_up)

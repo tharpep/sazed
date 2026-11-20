@@ -48,7 +48,7 @@ async def _ci(repo: str, sha: str) -> dict[str, Any] | None:
         return None
 
 
-async def _pr(repo: str, number: int) -> dict[str, Any] | None:
+async def pull_request(repo: str, number: int) -> dict[str, Any] | None:
     owner, name = repo.split("/", 1)
     try:
         resp = await get_client().get(
@@ -93,7 +93,7 @@ async def _check(job: dict[str, Any]) -> None:
     meta = job.get("meta") or {}
     params = job.get("params") or {}
     if meta.get("pr_number"):
-        pr = await _pr(params["repo"], int(meta["pr_number"]))
+        pr = await pull_request(params["repo"], int(meta["pr_number"]))
         if pr is None:
             return  # try again next tick
         if pr.get("state") != "open":

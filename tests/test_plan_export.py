@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from app.board import dispatch
 from app.config import settings
 from app.dependencies import verify_api_key
-from app.jobs import service
+from app.jobs import ci_watch, service
 from app.routers import dispatch as dispatch_router
 from app.routers import worker
 
@@ -54,6 +54,10 @@ class _Resp:
     def json(self):
         return self.payload
 
+    def raise_for_status(self):
+        if not self.is_success:
+            raise httpx.HTTPStatusError("error", request=None, response=None)
+
 
 class Gateway:
     def __init__(self):
@@ -73,11 +77,14 @@ class Gateway:
         )
         self.raise_on_post = None
         self.raise_on_get = None
+        self.pr_read = _Resp(200, {"number": 3, "state": "open", "draft": True})
 
     async def get(self, url, headers, timeout):
         if self.raise_on_get:
             raise self.raise_on_get
         self.looked_up.append(url)
+        if "/pulls/" in url:
+            return self.pr_read
         return _Resp(self.repo_status, {"full_name": url.rsplit("/repos/", 1)[1]})
 
     async def post(self, url, json, headers, timeout):
@@ -103,6 +110,8 @@ def gateway(monkeypatch):
     monkeypatch.setattr(settings, "gateway_url", "http://gw")
     monkeypatch.setattr(settings, "gateway_api_key", "gw-key")
     monkeypatch.setattr(service, "get_client", lambda: gw)
+    monkeypatch.setattr(ci_watch, "get_client", lambda: gw)
+    monkeypatch.setattr(settings, "code_task_excluded_repos", ["tharpep/Trusted-Model-Registry"])
     monkeypatch.setattr(dispatch, "plan_row", plan_row)
     monkeypatch.setattr(dispatch, "record_export", record_export)
     gw.plans = plans
@@ -263,6 +272,7 @@ def test_github_failing_behind_the_gateway_is_export_unreachable(gateway, client
 def test_a_closed_pr_on_the_branch_is_pr_closed(gateway, client):
     gateway.plans["temps-v1"] = _plan(pr_number=3)
     sentence = "PR #3 is closed or no longer on sazed/plan-temps-v1; not reopening it"
+    gateway.pr_read = _Resp(200, {"number": 3, "state": "closed", "draft": False})
     gateway.pr = _Resp(409, {"detail": sentence})
     assert _refusal(_export(client), 409, "pr_closed") == sentence
     assert gateway.recorded == []
@@ -273,6 +283,41 @@ def test_a_branch_whose_history_moved_is_refused_not_pr_closed(gateway, client):
     sentence = "sazed/plan-temps-v1 no longer grows from base_sha; re-export from a fresh base"
     gateway.pr = _Resp(409, {"detail": sentence})
     assert _refusal(_export(client), 409, "refused") == sentence
+
+
+def test_a_re_export_of_a_draft_reads_it_then_updates_it(gateway, client):
+    gateway.plans["temps-v1"] = _plan(pr_number=3)
+    assert _export(client).status_code == 200
+    assert "http://gw/github/repos/tharpep/dispatch-sandbox/pulls/3" in gateway.looked_up
+    assert len(gateway.posts) == 1
+
+
+def test_a_pr_marked_ready_is_not_rewritten(gateway, client):
+    gateway.plans["temps-v1"] = _plan(pr_number=3)
+    gateway.pr_read = _Resp(200, {"number": 3, "state": "open", "draft": False})
+    detail = _refusal(_export(client), 409, "refused")
+    assert detail == "PR #3 was marked ready, so export won't rewrite it"
+    assert gateway.posts == [] and gateway.recorded == []
+
+
+def test_a_pr_that_cant_be_read_is_export_unreachable(gateway, client):
+    gateway.plans["temps-v1"] = _plan(pr_number=3)
+    gateway.pr_read = _Resp(502, {"detail": "GitHub unreachable"})
+    _refusal(_export(client), 424, "export_unreachable")
+    assert gateway.posts == []
+
+
+def test_a_repo_excluded_from_code_tasks_is_refused(gateway, client):
+    gateway.plans["temps-v1"] = _plan(repo="Trusted-Model-Registry")
+    detail = _refusal(_export(client, _body(repo="Trusted-Model-Registry")), 422, "refused")
+    assert "excluded" in detail
+    assert gateway.posts == [] and gateway.looked_up == []
+
+
+def test_a_mode_the_gateway_does_not_take_is_refused(gateway, client):
+    detail = _refusal(_export(client, _body(modes={"sub": "160000"})), 422, "refused")
+    assert detail.startswith("modes.sub:")
+    assert gateway.posts == []
 
 
 def test_modes_reach_the_gateway_unchanged(gateway, client):
