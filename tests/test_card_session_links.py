@@ -146,7 +146,8 @@ def test_the_board_card_shows_the_link_and_the_doing_stage():
     card = board._item_card(item, [], {})
     assert card["stage"] == "doing"
     assert card["session_link"] == {
-        "session": "cc-7", "branch": "feature/x", "pr_repo": "tharpep/sazed", "pr_number": 12
+        "session": "cc-7", "branch": "feature/x", "pr_repo": "tharpep/sazed", "pr_number": 12,
+        "session_id": None, "last_heard_at": None, "doing": None, "session_status": None,
     }  # fmt: skip
 
 

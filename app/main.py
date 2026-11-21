@@ -44,6 +44,7 @@ from app.routers import (
     learning,
     memory,
     procedures,
+    sessions,
     think,
     tools,
     voice,
@@ -192,6 +193,9 @@ app.include_router(
 )
 app.include_router(
     dispatch.router, prefix="/dispatch", tags=["dispatch"], dependencies=[Depends(verify_api_key)]
+)
+app.include_router(
+    sessions.router, prefix="/sessions", tags=["sessions"], dependencies=[Depends(verify_api_key)]
 )
 app.include_router(
     jobs.router, prefix="/jobs", tags=["jobs"], dependencies=[Depends(verify_api_key)]

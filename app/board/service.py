@@ -10,7 +10,10 @@ from typing import Any
 
 from app.backlog import store as backlog
 from app.board import actions, prs, stages, store
+from app.config import settings
 from app.jobs import store as jobs
+from app.sessions import service as sessions
+from app.sessions import store as sessions_store
 
 DONE_WINDOW = timedelta(days=14)
 
@@ -53,14 +56,31 @@ def _job_fields(chain: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _session_link(item: dict[str, Any]) -> dict[str, Any] | None:
-    if not (item["session_label"] or item["session_branch"] or item["pr_number"]):
+def _session_name(item: dict[str, Any], session: dict[str, Any] | None) -> str:
+    """Never null: the console's card schema requires a string (pinned by
+    test_session_link_always_names_its_session)."""
+    if item["session_label"]:
+        return item["session_label"]
+    if session:
+        return sessions.short_id(session["session_id"])
+    if item["session_branch"]:
+        return item["session_branch"]
+    if item["pr_number"]:
+        return f"{item['pr_repo'] or ''}#{item['pr_number']}"
+    return "terminal session"
+
+
+def _session_link(item: dict[str, Any], session: dict[str, Any] | None = None) -> dict | None:
+    """The link a session set by hand (migration 033), plus the reporting session linked to the
+    card, if any (migration 039)."""
+    if not (item["session_label"] or item["session_branch"] or item["pr_number"] or session):
         return None
     return {
-        "session": item["session_label"],
+        "session": _session_name(item, session),
         "branch": item["session_branch"],
         "pr_repo": item["pr_repo"],
         "pr_number": item["pr_number"],
+        **sessions.card_fields(session, datetime.now(UTC)),
     }
 
 
@@ -69,7 +89,10 @@ def _pr(ref: dict[str, Any] | None, snaps: dict[prs.Key, dict[str, Any]]) -> dic
 
 
 def _item_card(
-    item: dict[str, Any], chain: list[dict[str, Any]], snaps: dict[prs.Key, dict[str, Any]]
+    item: dict[str, Any],
+    chain: list[dict[str, Any]],
+    snaps: dict[prs.Key, dict[str, Any]],
+    session: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     live = chain if item["status"] == "approved" else []
     tail = live[-1] if live else None
@@ -100,7 +123,7 @@ def _item_card(
         "plan_id": str(item["plan_id"]) if item["plan_id"] else None,
         "plan_section": item["plan_section"],
         "plan_version": item["plan_version"],
-        "session_link": _session_link(item),
+        "session_link": _session_link(item, session),
         "actions": actions.describe(tail),
         **_job_fields(live),
         "pr": pr,
@@ -153,18 +176,31 @@ def _order(card: dict[str, Any]) -> tuple:
     )
 
 
-async def cards(*, all_done: bool = False) -> list[dict[str, Any]]:
+async def read(*, all_done: bool = False) -> sessions.BoardRead:
+    """The cards with their reporting sessions. Links are worked out against every item card's
+    stage, so the card side and the session side agree on which cards are open."""
     items = await store.items()
     chains = await store.chains()
     active = await store.active_jobs()
     snaps = await store.pr_snapshots()
+    reporting_sessions = await sessions_store.recent(settings.session_live_hours)
     linked = {job["id"] for chain in chains.values() for job in chain}
-    result = [_item_card(item, chains.get(item["id"], []), snaps) for item in items]
-    result += [_job_card(job, snaps) for job in active if _shows_alone(job, linked)]
+    item_cards = [_item_card(item, chains.get(item["id"], []), snaps) for item in items]
+    candidates = sessions.candidates_from_cards(item_cards)
+    links = {s["session_id"]: sessions.link(s, candidates) for s in reporting_sessions}
+    reporting = sessions.sessions_by_card(reporting_sessions, links)
+    for item, item_card in zip(items, item_cards, strict=True):
+        if session := reporting.get(item_card["id"]):
+            item_card["session_link"] = _session_link(item, session)
+    result = item_cards + [_job_card(job, snaps) for job in active if _shows_alone(job, linked)]
     if not all_done:
         cutoff = datetime.now(UTC) - DONE_WINDOW
         result = [c for c in result if c["stage"] != "done" or c["done_at"] >= cutoff]
-    return sorted(result, key=_order)
+    return sessions.BoardRead(sorted(result, key=_order), reporting_sessions, links)
+
+
+async def cards(*, all_done: bool = False) -> list[dict[str, Any]]:
+    return (await read(all_done=all_done)).cards
 
 
 async def card(card_id: str) -> dict[str, Any] | None:
