@@ -98,12 +98,16 @@ async def _summary_with(monkeypatch, rows, steps=(), beats=None):
 
     monkeypatch.setattr(dispatch, "rows_for", rows_for)
     monkeypatch.setattr(dispatch, "steps_since", steps_since)
-    monkeypatch.setattr(command.service, "cards", cards)
     monkeypatch.setattr(command.store, "working_jobs", working_jobs)
     monkeypatch.setattr(command.store, "finished_since", finished_since)
 
-    async def no_sessions(cards, now):
+    async def board():
+        return command.sessions.BoardRead(await cards(), [], {})
+
+    async def no_sessions(read, now):
         return {}
+
+    monkeypatch.setattr(command.service, "read", board)
 
     monkeypatch.setattr(command.sessions, "command_part", no_sessions)
     return await command.summary()

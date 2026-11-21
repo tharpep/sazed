@@ -16,11 +16,18 @@ _UPSERT = """
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
             $19, $20)
     ON CONFLICT (session_id) DO UPDATE SET
-        host = COALESCE(EXCLUDED.host, s.host),
-        cwd = COALESCE(EXCLUDED.cwd, s.cwd),
-        repo = COALESCE(EXCLUDED.repo, s.repo),
-        branch = COALESCE(EXCLUDED.branch, s.branch),
-        card_id = COALESCE(EXCLUDED.card_id, s.card_id),
+        host = CASE WHEN (EXCLUDED.state_ts, EXCLUDED.state_seq) >= (s.state_ts, s.state_seq)
+                    THEN COALESCE(EXCLUDED.host, s.host) ELSE COALESCE(s.host, EXCLUDED.host) END,
+        cwd = CASE WHEN (EXCLUDED.state_ts, EXCLUDED.state_seq) >= (s.state_ts, s.state_seq)
+                   THEN COALESCE(EXCLUDED.cwd, s.cwd) ELSE COALESCE(s.cwd, EXCLUDED.cwd) END,
+        repo = CASE WHEN (EXCLUDED.state_ts, EXCLUDED.state_seq) >= (s.state_ts, s.state_seq)
+                    THEN COALESCE(EXCLUDED.repo, s.repo) ELSE COALESCE(s.repo, EXCLUDED.repo) END,
+        branch = CASE WHEN (EXCLUDED.state_ts, EXCLUDED.state_seq) >= (s.state_ts, s.state_seq)
+                      THEN COALESCE(EXCLUDED.branch, s.branch)
+                      ELSE COALESCE(s.branch, EXCLUDED.branch) END,
+        card_id = CASE WHEN (EXCLUDED.state_ts, EXCLUDED.state_seq) >= (s.state_ts, s.state_seq)
+                       THEN COALESCE(EXCLUDED.card_id, s.card_id)
+                       ELSE COALESCE(s.card_id, EXCLUDED.card_id) END,
         started_at = LEAST(s.started_at, EXCLUDED.started_at),
         last_heard_at = NOW(),
         state = CASE WHEN (EXCLUDED.state_ts, EXCLUDED.state_seq) > (s.state_ts, s.state_seq)
@@ -87,7 +94,7 @@ _INSERT_EVENTS = """
         (session_id, agent_id, agent_type, ts, seq, kind, tool, target, text, error)
     SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::float8[], $5::int[],
                          $6::text[], $7::text[], $8::text[], $9::text[], $10::bool[])
-    ON CONFLICT (session_id, ts, seq) DO NOTHING
+    ON CONFLICT (session_id, agent_id, ts, seq) DO NOTHING
     RETURNING session_id, agent_id
 """
 

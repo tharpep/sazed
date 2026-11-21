@@ -52,8 +52,8 @@ def done_view(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 async def summary() -> dict[str, Any]:
-    all_cards = await service.cards()
-    needs = [c for c in all_cards if c["stage"] == "needs_me"]
+    board = await service.read()
+    needs = [c for c in board.cards if c["stage"] == "needs_me"]
     asking = [uuid.UUID(c["job_id"]) for c in needs if c["job_status"] == "needs_input"]
     asked = await store.questions(asking) if asking else {}
     for c in needs:
@@ -70,5 +70,5 @@ async def summary() -> dict[str, Any]:
         "needs": needs,
         "working": working,
         "done": done_view(await store.finished_since(DONE_WINDOW_HOURS)),
-        **await sessions.command_part(all_cards, now),
+        **await sessions.command_part(board, now),
     }

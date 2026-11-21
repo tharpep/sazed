@@ -53,18 +53,20 @@ class FakeDb:
                 self.prunes.append((sid, agent, keep))
                 mine = sorted(
                     (k for k, e in self.events.items() if (e["sid"], e["agent"]) == (sid, agent)),
-                    key=lambda k: (k[1], k[2]),
+                    key=lambda k: (self.events[k]["ts"], self.events[k]["seq"]),
                     reverse=True,
                 )
                 for key in mine[keep:]:
                     del self.events[key]
 
     async def fetch(self, sql, *columns):
-        assert "ON CONFLICT (session_id, ts, seq) DO NOTHING" in sql
+        with_agent = "ON CONFLICT (session_id, agent_id, ts, seq) DO NOTHING" in sql
+        assert with_agent or "ON CONFLICT (session_id, ts, seq) DO NOTHING" in sql
         new = []
         for sid, agent, _type, ts, seq, *_ in zip(*columns, strict=True):
-            if (sid, ts, seq) not in self.events:
-                self.events[(sid, ts, seq)] = {"sid": sid, "agent": agent}
+            key = (sid, agent, ts, seq) if with_agent else (sid, ts, seq)
+            if key not in self.events:
+                self.events[key] = {"sid": sid, "agent": agent, "ts": ts, "seq": seq}
                 new.append({"session_id": sid, "agent_id": agent})
         return new
 
@@ -153,6 +155,64 @@ def test_text_is_cut_to_three_hundred_characters_and_prompt_text_is_never_kept()
     assert prompt.text == ""
 
 
+def test_a_nul_byte_is_stripped_from_every_text_field():
+    nul = "a\x00b"
+    fields = {f: nul for f in ("agent_id", "agent_type", "target", "text", "host", "cwd", "repo")}
+    [event], rejected = sessions.parse_batch(
+        [_ev(0, session_id="s\x00id", tool="Ba\x00sh", branch=nul, **fields)]
+    )
+    assert not rejected
+    [session] = sessions.reduce([event])
+    stored = list(sessions.event_rows([event])[0].values()) + list(session.values())
+    assert not any("\x00" in v for v in stored if isinstance(v, str))
+    assert (event.session_id, event.tool, event.text) == ("sid", "Bash", "ab")
+
+
+async def test_a_millisecond_or_far_future_ts_is_rejected_alone(db):
+    batch = [_ev(0, ts=1_763_650_800_123), _ev(1, ts=253_402_300_800), _ev(2)]
+    result = await sessions.ingest(batch)
+    assert [r["index"] for r in result["rejected"]] == [0, 1]
+    assert result["stored"] == 1
+
+
+async def test_a_non_object_event_is_rejected_alone(db):
+    body = router.EventsIn(events=["tool", None, 7, _ev(0)])
+    result = await router.post_events(body)
+    assert [r["index"] for r in result["rejected"]] == [0, 1, 2]
+    assert result["stored"] == 1
+
+
+async def test_two_agents_may_share_a_ts_and_seq(db):
+    batch = [_ev(0, ts=1_763_650_800.0), _ev(0, ts=1_763_650_800.0, agent_id="a1")]
+    assert (await sessions.ingest(batch))["stored"] == 2
+    assert (await sessions.ingest(batch))["stored"] == 0
+
+
+def test_identity_columns_keep_the_newest_value_by_ts_and_seq():
+    """A late, older batch fills a missing value but never replaces a newer one."""
+    for column in ("host", "cwd", "repo", "branch", "card_id"):
+        newer = f"COALESCE(EXCLUDED.{column}, s.{column})"
+        older = f"COALESCE(s.{column}, EXCLUDED.{column})"
+        assert newer in store._UPSERT and older in store._UPSERT, column
+
+
+def test_a_body_over_the_cap_answers_413(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    async def no_store(sessions_, events):
+        return len(events)
+
+    monkeypatch.setattr(store, "ingest", no_store)
+    app = FastAPI()
+    app.include_router(router.router, prefix="/sessions")
+    client = TestClient(app)
+    big = {"events": [_ev(n, text="x" * 6000) for n in range(200)]}
+    assert client.post("/sessions/events", json=big).status_code == 413
+    small = client.post("/sessions/events", json={"events": [_ev(0)]})
+    assert (small.status_code, small.json()["stored"]) == (200, 1)
+
+
 # S7: at most 80 steps per agent
 
 
@@ -161,9 +221,9 @@ async def test_a_session_keeps_at_most_eighty_steps_per_agent(db):
     sub = [_ev(1000 + n, agent_id="a1", agent_type="Explore") for n in range(10)]
     for chunk in (main[:100], main[100:] + sub):
         await sessions.ingest(chunk)
-    main_rows = [k for k, e in db.events.items() if e["agent"] == ""]
+    main_rows = [e for e in db.events.values() if e["agent"] == ""]
     assert len(main_rows) == store.STEPS_PER_AGENT
-    assert min(seq for _, _, seq in main_rows) == 70
+    assert min(e["seq"] for e in main_rows) == 70
     assert sum(e["agent"] == "a1" for e in db.events.values()) == 10
     assert {(a, keep) for _, a, keep in db.prunes} == {("", 80), ("a1", 80)}
 
@@ -220,18 +280,40 @@ def test_tool_prompt_stop_and_end_clear_a_question_and_nothing_else_does():
     assert cleared == {"tool", "prompt", "stop", "end"}
 
 
+def test_a_subagent_event_does_not_clear_the_main_thread_question():
+    events, _ = sessions.parse_batch(
+        [
+            _ev(0, "question", text="Allow Bash?"),
+            _ev(1, agent_id="a1"),
+            _ev(2, "stop", agent_id="a1"),
+        ]
+    )
+    [row] = sessions.reduce(events)
+    assert row["cleared_ts"] is None
+    assert sessions.open_question(_session(**{k: row[k] for k in row if "question" in k}))
+
+
 # S5: not heard from
 
+NONE = {"status": "none", "card_id": None, "candidates": []}
 
-def test_a_silent_session_reads_not_heard_from_and_keeps_its_last_time():
+
+def test_a_silent_running_session_reads_not_heard_from_and_keeps_its_last_time():
     now = datetime.now(UTC)
     quiet = _session(last_heard_at=now - timedelta(seconds=901))
-    view = sessions.view(quiet, [], {}, {}, now)
+    view = sessions.view(quiet, NONE, {}, {}, now)
     assert view["status"] == "not_heard_from"
     assert view["state"] == "running"
     assert view["last_heard_at"] == quiet["last_heard_at"]
-    assert sessions.status(_session(state="idle"), now) == "idle"
     assert sessions.status(quiet | {"state": "ended"}, now) == "ended"
+
+
+def test_an_idle_session_stays_idle_until_a_day_of_silence():
+    now = datetime.now(UTC)
+    idle = _session(state="idle")
+    assert sessions.status(idle | {"last_heard_at": now - timedelta(hours=3)}, now) == "idle"
+    day = idle | {"last_heard_at": now - timedelta(hours=24, seconds=1)}
+    assert sessions.status(day, now) == "not_heard_from"
 
 
 # S3: card links
@@ -333,19 +415,18 @@ async def test_home_lists_live_sessions_with_card_project_doing_host_and_pr(monk
     ended = _session(session_id="gone", state="ended", ended_at=now)
     pr = {"repo": "tharpep/sazed", "number": 212, "state": "open"}
 
-    async def recent(hours):
-        return [live, ended]
-
     async def projects():
         return {"ws-1": {"slug": "board", "title": "The board"}}
 
     async def last_heard():
         return live["last_heard_at"]
 
-    monkeypatch.setattr(store, "recent", recent)
     monkeypatch.setattr(store, "projects_by_workstream", projects)
     monkeypatch.setattr(store, "last_heard_at", last_heard)
-    part = await sessions.command_part([_card(CARD, "feature/session-events", pr=pr)], now)
+    cards = [_card(CARD, "feature/session-events", pr=pr)]
+    candidates = sessions.candidates_from_cards(cards)
+    links = {s["session_id"]: sessions.link(s, candidates) for s in (live, ended)}
+    part = await sessions.command_part(sessions.BoardRead(cards, [live, ended], links), now)
     [row] = part["sessions"]
     assert row["card"]["id"] == f"item:{CARD}"
     assert row["project"] == {"slug": "board", "title": "The board"}
@@ -358,30 +439,29 @@ async def test_home_lists_live_sessions_with_card_project_doing_host_and_pr(monk
     assert row["last_heard_at"] == live["last_heard_at"]
     assert row["pr"] == pr
     assert part["session_health"]["silent_after_s"] == 900
+    assert part["session_health"]["idle_silent_after_s"] == 86_400
 
 
 async def test_the_stale_list_holds_building_cards_no_session_is_reporting_for(monkeypatch):
-    async def none(*args):
-        return []
-
     async def no_projects():
         return {}
 
     async def never():
         return None
 
-    monkeypatch.setattr(store, "recent", none)
     monkeypatch.setattr(store, "projects_by_workstream", no_projects)
     monkeypatch.setattr(store, "last_heard_at", never)
     reporting = _card(CARD, "feature/a")
     reporting["session_link"] |= {"session_status": "running"}
+    waiting = _card(uuid.uuid4(), "feature/w")
+    waiting["session_link"] |= {"session_status": "idle"}
     silent = _card(OTHER, "feature/b")
     silent["session_link"] |= {"session_status": "not_heard_from"}
     unlinked = _card(uuid.uuid4(), "feature/c")
     with_pr = _card(uuid.uuid4(), "feature/d")
     with_pr["session_link"] |= {"pr_number": 3}
-    cards = [reporting, silent, unlinked, with_pr]
-    part = await sessions.command_part(cards, datetime.now(UTC))
+    cards = [reporting, waiting, silent, unlinked, with_pr]
+    part = await sessions.command_part(sessions.BoardRead(cards, [], {}), datetime.now(UTC))
     assert part["session_health"]["stale_card_ids"] == [silent["id"], unlinked["id"]]
     assert part["session_health"]["last_heard_at"] is None
 
@@ -390,10 +470,13 @@ async def test_command_keeps_every_old_key_and_adds_the_session_ones(monkeypatch
     async def nothing(*args):
         return []
 
-    async def part(cards, now):
+    async def board():
+        return sessions.BoardRead([], [], {})
+
+    async def part(read, now):
         return {"sessions": [], "session_health": {"silent_after_s": 900}}
 
-    monkeypatch.setattr(command.service, "cards", nothing)
+    monkeypatch.setattr(command.service, "read", board)
     monkeypatch.setattr(command.store, "working_jobs", nothing)
     monkeypatch.setattr(command.store, "finished_since", nothing)
     monkeypatch.setattr(command.dispatch, "command_parts", _no_dispatch)
@@ -447,20 +530,32 @@ def test_a_card_session_link_gains_the_session_fields_and_keeps_its_old_ones():
     }
     assert service._item_card(_item(), [], {})["session_link"] is None
     by_id = service._item_card(_item(), [], {}, _session(card_id=CARD))
+    assert by_id["session_link"]["session"] == SID[:8]
     assert by_id["session_link"]["session_id"] == SID
     assert by_id["session_link"]["doing"] == "Write the contract"
     assert by_id["session_link"]["session_status"] == "running"
     assert by_id["stage"] == "next"
 
 
-async def test_board_cards_pick_the_open_session_over_an_ended_one(monkeypatch):
-    now = datetime.now(UTC)
-    item = _item(session_label="builder", session_branch="feature/x")
-    newer_but_ended = _session(session_id="ended", branch="feature/x", state="ended")
-    older_open = _session(branch="feature/x", last_heard_at=now - timedelta(minutes=5))
+def test_session_link_always_names_its_session():
+    """The console's card schema (sazed-frontend src/widgets/catalog.ts) requires session to be
+    a string, branch, pr_repo and pr_number nullable; a null session drops the whole widget."""
+    cases = [
+        (_item(session_branch="feature/x"), None, "feature/x"),
+        (_item(pr_repo="tharpep/sazed", pr_number=12), None, "tharpep/sazed#12"),
+        (_item(session_branch="feature/x"), _session(card_id=CARD), SID[:8]),
+        (_item(session_label="cc-7", session_branch="feature/x"), _session(), "cc-7"),
+    ]
+    for item, session, name in cases:
+        link = service._item_card(item, [], {}, session)["session_link"]
+        assert link["session"] == name
+        assert all(link[k] is None or isinstance(link[k], str) for k in ("branch", "pr_repo"))
+        assert link["pr_number"] is None or isinstance(link["pr_number"], int)
 
-    async def items():
-        return [item]
+
+def _stub_board(monkeypatch, items, recent_sessions, calls=None):
+    async def all_items():
+        return items
 
     async def empty():
         return {}
@@ -469,12 +564,61 @@ async def test_board_cards_pick_the_open_session_over_an_ended_one(monkeypatch):
         return []
 
     async def recent(hours):
-        return [newer_but_ended, older_open]
+        if calls is not None:
+            calls.append(hours)
+        return recent_sessions
 
-    monkeypatch.setattr(service.store, "items", items)
+    monkeypatch.setattr(service.store, "items", all_items)
     monkeypatch.setattr(service.store, "chains", empty)
     monkeypatch.setattr(service.store, "pr_snapshots", empty)
     monkeypatch.setattr(service.store, "active_jobs", no_jobs)
     monkeypatch.setattr(service.sessions_store, "recent", recent)
+
+
+async def test_board_cards_pick_the_open_session_over_an_ended_one(monkeypatch):
+    now = datetime.now(UTC)
+    item = _item(session_label="builder", session_branch="feature/x")
+    newer_but_ended = _session(session_id="ended", branch="feature/x", state="ended")
+    older_open = _session(branch="feature/x", last_heard_at=now - timedelta(minutes=5))
+    _stub_board(monkeypatch, [item], [newer_but_ended, older_open])
     [card] = await service.cards()
     assert card["session_link"]["session_id"] == SID
+
+
+async def test_a_card_whose_stage_is_done_is_not_open_on_either_side(monkeypatch):
+    done_by_stage = _item(id=OTHER, status="approved", session_branch="feature/x")
+    open_card = _item(session_label="builder", session_branch="feature/x")
+    original = service.stages.item_stage
+
+    def stage(item, job, now=None, pr=None):
+        return ("done", "Done") if item["id"] == OTHER else original(item, job, now, pr)
+
+    monkeypatch.setattr(service.stages, "item_stage", stage)
+    _stub_board(monkeypatch, [done_by_stage, open_card], [_session(branch="feature/x")])
+    read = await service.read(all_done=True)
+    assert read.links[SID] == {"status": "branch", "card_id": f"item:{CARD}", "candidates": []}
+    by_id = {c["id"]: c for c in read.cards}
+    assert by_id[f"item:{CARD}"]["session_link"]["session_id"] == SID
+
+
+async def test_home_reads_the_sessions_once_per_poll(monkeypatch):
+    calls: list = []
+    _stub_board(monkeypatch, [_item(session_branch="feature/x")], [_session()], calls)
+
+    async def nothing(*args):
+        return []
+
+    async def no_projects():
+        return {}
+
+    async def never():
+        return None
+
+    monkeypatch.setattr(command.store, "working_jobs", nothing)
+    monkeypatch.setattr(command.store, "finished_since", nothing)
+    monkeypatch.setattr(command.dispatch, "command_parts", _no_dispatch)
+    monkeypatch.setattr(store, "projects_by_workstream", no_projects)
+    monkeypatch.setattr(store, "last_heard_at", never)
+    summary = await command.summary()
+    assert len(calls) == 1
+    assert [s["session_id"] for s in summary["sessions"]] == [SID]

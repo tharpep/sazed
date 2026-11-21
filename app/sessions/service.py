@@ -7,6 +7,7 @@ card renamed or a branch relinked never leaves a stale link behind.
 
 import math
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
@@ -40,9 +41,14 @@ _CLEARS_QUESTION = {"prompt", "tool", "stop", "end"}
 _UNMATCHED_BRANCHES = {"main", "master"}
 
 
-def _cut(limit: int):
+# 2100-01-01. Bounds ts so a millisecond value is rejected alone instead of overflowing datetime.
+TS_MAX = 4_102_444_800
+
+
+def _cut(limit: int | None):
     def cut(value: Any) -> Any:
-        return value[:limit] if isinstance(value, str) else value
+        # Postgres text cannot hold NUL; one in a result line would fail the whole batch.
+        return value.replace("\x00", "")[:limit] if isinstance(value, str) else value
 
     return BeforeValidator(cut)
 
@@ -52,8 +58,8 @@ Line = Annotated[str | None, _cut(TEXT_MAX)]
 
 
 class EventIn(BaseModel):
-    session_id: str = Field(..., min_length=1, max_length=200)
-    ts: float = Field(..., gt=0)
+    session_id: Annotated[str, _cut(None)] = Field(..., min_length=1, max_length=200)
+    ts: float = Field(..., gt=0, lt=TS_MAX)
     seq: int = Field(..., ge=0, le=2_000_000_000)
     kind: Kind
     agent_id: Short = None
@@ -129,7 +135,8 @@ def reduce(events: list[EventIn]) -> list[dict[str, Any]]:
         last = _latest(batch)
         doing = _latest([e for e in batch if e.kind == "doing"])
         question = _latest([e for e in batch if e.kind == "question"])
-        cleared = _latest([e for e in batch if e.kind in _CLEARS_QUESTION])
+        # A subagent working on while the main thread waits on a prompt has not answered it.
+        cleared = _latest([e for e in batch if e.kind in _CLEARS_QUESTION and not e.agent_id])
         state = _STATE[last.kind]
         rows.append(
             {
@@ -186,17 +193,22 @@ async def ingest(raw: list[Any]) -> dict[str, Any]:
 
 
 def status(session: dict[str, Any], now: datetime) -> str:
-    """The reported state, or "not_heard_from" once a session that has not ended is silent past
-    SESSION_SILENT_S. Nothing is reaped or invented: the last time stays as it was."""
+    """The reported state, or "not_heard_from" once it has been silent too long: a running session
+    past SESSION_RUNNING_SILENT_S, an idle one (waiting on Pryce, so quiet by design) past
+    SESSION_IDLE_SILENT_S. Nothing is reaped or invented: the last time stays as it was."""
     if session["state"] == "ended":
         return "ended"
-    if (now - session["last_heard_at"]).total_seconds() > settings.session_silent_s:
-        return "not_heard_from"
-    return session["state"]
+    silent = (now - session["last_heard_at"]).total_seconds()
+    limit = (
+        settings.session_running_silent_s
+        if session["state"] == "running"
+        else settings.session_idle_silent_s
+    )
+    return "not_heard_from" if silent > limit else session["state"]
 
 
 def open_question(session: dict[str, Any]) -> dict[str, Any] | None:
-    """A question stays open until a later prompt, tool, stop or end event."""
+    """A question stays open until a later main-thread prompt, tool, stop or end event."""
     if session["question_ts"] is None or session["state"] == "ended":
         return None
     asked = (session["question_ts"], session["question_seq"])
@@ -209,14 +221,8 @@ def open_question(session: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def candidates_from_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {"id": f"item:{i['id']}", "branch": i["session_branch"], "done": i["status"] == "done"}
-        for i in items
-    ]
-
-
 def candidates_from_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The cards a session can link to. A card is open while its stage is not done."""
     return [
         {
             "id": c["id"],
@@ -252,15 +258,19 @@ def _rank(session: dict[str, Any]) -> tuple:
 
 
 def sessions_by_card(
-    sessions: list[dict[str, Any]], candidates: list[dict[str, Any]]
+    sessions: list[dict[str, Any]], links: dict[str, dict[str, Any]]
 ) -> dict[str, dict[str, Any]]:
     """Each linked card's session: one still open before an ended one, then the latest heard."""
     best: dict[str, dict[str, Any]] = {}
     for s in sessions:
-        card_id = link(s, candidates)["card_id"]
+        card_id = links[s["session_id"]]["card_id"]
         if card_id and (card_id not in best or _rank(s) > _rank(best[card_id])):
             best[card_id] = s
     return best
+
+
+def short_id(session_id: str) -> str:
+    return session_id[:8]
 
 
 def card_fields(session: dict[str, Any] | None, now: datetime) -> dict[str, Any]:
@@ -277,12 +287,11 @@ def card_fields(session: dict[str, Any] | None, now: datetime) -> dict[str, Any]
 
 def view(
     session: dict[str, Any],
-    candidates: list[dict[str, Any]],
+    linked: dict[str, Any],
     cards: dict[str, dict[str, Any]],
     projects: dict[str, dict[str, str]],
     now: datetime,
 ) -> dict[str, Any]:
-    linked = link(session, candidates)
     card = cards.get(linked["card_id"]) if linked["card_id"] else None
     project = projects.get(card["workstream_id"]) if card and card["workstream_id"] else None
     return {
@@ -354,17 +363,32 @@ def agents(events: list[dict[str, Any]], session_state: str) -> list[dict[str, A
     return result
 
 
-async def list_sessions(cards: list[dict[str, Any]]) -> dict[str, Any]:
+@dataclass
+class BoardRead:
+    """One board read: the cards, the sessions heard in the live window, and each session's link,
+    worked out once against every item card before the done window trims the list."""
+
+    cards: list[dict[str, Any]]
+    sessions: list[dict[str, Any]]
+    links: dict[str, dict[str, Any]]
+
+
+def _thresholds() -> dict[str, int]:
+    return {
+        "silent_after_s": settings.session_running_silent_s,
+        "idle_silent_after_s": settings.session_idle_silent_s,
+    }
+
+
+async def list_sessions(read: BoardRead) -> dict[str, Any]:
     now = datetime.now(UTC)
-    sessions = await store.recent(settings.session_live_hours)
-    candidates = candidates_from_cards(cards)
-    by_id = {c["id"]: c for c in cards}
+    by_id = {c["id"]: c for c in read.cards}
     projects = await store.projects_by_workstream()
-    views = [view(s, candidates, by_id, projects, now) for s in sessions]
+    views = [view(s, read.links[s["session_id"]], by_id, projects, now) for s in read.sessions]
     return {
         "live": [v for v in views if v["state"] != "ended"],
         "recent": [v for v in views if v["state"] == "ended"],
-        "silent_after_s": settings.session_silent_s,
+        **_thresholds(),
         "window_hours": settings.session_live_hours,
         "now": now,
     }
@@ -376,43 +400,45 @@ async def detail(session_id: str, cards: list[dict[str, Any]]) -> dict[str, Any]
         return None
     now = datetime.now(UTC)
     projects = await store.projects_by_workstream()
-    found = view(session, candidates_from_cards(cards), {c["id"]: c for c in cards}, projects, now)
+    linked = link(session, candidates_from_cards(cards))
+    found = view(session, linked, {c["id"]: c for c in cards}, projects, now)
     return {
         **found,
         "agents": agents(await store.events(session_id), session["state"]),
         "steps_per_agent": store.STEPS_PER_AGENT,
-        "silent_after_s": settings.session_silent_s,
+        **_thresholds(),
         "now": now,
     }
 
 
 def _building_without_a_session(card: dict[str, Any]) -> bool:
-    """A card that says "Being built in a terminal session" (a session link with no job and no
-    PR) and whose linked session is not reporting."""
+    """A card that says "Being built in a terminal session" (a hand-set link with no job and no
+    PR; a session's card_id alone never makes a card doing) whose linked session is neither
+    running nor idle."""
     link_ = card.get("session_link") or {}
     return (
         card["kind"] == "item"
         and card["stage"] == "doing"
         and card["job_id"] is None
+        and bool(link_)
         and link_.get("pr_number") is None
-        and bool(link_.get("session") or link_.get("branch"))
         and link_.get("session_status") not in ("running", "idle")
     )
 
 
-async def command_part(cards: list[dict[str, Any]], now: datetime) -> dict[str, Any]:
+async def command_part(read: BoardRead, now: datetime) -> dict[str, Any]:
     """Home's live sessions and the counts behind its quiet line and stale banner."""
-    sessions = await store.recent(settings.session_live_hours)
-    candidates = candidates_from_cards(cards)
-    by_id = {c["id"]: c for c in cards}
+    by_id = {c["id"]: c for c in read.cards}
     projects = await store.projects_by_workstream()
     return {
         "sessions": [
-            view(s, candidates, by_id, projects, now) for s in sessions if s["state"] != "ended"
+            view(s, read.links[s["session_id"]], by_id, projects, now)
+            for s in read.sessions
+            if s["state"] != "ended"
         ],
         "session_health": {
-            "silent_after_s": settings.session_silent_s,
+            **_thresholds(),
             "last_heard_at": await store.last_heard_at(),
-            "stale_card_ids": [c["id"] for c in cards if _building_without_a_session(c)],
+            "stale_card_ids": [c["id"] for c in read.cards if _building_without_a_session(c)],
         },
     }

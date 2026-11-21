@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS agent_session_events (
     text         TEXT NOT NULL DEFAULT '',
     error        BOOLEAN NOT NULL DEFAULT false,
     received_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (session_id, ts, seq)
+    UNIQUE (session_id, agent_id, ts, seq)
 );
 
 CREATE INDEX IF NOT EXISTS agent_session_events_agent
