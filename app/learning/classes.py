@@ -1,4 +1,5 @@
-"""The closed failure vocabulary, and the code rules that put a finished job into one class."""
+"""The closed failure vocabulary, and the code rules that put a finished job into one class.
+A dispatch row's class comes from the SQL function dispatch_failure_class (migration 038)."""
 
 import re
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ CLASSES: dict[str, FailureClass] = {
     # The reaper's verdict on a run whose worker went silent: an operational stop (seam 4, S4-5),
     # since a dead process teaches no rule the agent could follow.
     "worker_lost": FailureClass("stop", "Worker stopped reporting"),
+    "budget": FailureClass("stop", "Hit the task budget"),
     "worker_error": FailureClass(
         "lesson",
         "Worker error",
@@ -67,6 +69,26 @@ CLASSES: dict[str, FailureClass] = {
         "lesson",
         "Reply did not fit the result format",
         "a schema check on the final reply that triggers the repair round",
+    ),
+    "left_owns": FailureClass(
+        "lesson",
+        "Task changed files outside what it owns",
+        "a plan check that the task's owns list covers every file its goal needs to touch",
+    ),
+    "land_conflict": FailureClass(
+        "lesson",
+        "Task conflicted when landing",
+        "a plan check that splits tasks whose owns overlap or orders them with depends_on",
+    ),
+    "no_evidence": FailureClass(
+        "lesson",
+        "Task gave no evidence for its result",
+        "a task prompt rule or harness check that requires the evidence before the task is done",
+    ),
+    "refused": FailureClass(
+        "lesson",
+        "Agent refused the task",
+        "a plan check that rewrites a goal the agent refuses before the task starts",
     ),
     "unclassified": FailureClass("lesson", "Unclassified failure"),
 }

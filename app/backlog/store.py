@@ -6,6 +6,8 @@ import uuid
 from difflib import SequenceMatcher
 from typing import Any
 
+import asyncpg
+
 from app.db import get_pool
 
 TYPES = ("idea", "bug", "gap", "optimization", "planned", "known_issue", "guard")
@@ -118,8 +120,9 @@ async def create_item(
     plan_section: str | None = None,
     plan_version: int | None = None,
     note: str | None = None,
+    db: asyncpg.Connection | asyncpg.Pool | None = None,
 ) -> dict[str, Any]:
-    rec = await get_pool().fetchrow(
+    rec = await (db or get_pool()).fetchrow(
         """
         INSERT INTO backlog_items
             (type, title, summary, why, repos, effort, impact, sources, fingerprint, source,
