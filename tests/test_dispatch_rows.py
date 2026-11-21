@@ -101,6 +101,11 @@ async def _summary_with(monkeypatch, rows, steps=(), beats=None):
     monkeypatch.setattr(command.service, "cards", cards)
     monkeypatch.setattr(command.store, "working_jobs", working_jobs)
     monkeypatch.setattr(command.store, "finished_since", finished_since)
+
+    async def no_sessions(cards, now):
+        return {}
+
+    monkeypatch.setattr(command.sessions, "command_part", no_sessions)
     return await command.summary()
 
 

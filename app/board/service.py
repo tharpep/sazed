@@ -10,7 +10,10 @@ from typing import Any
 
 from app.backlog import store as backlog
 from app.board import actions, prs, stages, store
+from app.config import settings
 from app.jobs import store as jobs
+from app.sessions import service as sessions
+from app.sessions import store as sessions_store
 
 DONE_WINDOW = timedelta(days=14)
 
@@ -53,14 +56,17 @@ def _job_fields(chain: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _session_link(item: dict[str, Any]) -> dict[str, Any] | None:
-    if not (item["session_label"] or item["session_branch"] or item["pr_number"]):
+def _session_link(item: dict[str, Any], session: dict[str, Any] | None = None) -> dict | None:
+    """The link a session set by hand (migration 033), plus the reporting session linked to the
+    card, if any (migration 039)."""
+    if not (item["session_label"] or item["session_branch"] or item["pr_number"] or session):
         return None
     return {
         "session": item["session_label"],
         "branch": item["session_branch"],
         "pr_repo": item["pr_repo"],
         "pr_number": item["pr_number"],
+        **sessions.card_fields(session, datetime.now(UTC)),
     }
 
 
@@ -69,7 +75,10 @@ def _pr(ref: dict[str, Any] | None, snaps: dict[prs.Key, dict[str, Any]]) -> dic
 
 
 def _item_card(
-    item: dict[str, Any], chain: list[dict[str, Any]], snaps: dict[prs.Key, dict[str, Any]]
+    item: dict[str, Any],
+    chain: list[dict[str, Any]],
+    snaps: dict[prs.Key, dict[str, Any]],
+    session: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     live = chain if item["status"] == "approved" else []
     tail = live[-1] if live else None
@@ -100,7 +109,7 @@ def _item_card(
         "plan_id": str(item["plan_id"]) if item["plan_id"] else None,
         "plan_section": item["plan_section"],
         "plan_version": item["plan_version"],
-        "session_link": _session_link(item),
+        "session_link": _session_link(item, session),
         "actions": actions.describe(tail),
         **_job_fields(live),
         "pr": pr,
@@ -158,8 +167,15 @@ async def cards(*, all_done: bool = False) -> list[dict[str, Any]]:
     chains = await store.chains()
     active = await store.active_jobs()
     snaps = await store.pr_snapshots()
+    reporting = sessions.sessions_by_card(
+        await sessions_store.recent(settings.session_live_hours),
+        sessions.candidates_from_items(items),
+    )
     linked = {job["id"] for chain in chains.values() for job in chain}
-    result = [_item_card(item, chains.get(item["id"], []), snaps) for item in items]
+    result = [
+        _item_card(item, chains.get(item["id"], []), snaps, reporting.get(f"item:{item['id']}"))
+        for item in items
+    ]
     result += [_job_card(job, snaps) for job in active if _shows_alone(job, linked)]
     if not all_done:
         cutoff = datetime.now(UTC) - DONE_WINDOW

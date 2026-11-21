@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     job_heartbeat_grace_s: int = 120
     dispatch_heartbeat_grace_s: int = 150
     reaper_interval_s: int = 60
+    # Claude Code sessions (app/sessions/). Hooks report only on activity, so a session waiting
+    # on Pryce is quiet too: past this it reads "not heard from", computed on read, never reaped.
+    session_silent_s: int = 900
+    # How far back GET /sessions, /board/command and the cards' session links look.
+    session_live_hours: int = 24
     # Which agent runs a review task, by who asked (ai-context research/agent-stack.md, D1):
     # automatic PR reviews from the GitHub webhook go to agy; any source not listed runs Claude.
     review_agent_by_source: dict[str, str] = {"webhook": "agy"}

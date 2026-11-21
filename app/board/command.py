@@ -7,6 +7,7 @@ from typing import Any
 from app.board import actions, dispatch, service, store
 from app.jobs import service as jobs_service
 from app.jobs import store as jobs
+from app.sessions import service as sessions
 
 DONE_WINDOW_HOURS = 24
 DONE_SHOWN = 5
@@ -51,7 +52,8 @@ def done_view(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 async def summary() -> dict[str, Any]:
-    needs = [c for c in await service.cards() if c["stage"] == "needs_me"]
+    all_cards = await service.cards()
+    needs = [c for c in all_cards if c["stage"] == "needs_me"]
     asking = [uuid.UUID(c["job_id"]) for c in needs if c["job_status"] == "needs_input"]
     asked = await store.questions(asking) if asking else {}
     for c in needs:
@@ -68,4 +70,5 @@ async def summary() -> dict[str, Any]:
         "needs": needs,
         "working": working,
         "done": done_view(await store.finished_since(DONE_WINDOW_HOURS)),
+        **await sessions.command_part(all_cards, now),
     }

@@ -147,6 +147,11 @@ def _board(monkeypatch, items, jobs=()):
     monkeypatch.setattr(service.store, "pr_snapshots", no_snapshots)
     monkeypatch.setattr(service.store, "active_jobs", active)
 
+    async def no_sessions(hours):
+        return []
+
+    monkeypatch.setattr(service.sessions_store, "recent", no_sessions)
+
 
 async def test_done_counts_its_window_from_the_finish_not_the_last_edit(monkeypatch):
     now = datetime.now(UTC)
