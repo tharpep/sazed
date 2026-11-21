@@ -1,70 +1,12 @@
 """SQL for Claude Code sessions and their steps (migration 039)."""
 
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
 from app.db import get_pool
 
 STEPS_PER_AGENT = 80
-
-_UPSERT = """
-    INSERT INTO agent_sessions AS s (
-        session_id, host, cwd, repo, branch, card_id, started_at,
-        state, state_ts, state_seq, ended_at,
-        doing, doing_source, doing_ts, doing_seq,
-        question, question_ts, question_seq, cleared_ts, cleared_seq)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-            $19, $20)
-    ON CONFLICT (session_id) DO UPDATE SET
-        host = CASE WHEN (EXCLUDED.state_ts, EXCLUDED.state_seq) >= (s.state_ts, s.state_seq)
-                    THEN COALESCE(EXCLUDED.host, s.host) ELSE COALESCE(s.host, EXCLUDED.host) END,
-        cwd = CASE WHEN (EXCLUDED.state_ts, EXCLUDED.state_seq) >= (s.state_ts, s.state_seq)
-                   THEN COALESCE(EXCLUDED.cwd, s.cwd) ELSE COALESCE(s.cwd, EXCLUDED.cwd) END,
-        repo = CASE WHEN (EXCLUDED.state_ts, EXCLUDED.state_seq) >= (s.state_ts, s.state_seq)
-                    THEN COALESCE(EXCLUDED.repo, s.repo) ELSE COALESCE(s.repo, EXCLUDED.repo) END,
-        branch = CASE WHEN (EXCLUDED.state_ts, EXCLUDED.state_seq) >= (s.state_ts, s.state_seq)
-                      THEN COALESCE(EXCLUDED.branch, s.branch)
-                      ELSE COALESCE(s.branch, EXCLUDED.branch) END,
-        card_id = CASE WHEN (EXCLUDED.state_ts, EXCLUDED.state_seq) >= (s.state_ts, s.state_seq)
-                       THEN COALESCE(EXCLUDED.card_id, s.card_id)
-                       ELSE COALESCE(s.card_id, EXCLUDED.card_id) END,
-        started_at = LEAST(s.started_at, EXCLUDED.started_at),
-        last_heard_at = NOW(),
-        state = CASE WHEN (EXCLUDED.state_ts, EXCLUDED.state_seq) > (s.state_ts, s.state_seq)
-                     THEN EXCLUDED.state ELSE s.state END,
-        ended_at = CASE WHEN (EXCLUDED.state_ts, EXCLUDED.state_seq) > (s.state_ts, s.state_seq)
-                        THEN EXCLUDED.ended_at ELSE s.ended_at END,
-        state_seq = CASE WHEN (EXCLUDED.state_ts, EXCLUDED.state_seq) > (s.state_ts, s.state_seq)
-                         THEN EXCLUDED.state_seq ELSE s.state_seq END,
-        state_ts = GREATEST(EXCLUDED.state_ts, s.state_ts),
-        doing = CASE WHEN (EXCLUDED.doing_ts, EXCLUDED.doing_seq)
-                          > (COALESCE(s.doing_ts, -1), COALESCE(s.doing_seq, -1))
-                     THEN EXCLUDED.doing ELSE s.doing END,
-        doing_source = CASE WHEN (EXCLUDED.doing_ts, EXCLUDED.doing_seq)
-                                 > (COALESCE(s.doing_ts, -1), COALESCE(s.doing_seq, -1))
-                            THEN EXCLUDED.doing_source ELSE s.doing_source END,
-        doing_seq = CASE WHEN (EXCLUDED.doing_ts, EXCLUDED.doing_seq)
-                              > (COALESCE(s.doing_ts, -1), COALESCE(s.doing_seq, -1))
-                         THEN EXCLUDED.doing_seq ELSE s.doing_seq END,
-        doing_ts = CASE WHEN (EXCLUDED.doing_ts, EXCLUDED.doing_seq)
-                             > (COALESCE(s.doing_ts, -1), COALESCE(s.doing_seq, -1))
-                        THEN EXCLUDED.doing_ts ELSE s.doing_ts END,
-        question = CASE WHEN (EXCLUDED.question_ts, EXCLUDED.question_seq)
-                             > (COALESCE(s.question_ts, -1), COALESCE(s.question_seq, -1))
-                        THEN EXCLUDED.question ELSE s.question END,
-        question_seq = CASE WHEN (EXCLUDED.question_ts, EXCLUDED.question_seq)
-                                 > (COALESCE(s.question_ts, -1), COALESCE(s.question_seq, -1))
-                            THEN EXCLUDED.question_seq ELSE s.question_seq END,
-        question_ts = CASE WHEN (EXCLUDED.question_ts, EXCLUDED.question_seq)
-                                > (COALESCE(s.question_ts, -1), COALESCE(s.question_seq, -1))
-                           THEN EXCLUDED.question_ts ELSE s.question_ts END,
-        cleared_seq = CASE WHEN (EXCLUDED.cleared_ts, EXCLUDED.cleared_seq)
-                                > (COALESCE(s.cleared_ts, -1), COALESCE(s.cleared_seq, -1))
-                           THEN EXCLUDED.cleared_seq ELSE s.cleared_seq END,
-        cleared_ts = CASE WHEN (EXCLUDED.cleared_ts, EXCLUDED.cleared_seq)
-                               > (COALESCE(s.cleared_ts, -1), COALESCE(s.cleared_seq, -1))
-                          THEN EXCLUDED.cleared_ts ELSE s.cleared_ts END
-"""
 
 _SESSION_COLUMNS = (
     "session_id",
@@ -74,6 +16,8 @@ _SESSION_COLUMNS = (
     "branch",
     "card_id",
     "started_at",
+    "meta_ts",
+    "meta_seq",
     "state",
     "state_ts",
     "state_seq",
@@ -83,11 +27,56 @@ _SESSION_COLUMNS = (
     "doing_ts",
     "doing_seq",
     "question",
+    "question_agent",
     "question_ts",
     "question_seq",
     "cleared_ts",
     "cleared_seq",
 )
+
+_META = ("host", "cwd", "repo", "branch", "card_id")
+_QUESTION_COLUMNS = ("question", "question_agent", "question_ts", "question_seq")
+
+
+def _newer(pair: str) -> str:
+    """The batch's (ts, seq) for `pair` is newer than the stored one; a NULL stored pair loses."""
+    return (
+        f"(EXCLUDED.{pair}_ts, EXCLUDED.{pair}_seq)"
+        f" > (COALESCE(s.{pair}_ts, -1), COALESCE(s.{pair}_seq, -1))"
+    )
+
+
+def _take(columns: tuple[str, ...], pair: str) -> list[str]:
+    return [f"{c} = CASE WHEN {_newer(pair)} THEN EXCLUDED.{c} ELSE s.{c} END" for c in columns]
+
+
+# Identity columns: a newer batch replaces them, an older one only fills what is still missing.
+_META_SET = [
+    f"{c} = CASE WHEN (EXCLUDED.meta_ts, EXCLUDED.meta_seq) >= (s.meta_ts, s.meta_seq)"
+    f" THEN COALESCE(EXCLUDED.{c}, s.{c}) ELSE COALESCE(s.{c}, EXCLUDED.{c}) END"
+    for c in _META
+]
+
+# Every SET expression reads the old row, so the pair columns can be assigned in any order.
+_UPSERT = f"""
+    INSERT INTO agent_sessions AS s ({", ".join(_SESSION_COLUMNS)})
+    VALUES ({", ".join(f"${n}" for n in range(1, len(_SESSION_COLUMNS) + 1))})
+    ON CONFLICT (session_id) DO UPDATE SET
+        {", ".join(_META_SET)},
+        {", ".join(_take(("meta_ts", "meta_seq"), "meta"))},
+        started_at = LEAST(s.started_at, EXCLUDED.started_at),
+        last_heard_at = NOW(),
+        {", ".join(_take(("state", "ended_at", "state_ts", "state_seq"), "state"))},
+        {", ".join(_take(("doing", "doing_source", "doing_ts", "doing_seq"), "doing"))},
+        {", ".join(_take(_QUESTION_COLUMNS, "question"))},
+        {", ".join(_take(("cleared_ts", "cleared_seq"), "cleared"))}
+"""
+
+_OPEN_QUESTIONS = """
+    SELECT session_id, question_agent, question_ts, question_seq FROM agent_sessions
+    WHERE session_id = ANY($1::text[])
+    FOR UPDATE
+"""
 
 _INSERT_EVENTS = """
     INSERT INTO agent_session_events
@@ -120,10 +109,17 @@ _PRUNE = """
 """
 
 
-async def ingest(sessions: list[dict[str, Any]], events: list[dict[str, Any]]) -> int:
-    """Upsert each session, insert its new events and prune every agent they touched. Returns
-    how many events were new."""
+async def ingest(
+    build: Callable[[dict[str, dict[str, Any]]], list[dict[str, Any]]],
+    events: list[dict[str, Any]],
+) -> int:
+    """Lock each session's row, build its upsert from the stored open question (which agent may
+    clear it), insert the new events and prune every agent they touched. Returns how many events
+    were new."""
     async with get_pool().acquire() as conn, conn.transaction():
+        ids = sorted({e["session_id"] for e in events})
+        stored = {r["session_id"]: dict(r) for r in await conn.fetch(_OPEN_QUESTIONS, ids)}
+        sessions = build(stored)
         await conn.executemany(_UPSERT, [tuple(s[c] for c in _SESSION_COLUMNS) for s in sessions])
         columns = [[e[c] for e in events] for c in _EVENT_COLUMNS]
         inserted = await conn.fetch(_INSERT_EVENTS, *columns)

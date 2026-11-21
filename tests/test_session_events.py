@@ -60,6 +60,11 @@ class FakeDb:
                     del self.events[key]
 
     async def fetch(self, sql, *columns):
+        if "FOR UPDATE" in sql:
+            rows = [
+                dict(zip(store._SESSION_COLUMNS, r, strict=True)) for r in self.sessions.values()
+            ]
+            return [r for r in rows if r["session_id"] in columns[0]]
         with_agent = "ON CONFLICT (session_id, agent_id, ts, seq) DO NOTHING" in sql
         assert with_agent or "ON CONFLICT (session_id, ts, seq) DO NOTHING" in sql
         new = []
@@ -166,6 +171,17 @@ def test_a_nul_byte_is_stripped_from_every_text_field():
     stored = list(sessions.event_rows([event])[0].values()) + list(session.values())
     assert not any("\x00" in v for v in stored if isinstance(v, str))
     assert (event.session_id, event.tool, event.text) == ("sid", "Bash", "ab")
+
+
+def test_a_lone_surrogate_is_replaced_so_the_event_stores():
+    [event], rejected = sessions.parse_batch(
+        [_ev(0, text="cut \ud83d", target="\udc00x", host="lap\ud83dtop")]
+    )
+    assert not rejected
+    assert (event.text, event.target, event.host) == ("cut ?", "?x", "lap?top")
+    for value in sessions.event_rows([event])[0].values():
+        if isinstance(value, str):
+            value.encode("utf-8")
 
 
 async def test_a_millisecond_or_far_future_ts_is_rejected_alone(db):
@@ -293,6 +309,49 @@ def test_a_subagent_event_does_not_clear_the_main_thread_question():
     assert sessions.open_question(_session(**{k: row[k] for k in row if "question" in k}))
 
 
+def test_a_subagent_question_clears_on_that_subagent_next_event():
+    asked_in_batch, _ = sessions.parse_batch(
+        [_ev(0, "question", text="Allow Edit?", agent_id="a1"), _ev(1, agent_id="a1")]
+    )
+    assert sessions.reduce(asked_in_batch)[0]["cleared_seq"] == 1
+    stored = {SID: {"question_agent": "a1", "question_ts": 1.0, "question_seq": 0}}
+    later, _ = sessions.parse_batch([_ev(2, agent_id="a2"), _ev(3, agent_id="a1")])
+    [row] = sessions.reduce(later, stored)
+    assert row["cleared_seq"] == 3
+    other_only, _ = sessions.parse_batch([_ev(4, agent_id="a2")])
+    assert sessions.reduce(other_only, stored)[0]["cleared_ts"] is None
+
+
+async def test_ingest_reads_the_stored_asker_before_it_builds_the_row(db):
+    await sessions.ingest([_ev(0, "question", text="Allow Edit?", agent_id="a1")])
+    await sessions.ingest([_ev(1, agent_id="a1")])
+    row = dict(zip(store._SESSION_COLUMNS, db.sessions[SID], strict=True))
+    assert row["cleared_seq"] == 1
+
+
+# N3: the session's state
+
+
+def _state_of(*events):
+    parsed, rejected = sessions.parse_batch(list(events))
+    assert not rejected
+    [row] = sessions.reduce(parsed)
+    return row["state"], row["state_seq"]
+
+
+def test_work_from_any_agent_after_the_main_stop_reads_running():
+    assert _state_of(_ev(0, "stop"), _ev(1, agent_id="a1")) == ("running", 1)
+    assert _state_of(_ev(0, "stop"), _ev(1, "prompt")) == ("running", 1)
+
+
+def test_a_subagent_stop_never_makes_the_session_idle():
+    assert _state_of(_ev(0), _ev(1, "stop", agent_id="a1")) == ("running", 0)
+    assert _state_of(_ev(0), _ev(1, "agent_stop", agent_id="a1")) == ("running", 0)
+    alone, _ = sessions.parse_batch([_ev(5, "agent_stop", agent_id="a1")])
+    assert sessions.reduce(alone)[0]["state_ts"] == 0.0
+    assert _state_of(_ev(0), _ev(1, "stop")) == ("idle", 1)
+
+
 # S5: not heard from
 
 NONE = {"status": "none", "card_id": None, "candidates": []}
@@ -314,6 +373,17 @@ def test_an_idle_session_stays_idle_until_a_day_of_silence():
     assert sessions.status(idle | {"last_heard_at": now - timedelta(hours=3)}, now) == "idle"
     day = idle | {"last_heard_at": now - timedelta(hours=24, seconds=1)}
     assert sessions.status(day, now) == "not_heard_from"
+
+
+def test_a_session_waiting_on_a_question_uses_the_idle_threshold():
+    now = datetime.now(UTC)
+    asking = _session(question="Allow Bash?", question_ts=5.0, question_seq=0)
+    hour = asking | {"last_heard_at": now - timedelta(hours=1)}
+    assert sessions.status(hour, now) == "running"
+    day = asking | {"last_heard_at": now - timedelta(hours=24, seconds=1)}
+    assert sessions.status(day, now) == "not_heard_from"
+    answered = hour | {"cleared_ts": 6.0, "cleared_seq": 0}
+    assert sessions.status(answered, now) == "not_heard_from"
 
 
 # S3: card links

@@ -23,19 +23,23 @@ Kind = Literal[
 ]
 DoingSource = Literal["task", "commit", "pr"]
 
-# The session state each kind leaves behind. A session waiting on Pryce (start, stop) is idle.
-_STATE: dict[str, str] = {
-    "start": "idle",
-    "prompt": "running",
-    "tool": "running",
-    "agent_start": "running",
-    "agent_stop": "running",
-    "doing": "running",
-    "question": "running",
-    "stop": "idle",
-    "end": "ended",
-}
+# Work from any agent means the session is running, even after the main thread's stop (a
+# background subagent). Only the main thread's start or stop means it waits on Pryce; a
+# subagent finishing changes nothing.
+_WORK = {"prompt", "tool", "agent_start", "doing", "question"}
+_MAIN_IDLE = {"start", "stop"}
 _CLEARS_QUESTION = {"prompt", "tool", "stop", "end"}
+
+
+def _state(event: "EventIn") -> str | None:
+    if event.kind == "end":
+        return "ended"
+    if event.kind in _WORK:
+        return "running"
+    if event.kind in _MAIN_IDLE and not event.agent_id:
+        return "idle"
+    return None
+
 
 # Every session on a default branch would match a card that wrongly names it.
 _UNMATCHED_BRANCHES = {"main", "master"}
@@ -47,8 +51,12 @@ TS_MAX = 4_102_444_800
 
 def _cut(limit: int | None):
     def cut(value: Any) -> Any:
-        # Postgres text cannot hold NUL; one in a result line would fail the whole batch.
-        return value.replace("\x00", "")[:limit] if isinstance(value, str) else value
+        # Postgres text cannot hold NUL, and UTF-8 cannot hold a lone surrogate (a JS hook that
+        # slices an emoji in half sends one); either would fail the whole batch.
+        if not isinstance(value, str):
+            return value
+        safe = value.replace("\x00", "").encode("utf-8", "replace").decode("utf-8")
+        return safe[:limit]
 
     return BeforeValidator(cut)
 
@@ -124,20 +132,42 @@ def _last(events: list[EventIn], field: str) -> Any:
     return getattr(_latest(found), field) if found else None
 
 
-def reduce(events: list[EventIn]) -> list[dict[str, Any]]:
+def _asker(
+    question: EventIn | None, stored: dict[str, Any] | None
+) -> tuple[tuple[float, int], str] | None:
+    """The newest question known, the batch's or the stored one, and the agent that asked it."""
+    known = []
+    if question:
+        known.append(((question.ts, question.seq), question.agent_id or ""))
+    if stored and stored.get("question_ts") is not None:
+        known.append(((stored["question_ts"], stored["question_seq"]), stored["question_agent"]))
+    return max(known, default=None)
+
+
+def reduce(
+    events: list[EventIn], stored: dict[str, dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
     """One session row per session in the batch, holding the batch's newest value of each
-    newest-wins column with the (ts, seq) that set it; the upsert keeps whichever is newer."""
+    newest-wins column with the (ts, seq) that set it; the upsert keeps whichever is newer.
+    `stored` holds each session's stored question, so a clear from the agent that asked it
+    counts even when the question came in an earlier batch."""
     by_session: dict[str, list[EventIn]] = {}
     for e in events:
         by_session.setdefault(e.session_id, []).append(e)
     rows = []
     for session_id, batch in by_session.items():
         last = _latest(batch)
+        changing = _latest([e for e in batch if _state(e)])
         doing = _latest([e for e in batch if e.kind == "doing"])
         question = _latest([e for e in batch if e.kind == "question"])
-        # A subagent working on while the main thread waits on a prompt has not answered it.
-        cleared = _latest([e for e in batch if e.kind in _CLEARS_QUESTION and not e.agent_id])
-        state = _STATE[last.kind]
+        asker = _asker(question, (stored or {}).get(session_id))
+        # The main thread or the agent that asked can answer; another subagent working on has not.
+        clearers = {"", asker[1]} if asker else {""}
+        cleared = _latest(
+            [e for e in batch if e.kind in _CLEARS_QUESTION and (e.agent_id or "") in clearers]
+        )
+        # A batch with no state change (a subagent's stop alone) loses to any stored state.
+        state = _state(changing) if changing else "running"
         rows.append(
             {
                 "session_id": session_id,
@@ -147,15 +177,20 @@ def reduce(events: list[EventIn]) -> list[dict[str, Any]]:
                 "branch": _last(batch, "branch"),
                 "card_id": uuid.UUID(c) if (c := _last(batch, "card_id")) else None,
                 "started_at": datetime.fromtimestamp(min(e.ts for e in batch), UTC),
+                "meta_ts": last.ts,
+                "meta_seq": last.seq,
                 "state": state,
-                "state_ts": last.ts,
-                "state_seq": last.seq,
-                "ended_at": datetime.fromtimestamp(last.ts, UTC) if state == "ended" else None,
+                "state_ts": changing.ts if changing else 0.0,
+                "state_seq": changing.seq if changing else 0,
+                "ended_at": (
+                    datetime.fromtimestamp(changing.ts, UTC) if state == "ended" else None
+                ),
                 "doing": doing.text if doing else None,
                 "doing_source": doing.doing_source if doing else None,
                 "doing_ts": doing.ts if doing else None,
                 "doing_seq": doing.seq if doing else None,
                 "question": question.text if question else None,
+                "question_agent": (question.agent_id or "") if question else None,
                 "question_ts": question.ts if question else None,
                 "question_seq": question.seq if question else None,
                 "cleared_ts": cleared.ts if cleared else None,
@@ -185,7 +220,9 @@ def event_rows(events: list[EventIn]) -> list[dict[str, Any]]:
 
 async def ingest(raw: list[Any]) -> dict[str, Any]:
     valid, rejected = parse_batch(raw)
-    stored = await store.ingest(reduce(valid), event_rows(valid)) if valid else 0
+    if not valid:
+        return {"accepted": 0, "stored": 0, "rejected": rejected}
+    stored = await store.ingest(lambda questions: reduce(valid, questions), event_rows(valid))
     return {"accepted": len(valid), "stored": stored, "rejected": rejected}
 
 
@@ -194,21 +231,20 @@ async def ingest(raw: list[Any]) -> dict[str, Any]:
 
 def status(session: dict[str, Any], now: datetime) -> str:
     """The reported state, or "not_heard_from" once it has been silent too long: a running session
-    past SESSION_RUNNING_SILENT_S, an idle one (waiting on Pryce, so quiet by design) past
-    SESSION_IDLE_SILENT_S. Nothing is reaped or invented: the last time stays as it was."""
+    past SESSION_RUNNING_SILENT_S, one waiting on Pryce (idle, or running with a question open,
+    so quiet by design) past SESSION_IDLE_SILENT_S. Nothing is reaped or invented: the last time
+    stays as it was."""
     if session["state"] == "ended":
         return "ended"
     silent = (now - session["last_heard_at"]).total_seconds()
-    limit = (
-        settings.session_running_silent_s
-        if session["state"] == "running"
-        else settings.session_idle_silent_s
-    )
+    waiting = session["state"] == "idle" or open_question(session) is not None
+    limit = settings.session_idle_silent_s if waiting else settings.session_running_silent_s
     return "not_heard_from" if silent > limit else session["state"]
 
 
 def open_question(session: dict[str, Any]) -> dict[str, Any] | None:
-    """A question stays open until a later main-thread prompt, tool, stop or end event."""
+    """A question stays open until a later prompt, tool, stop or end event from the main thread or
+    the agent that asked it."""
     if session["question_ts"] is None or session["state"] == "ended":
         return None
     asked = (session["question_ts"], session["question_seq"])
@@ -217,6 +253,7 @@ def open_question(session: dict[str, Any]) -> dict[str, Any] | None:
         return None
     return {
         "text": session["question"],
+        "agent_id": session.get("question_agent") or None,
         "asked_at": datetime.fromtimestamp(session["question_ts"], UTC),
     }
 
