@@ -16,7 +16,6 @@ Name = Annotated[str, Path(pattern=r"^[a-z][a-z0-9_-]{1,30}$")]
 ServerName = Annotated[str, Path(pattern=r"^[a-z][a-z0-9_-]{1,30}$")]
 SERVER_NAME = re.compile(r"^[a-z][a-z0-9_-]{1,30}$")
 TOOL = re.compile(r"^([A-Za-z0-9_-]{1,64}|\*)$")
-ENV_REF = re.compile(r"^\$\{[A-Z][A-Z0-9_]*\}$")
 
 
 class ProfileIn(BaseModel):
@@ -66,7 +65,7 @@ class ServerIn(BaseModel):
     @field_validator("headers")
     @classmethod
     def _env_refs(cls, headers: dict[str, str]) -> dict[str, str]:
-        if not all(ENV_REF.match(v) for v in headers.values()):
+        if not all(mcp_servers.ENV_REF.match(v) for v in headers.values()):
             raise ValueError("header values must be ${ENV_VAR} references")
         return headers
 

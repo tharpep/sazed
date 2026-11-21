@@ -1,7 +1,9 @@
 """MCP server registry (migration 029): servers profiles can grant, one history row per save."""
 
 import json
+import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.db import get_pool
 
@@ -9,6 +11,7 @@ FIELDS = ("transport", "url", "command", "args", "headers", "agent_safe", "descr
 JSON_FIELDS = ("args", "headers")
 # What the worker connects to or runs, and which ${VAR} secrets it sends there.
 CONNECTION = ("transport", "url", "command", "args", "headers")
+ENV_REF = re.compile(r"^\$\{[A-Z][A-Z0-9_]*\}$")
 # Only the console saves as the owner: the gateway's MCP tools always stamp "agent:<name>".
 OWNER = "pryce"
 ASK_OWNER = "ask Pryce to approve it in the Sazed console (Profiles, MCP servers)"
@@ -27,6 +30,24 @@ def _json(value: Any) -> Any:
 def _out(row: dict[str, Any]) -> dict[str, Any]:
     out = {k: row[k] for k in (("name",) + FIELDS + ("version", "updated_by", "updated_at"))}
     return {**out, **{k: _json(out[k]) for k in JSON_FIELDS}}
+
+
+def _url_may_hold_a_secret(url: str | None) -> bool:
+    if not url:
+        return False
+    parts = urlsplit(url)
+    return bool(parts.query or "@" in parts.netloc)
+
+
+def for_worker(servers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The grantable servers as the worker key may read them, header values only as ${VAR}."""
+    # pinned by test_worker_registry_reads.py::test_only_grantable_servers_reach_the_worker
+    grantable = [s for s in servers if s["agent_safe"] and not _url_may_hold_a_secret(s["url"])]
+    # pinned by test_worker_registry_reads.py::test_a_literal_header_value_never_reaches_the_worker
+    return [
+        {**s, "headers": {k: v for k, v in s["headers"].items() if ENV_REF.match(str(v))}}
+        for s in grantable
+    ]
 
 
 def _args(fields: dict[str, Any]) -> list[Any]:
