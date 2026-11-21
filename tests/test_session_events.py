@@ -322,6 +322,21 @@ def test_a_subagent_question_clears_on_that_subagent_next_event():
     assert sessions.reduce(other_only, stored)[0]["cleared_ts"] is None
 
 
+async def test_sessions_are_locked_and_upserted_in_one_fixed_order(db, monkeypatch):
+    seen = []
+    upsert = db.executemany
+
+    async def record(sql, args):
+        if "INSERT INTO agent_sessions" in sql:
+            seen.extend(row[0] for row in args)
+        await upsert(sql, args)
+
+    monkeypatch.setattr(db, "executemany", record)
+    await sessions.ingest([_ev(0, session_id="zeta"), _ev(1, session_id="alpha")])
+    assert seen == ["alpha", "zeta"]
+    assert "ORDER BY session_id" in store._OPEN_QUESTIONS
+
+
 async def test_ingest_reads_the_stored_asker_before_it_builds_the_row(db):
     await sessions.ingest([_ev(0, "question", text="Allow Edit?", agent_id="a1")])
     await sessions.ingest([_ev(1, agent_id="a1")])

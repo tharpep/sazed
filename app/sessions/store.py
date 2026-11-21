@@ -75,6 +75,7 @@ _UPSERT = f"""
 _OPEN_QUESTIONS = """
     SELECT session_id, question_agent, question_ts, question_seq FROM agent_sessions
     WHERE session_id = ANY($1::text[])
+    ORDER BY session_id
     FOR UPDATE
 """
 
@@ -119,7 +120,9 @@ async def ingest(
     async with get_pool().acquire() as conn, conn.transaction():
         ids = sorted({e["session_id"] for e in events})
         stored = {r["session_id"]: dict(r) for r in await conn.fetch(_OPEN_QUESTIONS, ids)}
-        sessions = build(stored)
+        # Lock and insert rows in one fixed order, so two batches over the same new sessions in
+        # opposite orders cannot deadlock.
+        sessions = sorted(build(stored), key=lambda s: s["session_id"])
         await conn.executemany(_UPSERT, [tuple(s[c] for c in _SESSION_COLUMNS) for s in sessions])
         columns = [[e[c] for e in events] for c in _EVENT_COLUMNS]
         inserted = await conn.fetch(_INSERT_EVENTS, *columns)
