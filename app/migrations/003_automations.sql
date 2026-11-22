@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS automations (
     -- {"type": "sazed_prompt", "prompt": "..."}
     -- {"type": "gateway_call", "method": "POST", "path": "/kb/sync", "body": {...}}
     action        JSONB NOT NULL,
-    -- {"pushover": {"title": "...", "priority": 0}, "journal": {"category": "career",
+    -- {"pushover": {"title": "..."}, "journal": {"category": "career",
     --  "subcategory": "..."}, "skip_if_nothing": true}
     outputs       JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_by    TEXT NOT NULL DEFAULT 'console',  -- console | sazed | claude
