@@ -153,7 +153,6 @@ Action = Annotated[
 
 class PushoverOutput(BaseModel):
     title: str | None = Field(None, max_length=100, description="Defaults to the automation name")
-    priority: int = Field(0, ge=-2, le=1)
 
 
 class JournalOutput(BaseModel):

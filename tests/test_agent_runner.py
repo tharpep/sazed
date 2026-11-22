@@ -272,7 +272,7 @@ async def test_store_caps_and_skips_duplicates(monkeypatch):
     assert [c["title"] for c in created] == ["Good one"]  # cap 2: "Dup" skipped, third not seen
     assert created[0]["effort"] == "S" and "Second opinion: Worth it." in created[0]["why"]
     assert await scout._none_kept(ctx) is None
-    assert scout._summarize(ctx).notify_url.endswith("&item=1")
+    assert scout._summarize(ctx).notify_refs == {"card": "1"}
 
 
 def test_scout_judge_runs_without_web_tools():

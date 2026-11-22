@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.config import settings
 from app.jobs import service as jobs_service
 from app.learning import service as learning
 from app.learning import store
@@ -45,10 +44,10 @@ def fake(monkeypatch):
 
     async def create_guard(**fields):
         state["created"].append(fields)
-        return fields
+        return {"id": uuid.UUID(int=99), **fields}
 
-    async def notify(title, body, url=None, url_title=None):
-        state["notified"].append((title, body, url, url_title))
+    async def notify(kind, title, body, refs=None):
+        state["notified"].append((kind, title, body, refs))
 
     monkeypatch.setattr(store, "set_class", set_class)
     monkeypatch.setattr(store, "hits_since", hits_since)
@@ -105,10 +104,10 @@ async def test_two_lesson_hits_give_the_same_guard_item_and_notice_as_before(fak
     ]
     assert fake["notified"] == [
         (
+            "routine",
             "Guard proposed: Agent error",
             "agent_error hit 2 times; the guard item is in your board inbox.",
-            settings.console_url,
-            "Sazed",
+            {"card": str(uuid.UUID(int=99))},
         )
     ]
 

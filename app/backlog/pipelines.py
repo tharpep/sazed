@@ -63,7 +63,7 @@ async def _run_agy(
     return done.get("result") or ""
 
 
-async def triage(run_id: uuid.UUID) -> tuple[str, str, str | None, str | None]:
+async def triage(run_id: uuid.UUID) -> tuple[str, str, str | None, dict[str, str] | None]:
     went_stale = await store.mark_stale(settings.backlog_stale_days)
     ideas = await store.list_items("idea", "open")
     if not ideas:
@@ -112,4 +112,4 @@ async def triage(run_id: uuid.UUID) -> tuple[str, str, str | None, str | None]:
     lines.append(f"\nOpen ideas: {len(ideas)}. Went stale this week: {went_stale}.")
     gist = "Top: " + "; ".join(by_id[str(r["id"])]["title"] for r in order[:2])
     gist += f". {len(ideas)} open."
-    return "success", "\n".join(lines), gist, f"{settings.console_url}/?page=backlog"
+    return "success", "\n".join(lines), gist, None

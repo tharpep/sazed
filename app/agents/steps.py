@@ -34,7 +34,7 @@ class Outcome:
     status: Literal["success", "skipped", "needs_approval"]
     text: str
     notify_text: str | None = None
-    notify_url: str | None = None
+    notify_refs: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)

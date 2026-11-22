@@ -216,7 +216,7 @@ async def test_job_and_dispatch_hits_add_up_to_one_guard_naming_both(monkeypatch
 
     async def create_guard(**fields):
         created.append(fields)
-        return fields
+        return {"id": 1, **fields}
 
     async def notify(*args):
         notified.append(args)
@@ -275,7 +275,7 @@ async def test_the_proposal_reads_and_creates_under_the_class_lock_and_notifies_
 
     async def create_guard(**fields):
         events.append("create")
-        return fields
+        return {"id": 1, **fields}
 
     async def notify(*args):
         events.append("notify")

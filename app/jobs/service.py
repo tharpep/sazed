@@ -19,6 +19,7 @@ from app.db import get_pool
 from app.http_client import get_client
 from app.jobs import change_result, profiles, store
 from app.learning import service as learning
+from app.notices import NoticeKind, notify_simple
 from app.pricing import estimate_cost_usd
 
 logger = logging.getLogger(__name__)
@@ -576,32 +577,27 @@ def gist(text: str, limit: int = 220) -> str:
     return out or flat[:limit]
 
 
-async def notify_simple(
-    title: str, body: str, url: str | None = None, url_title: str | None = None
-) -> None:
-    """One Pushover message. Keep it a notification: short title, a sentence or two, and the
-    link as a button (the gateway trims anything longer)."""
-    payload: dict[str, Any] = {"title": title, "message": body or "(no details)", "priority": 0}
-    if url:
-        payload |= {"url": url, "url_title": url_title or "Open"}
+async def job_refs(job: dict[str, Any]) -> dict[str, str]:
+    """The job and, when it belongs to one, its board card."""
+    refs = {"job": str(job["id"])}
     try:
-        await get_client().post(
-            f"{settings.gateway_url}/notify",
-            json=payload,
-            headers={"X-API-Key": settings.gateway_api_key},
-            timeout=30.0,
-        )
-    except httpx.HTTPError:
-        logger.warning("Notification failed: %s", title, exc_info=True)
+        if card := await store.card_for_job(job["id"]):
+            refs["card"] = str(card)
+    except Exception:
+        logger.warning("No card lookup for job %s", job["id"], exc_info=True)
+    return refs
 
 
 async def _notify(job: dict[str, Any]) -> None:
     meta = job.get("meta") or {}
     label = _SHORT_LABEL.get(job["kind"], _label(job))
+    refs = await job_refs(job)
     if job["status"] == "needs_input":
         await notify_simple(
+            "question",
             f"{label} needs your input",
             f"{job['title']}\n{meta.get('question') or '(no question text)'}",
+            refs,
         )
     elif job["status"] == "paused":
         reason = (meta.get("pause_reason") or "stopped").replace("_", " ")
@@ -609,42 +605,43 @@ async def _notify(job: dict[str, Any]) -> None:
             saved = f"Draft PR #{meta.get('pr_number')} has the work so far"
         else:
             saved = "No files were changed yet"
+        kind: NoticeKind = "run_failed"
         next_step = "resume it from Sazed (Jobs)"
         if meta.get("pause_reason") == "rate_limit":
+            kind = "routine"
             reason = "plan limit"
             next_step = (
                 f"it resumes on its own {_until(meta.get('resume_after'))}, and other Claude jobs "
                 "wait until then"
             )
         await notify_simple(
-            f"{label} paused ({reason})",
-            f"{job['title']}. {saved}; {next_step}.",
-            meta.get("pr_url"),
-            f"Open draft PR #{meta.get('pr_number')}" if meta.get("pr_url") else None,
+            kind, f"{label} paused ({reason})", f"{job['title']}. {saved}; {next_step}.", refs
         )
     elif job["status"] == "succeeded" and meta.get("pr_url") and meta.get("pr_draft"):
         repo = (job.get("params") or {}).get("repo", "").split("/")[-1]
         await notify_simple(
+            "run_failed",
             f"Draft PR #{meta.get('pr_number')} · {repo}",
             f"{job['title']}. The repo's tests still fail with the change, so it's a draft.",
-            meta["pr_url"],
-            f"Open draft PR #{meta.get('pr_number')} on GitHub",
+            refs,
         )
     elif job["status"] == "succeeded" and meta.get("pr_url"):
         repo = (job.get("params") or {}).get("repo", "").split("/")[-1]
         verb = "updated" if meta.get("pr_updated") else "opened"
         await notify_simple(
+            "job_done",
             f"PR #{meta.get('pr_number')} {verb} · {repo}",
             f"{job['title']}. CI is running; you'll hear when it's green.",
-            meta["pr_url"],
-            f"Open PR #{meta.get('pr_number')} on GitHub",
+            refs,
         )
     elif job["status"] == "succeeded":
-        await notify_simple(f"{label} done", f"{job['title']}\n{gist(job.get('result') or '')}")
+        await notify_simple(
+            "job_done", f"{label} done", f"{job['title']}\n{gist(job.get('result') or '')}", refs
+        )
     else:
         status = job["status"].replace("_", " ")
         reason = job.get("error") or "no details"
-        await notify_simple(f"{label} {status}", f"{job['title']}: {reason}")
+        await notify_simple("run_failed", f"{label} {status}", f"{job['title']}: {reason}", refs)
 
 
 def session_note(job: dict[str, Any]) -> str:
@@ -998,7 +995,7 @@ async def _notify_bakeoff_done(bakeoff_id: str) -> None:
     line = ", ".join(
         f"{a['arm']} {'passed' if a['check_passed'] else a['state']}" for a in report["arms"]
     )
-    await notify_simple(f"Bake-off {bakeoff_id} done", line, settings.console_url, "Sazed")
+    await notify_simple("job_done", f"Bake-off {bakeoff_id} done", line)
 
 
 async def promote_bakeoff(bakeoff_id: str, arm: str) -> dict:

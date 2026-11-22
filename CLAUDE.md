@@ -83,7 +83,7 @@ Tests live in `tests/` (pytest, pytest-asyncio in auto mode). No DB or network: 
   - **scout** (`app/agents/scout.py`): agy research on `SCOUT_RESEARCH_MODEL` (no list of recorded titles in the prompt), code dedupe against every title, a code-search repo check that flags ideas that may already exist, then a judge job on `SCOUT_JUDGE_MODEL` (a different family, no web tools, tool cap 3) that keeps at most `max_ideas`, stored as ideas.
   - **triage** (`pipelines.py`, one step until plans/12 phase 2): marks stale after `BACKLOG_STALE_DAYS`, ranks with the judge model, shortlists the top two.
 - `sync_pr_states` (called by the CI watcher every ~10 min): approved items move to `done` when their PR merges, or back to `new` with a note when it's closed unmerged.
-- Config: `SCOUT_REPOS`, `CONSOLE_URL` (Pushover links go to `/?page=backlog[&item=<id>]`).
+- Config: `SCOUT_REPOS`. A run with one new idea links its Pushover to that card.
 
 **Activity (`app/activity/`, migration 006, console Activity page):**
 - **Writing events.** `activity_events` is written by Postgres triggers on the tables that already record each action (messages, llm_calls, action_logs, pending_actions, automation_runs, jobs, backlog_items), so every code path appears without the loop logging anything.

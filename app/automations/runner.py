@@ -22,6 +22,7 @@ from app.automations import store
 from app.config import settings
 from app.db import get_pool
 from app.http_client import get_client as get_http_client
+from app.notices import NoticeKind, notify_simple
 
 logger = logging.getLogger(__name__)
 
@@ -72,13 +73,14 @@ async def _execute(
 ) -> None:
     name = automation["name"]
     outputs = automation["outputs"] or {}
+    told = False
     try:
         notify_text = None
-        notify_url = None
+        notify_refs: dict[str, str] | None = None
         if automation["action"]["type"] == "sazed_prompt":
             status, text, session_id = await _run_prompt(automation)
         elif automation["action"]["type"] == "job":
-            status, text, notify_text, notify_url = await _run_job(automation["action"], run_id)
+            status, text, notify_text, notify_refs = await _run_job(automation["action"], run_id)
             session_id = None
         elif automation["action"]["type"] == "agent":
             from app.agents import runner as agents  # lazy, like the job import below
@@ -88,27 +90,31 @@ async def _execute(
             else:
                 outcome = await agents.run(automation["action"], run_id)
             status, text = outcome.status, outcome.text
-            notify_text, notify_url = outcome.notify_text, outcome.notify_url
+            notify_text, notify_refs = outcome.notify_text, outcome.notify_refs
             session_id = None
         else:
             status, text = await _run_gateway_call(automation["action"])
             session_id = None
+        refs = {**(notify_refs or {}), "automation": str(automation["id"])}
         delivered: list[str] = []
         if status in ("success", "needs_approval"):
             delivered = await _deliver(
                 name,
                 outputs,
                 text,
+                refs,
                 needs_approval=status == "needs_approval",
                 notify_text=notify_text,
-                notify_url=notify_url,
             )
-        if status == "needs_approval" and "pushover" not in delivered:
+            told = "pushover" in delivered
+        if status == "needs_approval" and not told:
             # Always say when a run is parked on an approval, even with Pushover output off;
             # otherwise it waits silently until someone opens the Automations page.
-            await _alert(
+            told = await _alert(
+                "permission",
                 f"Needs approval: {name}",
                 "A step is waiting for your OK. Open the run in Sazed (Automations, Runs).",
+                refs,
             )
         await store.finish_run(
             run_id, status, output=text[:8000], session_id=session_id, delivered=delivered
@@ -117,7 +123,15 @@ async def _execute(
     except Exception as e:
         logger.exception("Automation '%s' failed", name)
         await store.finish_run(run_id, "error", error=f"{type(e).__name__}: {e}"[:2000])
-        await _alert(f"Automation failed: {name}", f"{type(e).__name__}: {e}"[:500])
+        # A failure after the run already reached the phone (finish_run raising) is the same
+        # event: one message for it, not a second "failed".
+        if not told:
+            await _alert(
+                "run_failed",
+                f"Automation failed: {name}",
+                f"{type(e).__name__}: {e}"[:500],
+                {"automation": str(automation["id"])},
+            )
     finally:
         _running.discard(automation["id"])
 
@@ -149,8 +163,8 @@ async def _run_prompt(automation: dict[str, Any]) -> tuple[str, str, uuid.UUID]:
 
 async def _run_job(
     action: dict[str, Any], run_id: uuid.UUID
-) -> tuple[str, str, str | None, str | None]:
-    """Run a worker job and wait for it. Returns (status, full text, short gist, link)."""
+) -> tuple[str, str, str | None, dict[str, str]]:
+    """Run a worker job and wait for it. Returns (status, full text, short gist, link refs)."""
     from app.jobs import service as jobs  # lazy: avoids an import cycle at startup
 
     requested_by = f"automation-run:{run_id}"  # capped like all automation work
@@ -171,7 +185,7 @@ async def _run_job(
             "needs_approval",
             f"Job {job['id']} ({job['title']}) is waiting for your approval in Jobs.",
             "Waiting for your approval in Sazed (Automations, Jobs).",
-            None,
+            {"job": str(job["id"])},
         )
     timeout = int((job.get("params") or {}).get("timeout_s", 300)) + 300
     done = await jobs.wait_for(job["id"], timeout)
@@ -184,7 +198,7 @@ async def _run_job(
             "needs_approval",
             f"Job {done['id']} ({done['title']}) is waiting for your answer: {question}",
             "Waiting for your answer in Sazed (Jobs).",
-            None,
+            {"job": str(done["id"])},
         )
     if done["status"] == "paused":
         # Stopped before finishing with its work saved (plans/10 P1.7): the run waits on a resume.
@@ -194,12 +208,12 @@ async def _run_job(
             f"Job {done['id']} ({done['title']}) paused ({reason}); its work so far is saved. "
             "Resume it in Sazed (Jobs).",
             "Paused; resume it in Sazed (Jobs).",
-            None,
+            {"job": str(done["id"])},
         )
     if done["status"] != "succeeded":
         raise RuntimeError(f"job {done['id']} {done['status']}: {done.get('error') or ''}")
     result = done.get("result") or ""
-    return "success", result, jobs.gist(result), (done.get("meta") or {}).get("pr_url")
+    return "success", result, jobs.gist(result), {"job": str(done["id"])}
 
 
 async def _run_gateway_call(action: dict[str, Any]) -> tuple[str, str]:
@@ -227,42 +241,21 @@ def _plain(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
-def _link_title(url: str) -> str:
-    return "Open on GitHub" if "github.com" in url else "Open in Sazed"
-
-
-async def _notify(title: str, message: str, priority: int, url: str | None = None) -> bool:
-    try:
-        resp = await get_http_client().post(
-            f"{settings.gateway_url}/notify",
-            json={
-                "title": title[:250],
-                "message": message[:1024] or "(empty)",
-                "priority": priority,
-                **({"url": url, "url_title": _link_title(url)} if url else {}),
-            },
-            headers={"X-API-Key": settings.gateway_api_key},
-            timeout=30.0,
-        )
-        return resp.is_success
-    except httpx.HTTPError:
-        logger.warning("Pushover delivery failed", exc_info=True)
+async def _alert(kind: NoticeKind, title: str, message: str, refs: dict[str, str]) -> bool:
+    """Deterministic alert about the run itself (not its output), sent whatever the outputs say.
+    True when it reached the gateway."""
+    if not settings.automation_alerts:
         return False
-
-
-async def _alert(title: str, message: str) -> None:
-    """Deterministic alert about the run itself (not its output), sent whatever the outputs say."""
-    if settings.automation_alerts:
-        await _notify(title, message, priority=0)
+    return await notify_simple(kind, title, message, refs)
 
 
 async def _deliver(
     name: str,
     outputs: dict,
     text: str,
+    refs: dict[str, str],
     needs_approval: bool,
     notify_text: str | None = None,
-    notify_url: str | None = None,
 ) -> list[str]:
     """Send a run's output. Pushover gets the short version (a job's gist) when there is one;
     the journal always gets the full text."""
@@ -271,9 +264,8 @@ async def _deliver(
         title = pushover.get("title") or name
         if needs_approval:
             title = f"Needs approval: {title}"
-        if await _notify(
-            title, notify_text or _plain(text), pushover.get("priority", 0), url=notify_url
-        ):
+        kind: NoticeKind = "permission" if needs_approval else "routine"
+        if await notify_simple(kind, title, notify_text or _plain(text), refs):
             delivered.append("pushover")
     if journal := outputs.get("journal"):
         try:

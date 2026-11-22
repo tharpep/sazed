@@ -117,7 +117,7 @@ async def test_due_pauses_resume_once_with_their_own_requester(monkeypatch):
 async def test_the_pause_notice_says_when_it_resumes(monkeypatch):
     sent = []
 
-    async def fake_notify(title, body, url=None, url_title=None):
+    async def fake_notify(kind, title, body, refs=None):
         sent.append((title, body))
 
     monkeypatch.setattr(service, "notify_simple", fake_notify)

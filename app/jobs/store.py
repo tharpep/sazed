@@ -412,6 +412,21 @@ async def settle_ancestors(job_id: uuid.UUID, ci_state: str) -> None:
     )
 
 
+async def card_for_job(job_id: uuid.UUID) -> uuid.UUID | None:
+    """The board card a job belongs to: the backlog item that started it or any job above it."""
+    return await get_pool().fetchval(
+        """
+        WITH RECURSIVE up AS (
+            SELECT id, parent_id FROM jobs WHERE id = $1
+            UNION ALL
+            SELECT j.id, j.parent_id FROM jobs j JOIN up ON j.id = up.parent_id
+        )
+        SELECT b.id FROM backlog_items b JOIN up ON b.job_id = up.id LIMIT 1
+        """,
+        job_id,
+    )
+
+
 async def awaiting_ci() -> list[dict[str, Any]]:
     """Recent change jobs with an open PR whose CI result hasn't been handled yet."""
     rows = await get_pool().fetch(

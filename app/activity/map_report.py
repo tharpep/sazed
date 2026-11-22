@@ -59,7 +59,7 @@ async def _week_traffic(edges: list[dict[str, Any]]) -> tuple[dict[str, int], di
     return counts, unmatched
 
 
-async def run(run_id: uuid.UUID) -> tuple[str, str, str | None, str | None]:
+async def run(run_id: uuid.UUID) -> tuple[str, str, str | None, dict[str, str] | None]:
     arch = await _fetch_map()
     nodes = {n["id"]: n for n in arch["nodes"]}
     edges = arch["edges"]
@@ -147,4 +147,4 @@ async def run(run_id: uuid.UUID) -> tuple[str, str, str | None, str | None]:
     if down:
         parts.append(f"down: {', '.join(down)}")
     gist = "; ".join(parts) or "First snapshot taken"
-    return "success", text, gist, f"{settings.console_url}/?page=homelab"
+    return "success", text, gist, None
