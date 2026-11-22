@@ -33,6 +33,8 @@ def _job(status="running", **meta):
         (_job("needs_approval"), ["approve", "decline"]),
         (_job("needs_input"), ["answer", "stop"]),
         (_job("running"), ["steer", "stop"]),
+        (_job("running") | {"kind": "dispatch"}, ["stop"]),
+        (_job("needs_approval") | {"kind": "dispatch"}, ["approve", "decline"]),
         (_job("queued"), ["stop"]),
         (_job("paused", pause_reason="timed_out"), ["resume", "stop"]),
         (_job("paused", pause_reason="rate_limit"), []),

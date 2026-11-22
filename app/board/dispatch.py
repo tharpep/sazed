@@ -51,6 +51,50 @@ async def upsert_plan(
     )
 
 
+async def link_job(
+    conn: Any,
+    plan: str,
+    repo: str,
+    base: str,
+    tasks: list[dict],
+    project: str | None,
+    board_plan: str | None,
+    job_id: Any,
+) -> None:
+    """The only writer of job_id; upsert_plan, which every mirror calls, leaves it alone. host stays
+    empty until a run mirrors the plan."""
+    await conn.execute(
+        """
+        INSERT INTO dispatch_plans (plan, repo, base, host, tasks, project, board_plan, job_id)
+        VALUES ($1, $2, $3, '', $4::jsonb, $5, $6, $7)
+        ON CONFLICT (plan) DO UPDATE
+        SET repo = $2, base = $3, tasks = $4::jsonb, project = $5, board_plan = $6, job_id = $7,
+            updated_at = NOW()
+        """,
+        plan,
+        repo,
+        base,
+        json.dumps(tasks),
+        project,
+        board_plan,
+        job_id,
+    )
+
+
+async def running_job_params(plan: str) -> dict[str, Any] | None:
+    """The params of the plan's dispatch job while it runs, else None."""
+    rec = await get_pool().fetchrow(
+        """
+        SELECT j.params
+        FROM dispatch_plans p
+        JOIN jobs j ON j.id = p.job_id
+        WHERE p.plan = $1 AND j.kind = 'dispatch' AND j.status = 'running'
+        """,
+        plan,
+    )
+    return _json(rec["params"]) if rec else None
+
+
 async def insert_row(
     plan: str,
     task: str,
@@ -225,7 +269,7 @@ def _plan(rec) -> dict[str, Any]:
 
 _PLAN_COLUMNS = (
     "plan, repo, base, host, tasks, project, board_plan, updated_at, "
-    "pr_url, pr_number, pr_head_sha, exported_at"
+    "pr_url, pr_number, pr_head_sha, exported_at, job_id"
 )
 PR_FIELDS = ("pr_url", "pr_number", "pr_head_sha", "exported_at")
 
@@ -312,6 +356,7 @@ def _summary(
         shaped = {
             "states": _count([r["run_state"] if r else "planned" for r in rows]),
             "phases": phases,
+            "job_id": plan.get("job_id"),
         } | {k: plan.get(k) for k in PR_FIELDS}
     return {
         "plan": plan["plan"],
@@ -405,6 +450,7 @@ async def command_parts(now: datetime) -> tuple[list[dict], list[dict]]:
             working.append(
                 {
                     "kind": "dispatch",
+                    "job_id": meta.get("job_id"),
                     "plan": plan,
                     "task": task,
                     "title": _title(defn),
@@ -432,7 +478,7 @@ async def command_parts(now: datetime) -> tuple[list[dict], list[dict]]:
                     "question": row["line"] if row["state"] == "waiting" else None,
                     "actions": [],
                     "updated_at": datetime.fromtimestamp(row["ts"], tz=now.tzinfo),
-                    "job_id": None,
+                    "job_id": meta.get("job_id"),
                 }
             )
     return working, needs

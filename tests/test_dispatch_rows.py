@@ -132,6 +132,14 @@ async def test_home_summary_lists_running_and_waiting_dispatch_tasks(monkeypatch
     assert needs["job_id"] is None
 
 
+async def test_home_entries_carry_the_plans_job(monkeypatch):
+    monkeypatch.setitem(PLAN, "job_id", "job-1")
+    rows = [_row("api", "running", 90), _row("ui", "waiting", 600)]
+    result = await _summary_with(monkeypatch, rows)
+    assert result["working"][0]["job_id"] == "job-1"
+    assert result["needs"][0]["job_id"] == "job-1"
+
+
 async def test_a_running_dispatch_item_carries_its_last_heartbeat(monkeypatch):
     beat = NOW - timedelta(seconds=20)
     rows = [_row("api", "running", 90), _row("ui", "running", 90)]

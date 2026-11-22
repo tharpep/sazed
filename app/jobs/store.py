@@ -55,8 +55,9 @@ async def create_job(
     status: str = "queued",
     parent_id: uuid.UUID | None = None,
     variant: str | None = None,
+    conn: Any = None,
 ) -> dict[str, Any]:
-    rec = await get_pool().fetchrow(
+    rec = await (conn or get_pool()).fetchrow(
         """
         INSERT INTO jobs (kind, agent, model, profile, title, prompt, params, status,
                           parent_id, requested_by, priority, variant)
@@ -105,7 +106,8 @@ async def list_jobs(status: str | None = None, limit: int = 50) -> list[dict[str
     rows = await get_pool().fetch(
         """
         SELECT id, kind, agent, model, profile, title, status, requested_by, parent_id,
-               created_at, started_at, finished_at, left(result, 300) AS result_preview, error
+               created_at, started_at, finished_at, left(result, 300) AS result_preview, error,
+               CASE WHEN kind = 'dispatch' THEN params END AS params
         FROM jobs
         WHERE ($1::text IS NULL OR status = $1)
         ORDER BY created_at DESC
@@ -114,7 +116,11 @@ async def list_jobs(status: str | None = None, limit: int = 50) -> list[dict[str
         status,
         limit,
     )
-    return [_row(r) for r in rows]
+    jobs = [_row(r) for r in rows]
+    for job in jobs:
+        if job["kind"] != "dispatch":
+            job.pop("params")
+    return jobs
 
 
 async def get_events(job_id: uuid.UUID, limit: int = 500) -> list[dict[str, Any]]:

@@ -16,6 +16,7 @@ from app.routers import worker
 WORKER_KEY = "worker-key"
 CONSOLE_KEY = "console-key"
 BASE_SHA = "a" * 40
+PLAN_HASH = "c" * 64
 URL = "/worker/dispatch/plans/temps-v1/export"
 
 
@@ -35,6 +36,7 @@ def _plan(**overrides):
 
 def _body(**overrides):
     return {
+        "plan_hash": PLAN_HASH,
         "repo": "tharpep/dispatch-sandbox",
         "base": "main",
         "base_sha": BASE_SHA,
@@ -63,6 +65,7 @@ class Gateway:
     def __init__(self):
         self.posts, self.looked_up, self.recorded = [], [], []
         self.repo_status = 200
+        self.running = True
         self.pr = _Resp(
             201,
             {
@@ -102,6 +105,12 @@ def gateway(monkeypatch):
     async def plan_row(plan):
         return plans.get(plan)
 
+    async def running_job_params(plan):
+        row = plans.get(plan)
+        if row is None or not gw.running:
+            return None
+        return {"plan_hash": PLAN_HASH, "repo": service.full_repo(row["repo"]), "base": row["base"]}
+
     async def record_export(plan, pr_url, pr_number, head_sha):
         gw.recorded.append((plan, pr_url, pr_number, head_sha))
 
@@ -113,6 +122,7 @@ def gateway(monkeypatch):
     monkeypatch.setattr(ci_watch, "get_client", lambda: gw)
     monkeypatch.setattr(settings, "code_task_excluded_repos", ["tharpep/Trusted-Model-Registry"])
     monkeypatch.setattr(dispatch, "plan_row", plan_row)
+    monkeypatch.setattr(dispatch, "running_job_params", running_job_params)
     monkeypatch.setattr(dispatch, "record_export", record_export)
     gw.plans = plans
     return gw
@@ -334,6 +344,56 @@ def test_any_other_gateway_refusal_is_refused_with_its_sentence(gateway, client)
     ):
         gateway.pr = _Resp(422, {"detail": sentence})
         assert _refusal(_export(client), 422, "refused") == sentence
+
+
+def test_a_plan_with_no_running_dispatch_job_is_refused(gateway, client):
+    gateway.running = False
+    assert "no running dispatch job" in _refusal(_export(client), 403, "refused")
+    assert gateway.posts == [] and gateway.recorded == []
+
+
+def test_another_plan_hash_is_refused(gateway, client):
+    detail = _refusal(_export(client, _body(plan_hash="d" * 64)), 403, "refused")
+    assert "isn't the plan that was approved" in detail
+    assert gateway.posts == [] and gateway.recorded == []
+
+
+def test_a_missing_plan_hash_is_refused(gateway, client):
+    body = _body()
+    del body["plan_hash"]
+    assert _refusal(_export(client, body), 422, "refused").startswith("plan_hash")
+    assert gateway.posts == []
+
+
+@pytest.mark.parametrize("moved", [{"repo": "tharpep/sazed"}, {"base": "dev"}])
+def test_a_row_the_mirror_moved_is_not_exported(gateway, client, monkeypatch, moved):
+    """The worker's mirror can rewrite the plan row; the approved job's repo and base still win."""
+
+    async def running_job_params(plan):
+        return {"plan_hash": PLAN_HASH, "repo": "tharpep/dispatch-sandbox", "base": "main"}
+
+    monkeypatch.setattr(dispatch, "running_job_params", running_job_params)
+    gateway.plans["temps-v1"] = _plan(**moved)
+    detail = _refusal(_export(client, _body(**moved)), 403, "refused")
+    assert "approved for tharpep/dispatch-sandbox at main" in detail
+    assert gateway.posts == []
+
+
+async def test_the_new_shape_carries_the_plans_job(monkeypatch):
+    async def plan_row(plan):
+        return _plan(updated_at="2026-11-19T12:00:00+00:00", job_id="job-1")
+
+    async def nothing(*args):
+        return []
+
+    async def no_steps(starts):
+        return {}
+
+    monkeypatch.setattr(dispatch, "plan_row", plan_row)
+    monkeypatch.setattr(dispatch, "rows_for", nothing)
+    monkeypatch.setattr(dispatch, "steps_since", no_steps)
+    assert (await dispatch_router.get_plan("temps-v1", v2=True))["job_id"] == "job-1"
+    assert "job_id" not in await dispatch_router.get_plan("temps-v1", v2=False)
 
 
 async def test_the_new_shape_carries_the_plans_pr(monkeypatch):

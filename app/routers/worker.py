@@ -6,13 +6,12 @@ can reach only these routes. Disabled (503) when WORKER_KEY is empty.
 
 import hmac
 import logging
-import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
@@ -21,8 +20,9 @@ from app.board import dispatch, mcp_servers
 from app.claude_usage import stats as usage_stats
 from app.claude_usage import store as usage_store
 from app.config import settings
-from app.jobs import change_result, ci_watch, service, store
+from app.jobs import change_result, ci_watch, dispatch_jobs, service, store
 from app.routers import agent_profiles
+from app.routers import dispatch as dispatch_routes
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +210,38 @@ async def finish(job_id: uuid.UUID, body: FinishRequest):
     return {"recorded": True}
 
 
+async def _require_running_job(plan: str) -> None:
+    """The worker key writes only to a plan whose approved job is running now."""
+    if await dispatch.running_job_params(plan) is None:
+        raise HTTPException(403, f"plan '{plan}' has no running dispatch job")
+
+
+@router.post("/dispatch/rows", status_code=201)
+async def dispatch_row(body: dispatch_routes.RowIn, background: BackgroundTasks):
+    await _require_running_job(body.plan)
+    return await dispatch_routes.post_row(body, background)
+
+
+@router.post("/dispatch/heartbeat")
+async def dispatch_heartbeat(body: dispatch_routes.HeartbeatIn):
+    await _require_running_job(body.plan)
+    return await dispatch_routes.post_heartbeat(body)
+
+
+@router.post("/dispatch/steps", status_code=201)
+async def dispatch_steps(body: dispatch_routes.StepsIn):
+    await _require_running_job(body.plan)
+    return await dispatch_routes.post_steps(body)
+
+
+@router.post("/dispatch/plans")
+async def dispatch_plan(body: dispatch_routes.PlanIn):
+    await _require_running_job(body.plan)
+    return await dispatch_routes.post_plan(body)
+
+
 class ExportIn(BaseModel):
+    plan_hash: str
     repo: str
     base: str = Field(..., min_length=1)
     base_sha: str = Field(..., pattern=r"^[0-9a-f]{40}$")
@@ -230,8 +261,6 @@ GATEWAY_MAX_FILES = 200
 GATEWAY_MAX_BASE64_CHARS = 5 * 1024 * 1024 * 4 // 3
 # pinned by test_plan_export.py::test_a_branch_whose_history_moved_is_refused_not_pr_closed
 _GATEWAY_PR_CLOSED = "not reopening it"
-# pinned by test_plan_export.py::test_a_plan_id_that_cant_form_a_branch_is_refused
-_PLAN_ID_RE = re.compile(r"^(?!.*\.\.)(?!.*\.$)(?!.*\.lock$)[A-Za-z0-9._-]{1,75}$")
 
 
 async def _refuse_a_ready_pr(repo: str, number: int | None) -> None:
@@ -247,8 +276,22 @@ async def _refuse_a_ready_pr(repo: str, number: int | None) -> None:
         )
 
 
+async def _require_approved_run(plan: str, plan_hash: str, repo: str, base: str) -> None:
+    """The stored row isn't enough: the worker's own mirror can rewrite its repo and base, so the
+    PR must go where the approved job says."""
+    params = await dispatch.running_job_params(plan)
+    if params is None:
+        raise ExportRefused(403, "refused", f"plan '{plan}' has no running dispatch job")
+    if params["plan_hash"] != plan_hash:
+        raise ExportRefused(403, "refused", f"plan '{plan}' isn't the plan that was approved")
+    if params["repo"].lower() != repo.lower() or params["base"] != base:
+        raise ExportRefused(
+            403, "refused", f"plan '{plan}' was approved for {params['repo']} at {params['base']}"
+        )
+
+
 async def _export(plan: str, body: ExportIn) -> dict[str, Any]:
-    if not _PLAN_ID_RE.match(plan):
+    if not dispatch_jobs.PLAN_ID_RE.match(plan):
         raise ExportRefused(422, "refused", f"plan id '{plan}' can't form a branch name")
     found = await dispatch.plan_row(plan)
     if found is None:
@@ -264,6 +307,7 @@ async def _export(plan: str, body: ExportIn) -> dict[str, Any]:
             "refused",
             f"plan '{plan}' is for {repo} at {found['base']}, not {sent} at {body.base}",
         )
+    await _require_approved_run(plan, body.plan_hash, repo, body.base)
     decision = policy.decide(policy.StartJob("claude", f"dispatch:{plan}", repo=repo))
     if decision.verdict != "allow":
         raise ExportRefused(422, "refused", decision.reason)

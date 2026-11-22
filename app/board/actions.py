@@ -39,7 +39,7 @@ def offered(job: dict[str, Any] | None) -> list[str]:
     if status == "needs_input":
         return ["answer", "stop"]
     if status == "running":
-        return ["steer", "stop"]
+        return ["stop"] if job.get("kind") == "dispatch" else ["steer", "stop"]
     if status == "queued":
         return ["stop"]
     if status == "paused" and meta.get("pause_reason") != "rate_limit":

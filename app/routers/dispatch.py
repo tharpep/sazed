@@ -4,13 +4,17 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from app.board import dispatch
 from app.dependencies import ShapeV2
+from app.jobs import dispatch_jobs, service
 from app.learning import service as learning
 
 router = APIRouter()
+
+# sazed-worker's plan.DEFAULT_PROFILE: what a task that names no profile runs as.
+DEFAULT_PROFILE = "implement"
 
 # Raw words; dispatch_state (migration 035) maps each onto the run states. Adding one here needs
 # a branch there (pinned by tests/test_dispatch_state.py).
@@ -76,6 +80,48 @@ class StepsIn(BaseModel):
     plan: str = Field(..., min_length=1, max_length=200)
     task: str = Field(..., min_length=1, max_length=200)
     steps: list[StepIn] = Field(..., min_length=1, max_length=200)
+
+
+def _task_metadata(raw: dict) -> dict:
+    """A plan.json task as the mirror sends it; a run's own mirror later adds its resolved model."""
+    known = {k: raw[k] for k in TaskIn.model_fields if raw.get(k) is not None}
+    return {"profile": DEFAULT_PROFILE} | known
+
+
+@router.post("/plans/{plan}/submit", status_code=201)
+async def submit_plan(plan: str, body: dispatch_jobs.Submission):
+    raw = body.plan.get("tasks")
+    try:
+        mirrored = PlanIn(
+            plan=plan,
+            repo=body.repo,
+            base=body.base,
+            host="",
+            tasks=[_task_metadata(t) for t in raw or [] if isinstance(t, dict)],
+            project=body.plan.get("project"),
+            board_plan=body.plan.get("board_plan"),
+        )
+        job = await dispatch_jobs.submit(
+            plan,
+            body,
+            [t.model_dump() for t in mirrored.tasks],
+            mirrored.project,
+            mirrored.board_plan,
+        )
+    except ValidationError as e:
+        first = e.errors()[0]
+        where = ".".join(str(p) for p in first["loc"])
+        raise HTTPException(422, f"plan {where}: {first['msg']}") from e
+    except dispatch_jobs.PlanBusy as e:
+        raise HTTPException(409, str(e)) from e
+    except service.JobError as e:
+        raise HTTPException(422, str(e)) from e
+    return {
+        "job_id": job["id"],
+        "plan": plan,
+        "plan_hash": job["params"]["plan_hash"],
+        "status": job["status"],
+    }
 
 
 @router.post("/plans")
