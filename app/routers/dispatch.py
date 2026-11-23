@@ -1,9 +1,11 @@
 """Dispatch plans, rows, steps and heartbeats from sazed-worker (migrations 024, 027, 034)."""
 
+import math
+import time
 from datetime import UTC, datetime
 from typing import Literal
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from app.board import dispatch
@@ -88,16 +90,30 @@ def _task_metadata(raw: dict) -> dict:
     return {"profile": DEFAULT_PROFILE} | known
 
 
+async def _submitted(request: Request) -> bytes:
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw += chunk
+        if len(raw) > dispatch_jobs.MAX_BODY:
+            raise service.JobError("the submitted plan is larger than 1 MiB")
+    return bytes(raw)
+
+
 @router.post("/plans/{plan}/submit", status_code=201)
-async def submit_plan(plan: str, body: dispatch_jobs.Submission):
-    raw = body.plan.get("tasks")
+async def submit_plan(plan: str, request: Request):
     try:
+        body = dispatch_jobs.parse(await _submitted(request))
+        raw = body.plan.get("tasks")
         mirrored = PlanIn(
             plan=plan,
             repo=body.repo,
             base=body.base,
             host="",
-            tasks=[_task_metadata(t) for t in raw or [] if isinstance(t, dict)],
+            tasks=[
+                _task_metadata(t)
+                for t in (raw if isinstance(raw, list) else [])
+                if isinstance(t, dict)
+            ],
             project=body.plan.get("project"),
             board_plan=body.plan.get("board_plan"),
         )
@@ -112,8 +128,10 @@ async def submit_plan(plan: str, body: dispatch_jobs.Submission):
         first = e.errors()[0]
         where = ".".join(str(p) for p in first["loc"])
         raise HTTPException(422, f"plan {where}: {first['msg']}") from e
-    except dispatch_jobs.PlanBusy as e:
+    except dispatch_jobs.PlanConflict as e:
         raise HTTPException(409, str(e)) from e
+    except service.GatewayUnreachable as e:
+        raise HTTPException(503, str(e)) from e
     except service.JobError as e:
         raise HTTPException(422, str(e)) from e
     return {
@@ -133,8 +151,24 @@ async def post_plan(body: PlanIn):
     return {"plan": body.plan, "tasks": len(tasks)}
 
 
+TS_AHEAD_S = 3600
+INT4 = 2**31
+
+
+def _refuse_out_of_range(name: str, value: float | None, most: float = math.inf) -> None:
+    # Not a Field constraint: FastAPI answers one with the input, and Infinity isn't JSON (500).
+    if value is not None and not (math.isfinite(value) and 0 <= value <= most):
+        raise HTTPException(422, f"{name} is out of range")
+
+
+def _check_ts(ts: float) -> None:
+    _refuse_out_of_range("ts", ts, time.time() + TS_AHEAD_S)
+
+
 @router.post("/rows", status_code=201)
 async def post_row(body: RowIn, background: BackgroundTasks):
+    _check_ts(body.ts)
+    _refuse_out_of_range("cost_usd", body.cost_usd)
     await dispatch.insert_row(**body.model_dump())
     background.add_task(learning.record_dispatch, body.plan, body.task, body.state, body.meta)
     return {"ok": True}
@@ -148,6 +182,10 @@ async def post_heartbeat(body: HeartbeatIn):
 
 @router.post("/steps", status_code=201)
 async def post_steps(body: StepsIn):
+    for step in body.steps:
+        _check_ts(step.ts)
+        if not -INT4 <= step.seq < INT4:
+            raise HTTPException(422, "seq is out of range")
     await dispatch.insert_steps(body.plan, body.task, [s.model_dump() for s in body.steps])
     return {"ok": True, "stored": len(body.steps)}
 

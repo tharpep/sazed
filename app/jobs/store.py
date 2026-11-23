@@ -2,6 +2,7 @@
 
 import json
 import uuid
+from collections.abc import Sequence
 from typing import Any
 
 from app.config import settings
@@ -106,8 +107,7 @@ async def list_jobs(status: str | None = None, limit: int = 50) -> list[dict[str
     rows = await get_pool().fetch(
         """
         SELECT id, kind, agent, model, profile, title, status, requested_by, parent_id,
-               created_at, started_at, finished_at, left(result, 300) AS result_preview, error,
-               CASE WHEN kind = 'dispatch' THEN params END AS params
+               created_at, started_at, finished_at, left(result, 300) AS result_preview, error
         FROM jobs
         WHERE ($1::text IS NULL OR status = $1)
         ORDER BY created_at DESC
@@ -116,11 +116,7 @@ async def list_jobs(status: str | None = None, limit: int = 50) -> list[dict[str
         status,
         limit,
     )
-    jobs = [_row(r) for r in rows]
-    for job in jobs:
-        if job["kind"] != "dispatch":
-            job.pop("params")
-    return jobs
+    return [_row(r) for r in rows]
 
 
 async def get_events(job_id: uuid.UUID, limit: int = 500) -> list[dict[str, Any]]:
@@ -271,7 +267,7 @@ async def due_rate_limit_resumes() -> list[dict[str, Any]]:
     return [_row(r) for r in rows]
 
 
-async def claim_next(agents: list[str]) -> dict[str, Any] | None:
+async def claim_next(agents: list[str], kinds: Sequence[str] = ()) -> dict[str, Any] | None:
     """Hand the next queued job for one of these agents to the worker: lowest priority number
     first, then oldest (one claimant wins). Keep this one query; per-kind exclusions (plans/11's
     one browse job at a time) belong in its WHERE clause."""
@@ -281,6 +277,8 @@ async def claim_next(agents: list[str]) -> dict[str, Any] | None:
         WHERE id = (
             SELECT id FROM jobs
             WHERE status = 'queued' AND agent = ANY($1::text[])
+              -- An old worker would run a dispatch plan as a plain Claude job.
+              AND (kind <> 'dispatch' OR kind = ANY($2::text[]))
               -- Hold Claude jobs while Pryce's plan limit is in effect (plans/10 P1.2).
               AND NOT (agent = 'claude' AND ({_PLAN_LIMIT_UNTIL}) IS NOT NULL)
             ORDER BY priority, created_at
@@ -290,6 +288,7 @@ async def claim_next(agents: list[str]) -> dict[str, Any] | None:
         RETURNING *
         """,
         agents,
+        list(kinds),
     )
     return _row(rec) if rec else None
 

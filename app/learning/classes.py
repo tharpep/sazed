@@ -96,6 +96,16 @@ CLASSES: dict[str, FailureClass] = {
 _QUOTA = re.compile(r"quota|usage limit", re.I)
 _PR_GONE = re.compile(r"closed|merged|not reopening|Reference does not exist", re.I)
 _META_STOPS = ("timed_out", "tool_cap", "rate_limit", "shutdown")
+# A dispatch job's tasks already carry their lessons, so the job itself has only these.
+# pinned by test_a_dispatch_jobs_stops_are_dispatch_failure_classs_stops
+DISPATCH_STOPS = {
+    "timeout": "timed_out",
+    "plan_limit": "rate_limit",
+    "tool_cap": "tool_cap",
+    "cancelled": "cancelled",
+    "budget": "budget",
+    "no_heartbeat": "worker_lost",
+}
 
 
 def classify(job: dict[str, Any]) -> str | None:
@@ -105,6 +115,9 @@ def classify(job: dict[str, Any]) -> str | None:
     meta = job.get("meta") or {}
     params = job.get("params") or {}
 
+    if job.get("kind") == "dispatch":
+        red = status in ("failed", "timed_out", "cancelled")
+        return DISPATCH_STOPS.get(str(meta.get("reason"))) if red else None
     if status == "cancelled":
         return "cancelled"
     for key in ("stop_reason", "pause_reason"):

@@ -133,12 +133,13 @@ async def test_home_summary_lists_running_and_waiting_dispatch_tasks(monkeypatch
     assert needs["job_id"] is None
 
 
-async def test_home_entries_carry_the_plans_job(monkeypatch):
+async def test_home_entries_never_carry_the_plans_job(monkeypatch):
+    """Home keys its rows by job_id, so two tasks of one plan would collide."""
     monkeypatch.setitem(PLAN, "job_id", "job-1")
-    rows = [_row("api", "running", 90), _row("ui", "waiting", 600)]
+    rows = [_row("api", "running", 90), _row("ui", "waiting", 600), _row("docs", "failed", 60)]
     result = await _summary_with(monkeypatch, rows)
-    assert result["working"][0]["job_id"] == "job-1"
-    assert result["needs"][0]["job_id"] == "job-1"
+    assert all("job_id" not in w for w in result["working"])
+    assert [n["job_id"] for n in result["needs"]] == [None, None]
 
 
 async def test_a_running_dispatch_item_carries_its_last_heartbeat(monkeypatch):

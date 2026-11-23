@@ -17,6 +17,7 @@ WORKER_KEY = "worker-key"
 CONSOLE_KEY = "console-key"
 BASE_SHA = "a" * 40
 PLAN_HASH = "c" * 64
+JOB_ID = "22222222-2222-2222-2222-222222222222"
 URL = "/worker/dispatch/plans/temps-v1/export"
 
 
@@ -65,7 +66,8 @@ class Gateway:
     def __init__(self):
         self.posts, self.looked_up, self.recorded = [], [], []
         self.repo_status = 200
-        self.running = True
+        self.running, self.asked = True, []
+        self.plan = {"tasks": [{"id": "api", "owns": ["**"]}]}
         self.pr = _Resp(
             201,
             {
@@ -105,11 +107,18 @@ def gateway(monkeypatch):
     async def plan_row(plan):
         return plans.get(plan)
 
-    async def running_job_params(plan):
+    async def approved_params(plan, job_id, last_words=False):
+        gw.asked.append((plan, job_id, last_words))
         row = plans.get(plan)
-        if row is None or not gw.running:
+        if row is None or job_id != JOB_ID or not gw.running:
             return None
-        return {"plan_hash": PLAN_HASH, "repo": service.full_repo(row["repo"]), "base": row["base"]}
+        return {
+            "plan_hash": PLAN_HASH,
+            "repo": service.full_repo(row["repo"]),
+            "base": row["base"],
+            "title": "Dispatch plan temps-v1",
+            "plan": gw.plan,
+        }
 
     async def record_export(plan, pr_url, pr_number, head_sha):
         gw.recorded.append((plan, pr_url, pr_number, head_sha))
@@ -122,7 +131,7 @@ def gateway(monkeypatch):
     monkeypatch.setattr(ci_watch, "get_client", lambda: gw)
     monkeypatch.setattr(settings, "code_task_excluded_repos", ["tharpep/Trusted-Model-Registry"])
     monkeypatch.setattr(dispatch, "plan_row", plan_row)
-    monkeypatch.setattr(dispatch, "running_job_params", running_job_params)
+    monkeypatch.setattr(dispatch, "approved_params", approved_params)
     monkeypatch.setattr(dispatch, "record_export", record_export)
     gw.plans = plans
     return gw
@@ -138,8 +147,9 @@ def client():
     return TestClient(app)
 
 
-def _export(client, body=None, url=URL, key=WORKER_KEY):
-    return client.post(url, json=body or _body(), headers={"X-Worker-Key": key})
+def _export(client, body=None, url=URL, key=WORKER_KEY, job=JOB_ID):
+    headers = {"X-Worker-Key": key, "X-Dispatch-Job": job}
+    return client.post(url, json=body or _body(), headers=headers)
 
 
 def test_the_worker_key_is_required_and_the_console_key_is_refused(gateway, client):
@@ -358,6 +368,49 @@ def test_another_plan_hash_is_refused(gateway, client):
     assert gateway.posts == [] and gateway.recorded == []
 
 
+def test_the_export_names_its_job(gateway, client):
+    _refusal(_export(client, job="33333333-3333-3333-3333-333333333333"), 403, "refused")
+    resp = client.post(URL, json=_body(), headers={"X-Worker-Key": WORKER_KEY})
+    _refusal(resp, 403, "refused")
+    assert gateway.posts == []
+    _export(client)
+    assert gateway.asked[-1] == ("temps-v1", JOB_ID, False)
+
+
+def test_a_job_cancelled_while_the_gateway_answered_opens_nothing(gateway, client, monkeypatch):
+    async def repo_info(repo):
+        gateway.running = False
+        return {}
+
+    monkeypatch.setattr(service, "repo_info", repo_info)
+    _refusal(_export(client), 403, "refused")
+    assert gateway.posts == [] and gateway.recorded == []
+
+
+def test_the_pr_title_is_the_approved_one(gateway, client):
+    assert _export(client, _body(title="Something else")).status_code == 200
+    assert gateway.posts[0]["json"]["title"] == "Dispatch plan temps-v1"
+    body = _body()
+    del body["title"]
+    assert _export(client, body).status_code == 200
+
+
+def test_a_file_outside_the_approved_plan_is_left_owns(gateway, client):
+    gateway.plan = {
+        "tasks": [{"id": "api", "owns": ["app/**/*.py"]}, {"id": "ui", "owns": ["ui.ts"]}],
+        "regen_outputs": ["gen/*.json"],
+        "interface_files": {"docs/[api].md": "x", "docs/*.txt": "y"},
+    }
+    inside = ["app/a.py", "app/x/b.py", "ui.ts", "gen/a.json", "docs/[api].md"]
+    assert _export(client, _body(files=dict.fromkeys(inside, "eA=="))).status_code == 200
+    assert len(gateway.posts) == 1
+    outside = ["app/a.ts", "gen/x/a.json", "docs/a.txt", "app/../b.py", "/app/a.py", "app//b.py"]
+    for path in outside:
+        detail = _refusal(_export(client, _body(files={path: None})), 403, "left_owns")
+        assert path in detail
+    assert len(gateway.posts) == 1
+
+
 def test_a_missing_plan_hash_is_refused(gateway, client):
     body = _body()
     del body["plan_hash"]
@@ -369,10 +422,10 @@ def test_a_missing_plan_hash_is_refused(gateway, client):
 def test_a_row_the_mirror_moved_is_not_exported(gateway, client, monkeypatch, moved):
     """The worker's mirror can rewrite the plan row; the approved job's repo and base still win."""
 
-    async def running_job_params(plan):
+    async def approved_params(plan, job_id, last_words=False):
         return {"plan_hash": PLAN_HASH, "repo": "tharpep/dispatch-sandbox", "base": "main"}
 
-    monkeypatch.setattr(dispatch, "running_job_params", running_job_params)
+    monkeypatch.setattr(dispatch, "approved_params", approved_params)
     gateway.plans["temps-v1"] = _plan(**moved)
     detail = _refusal(_export(client, _body(**moved)), 403, "refused")
     assert "approved for tharpep/dispatch-sandbox at main" in detail
@@ -380,8 +433,11 @@ def test_a_row_the_mirror_moved_is_not_exported(gateway, client, monkeypatch, mo
 
 
 async def test_the_new_shape_carries_the_plans_job(monkeypatch):
+    job = {"job_id": "job-1", "job_status": "queued", "job_created_at": "2026-11-22T09:00:00Z"}
+    exported = _plan(updated_at="2026-11-19T12:00:00+00:00") | job
+
     async def plan_row(plan):
-        return _plan(updated_at="2026-11-19T12:00:00+00:00", job_id="job-1")
+        return exported
 
     async def nothing(*args):
         return []
@@ -389,11 +445,19 @@ async def test_the_new_shape_carries_the_plans_job(monkeypatch):
     async def no_steps(starts):
         return {}
 
+    async def plan_rows():
+        return [exported, _plan(updated_at=exported["updated_at"])]
+
     monkeypatch.setattr(dispatch, "plan_row", plan_row)
+    monkeypatch.setattr(dispatch, "plan_rows", plan_rows)
     monkeypatch.setattr(dispatch, "rows_for", nothing)
     monkeypatch.setattr(dispatch, "steps_since", no_steps)
-    assert (await dispatch_router.get_plan("temps-v1", v2=True))["job_id"] == "job-1"
-    assert "job_id" not in await dispatch_router.get_plan("temps-v1", v2=False)
+    found = await dispatch_router.get_plan("temps-v1", v2=True)
+    assert {k: found[k] for k in job} == job
+    listed, by_hand = await dispatch_router.list_plans(v2=True)
+    assert {k: listed[k] for k in job} == job
+    assert {k: by_hand[k] for k in job} == dict.fromkeys(job)
+    assert not set(job) & set(await dispatch_router.get_plan("temps-v1", v2=False))
 
 
 async def test_the_new_shape_carries_the_plans_pr(monkeypatch):

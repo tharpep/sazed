@@ -34,12 +34,17 @@ def offered(job: dict[str, Any] | None) -> list[str]:
         return []
     status = job["status"]
     meta = job.get("meta") or {}
+    if job.get("kind") == "dispatch":
+        # No approve: the plan must be on screen, in the job sheet, for that click.
+        return {"needs_approval": ["decline"], "queued": ["stop"], "running": ["stop"]}.get(
+            status, []
+        )
     if status == "needs_approval":
         return ["approve", "decline"]
     if status == "needs_input":
         return ["answer", "stop"]
     if status == "running":
-        return ["stop"] if job.get("kind") == "dispatch" else ["steer", "stop"]
+        return ["steer", "stop"]
     if status == "queued":
         return ["stop"]
     if status == "paused" and meta.get("pause_reason") != "rate_limit":
