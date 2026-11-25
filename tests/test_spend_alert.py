@@ -39,8 +39,8 @@ def env(monkeypatch):
     pool = _FakePool([])
     messages = []
 
-    async def fake_notify(title, body, url=None, url_title=None):
-        messages.append((title, body, url))
+    async def fake_notify(kind, title, body, refs=None):
+        messages.append((title, body, kind))
 
     monkeypatch.setattr(spend_alert, "get_pool", lambda: pool)
     monkeypatch.setattr(spend_alert, "notify_simple", fake_notify)
@@ -92,10 +92,10 @@ async def test_alert_sent_once_per_month(env):
     assert await spend_alert.check_spend(NOW) is True
     assert await spend_alert.check_spend(NOW) is False
     assert len(messages) == 1
-    title, body, url = messages[0]
+    title, body, kind = messages[0]
     assert "$20.00" in title
     assert "projected" in body and "think $10.00" in body and "claude-opus-5-5 $10.00" in body
-    assert url.endswith("/?page=activity")
+    assert kind == "spend_warning"
 
 
 async def test_new_month_alerts_again(env):

@@ -153,7 +153,7 @@ async def check_spend(now: datetime | None = None) -> bool:
     if not claimed:
         return False
     title, body = format_alert(spend, limit, max(claimed), now, start, end)
-    await notify_simple(title, body, f"{settings.console_url}/?page=activity", "Activity")
+    await notify_simple("spend_warning", title, body)
     logger.info("Spend alert sent: %s", title)
     return True
 

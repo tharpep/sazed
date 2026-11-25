@@ -122,10 +122,10 @@ async def _check(job: dict[str, Any]) -> None:
     if state == "success":
         await _settle(job, {"ci_state": "success", "ci_runs": runs})
         await service.notify_simple(
+            "merge_call",
             f"PR #{meta.get('pr_number')} ready · {params['repo'].split('/')[-1]}",
             f"{job['title']}. CI passed.",
-            meta.get("pr_url"),
-            f"Review PR #{meta.get('pr_number')} on GitHub",
+            await service.job_refs(job),
         )
         return
 
@@ -134,10 +134,10 @@ async def _check(job: dict[str, Any]) -> None:
         await _settle(job, {"ci_state": "failure", "ci_runs": runs})
         await _record_failure(job["id"])
         await service.notify_simple(
+            "run_failed",
             f"PR #{meta.get('pr_number')} needs you",
             f"{job['title']}. CI still fails after {MAX_FIX_ATTEMPTS} automatic fixes.",
-            meta.get("pr_url"),
-            f"Open PR #{meta.get('pr_number')} on GitHub",
+            await service.job_refs(job),
         )
         return
     try:

@@ -4,7 +4,6 @@ lesson repeats."""
 import logging
 from typing import Any
 
-from app.config import settings
 from app.learning import store
 from app.learning.classes import CLASSES, classify
 
@@ -118,10 +117,10 @@ async def maybe_propose(cls: str) -> dict[str, Any] | None:
     from app.jobs.service import notify_simple  # lazy: the jobs service imports learning
 
     await notify_simple(
+        "routine",
         f"Guard proposed: {spec.label}",
         f"{cls} hit {len(hits)} times; the guard item is in your board inbox.",
-        settings.console_url,
-        "Sazed",
+        {"card": str(item["id"])},
     )
     return item
 

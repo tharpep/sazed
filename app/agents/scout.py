@@ -248,11 +248,9 @@ def _summarize(ctx: ScoutContext) -> Outcome:
                      f"{item.get('impact') or '?'} impact): {item['summary'][:300]}")
     noun = "idea" if len(ctx.added) == 1 else "ideas"
     gist = f"{len(ctx.added)} new {noun}: " + "; ".join(i["title"] for i in ctx.added)
-    # One idea opens straight to it; several open the Backlog list.
-    link = f"{settings.console_url}/?page=backlog"
-    if len(ctx.added) == 1:
-        link += f"&item={ctx.added[0]['id']}"
-    return Outcome("success", "\n".join(lines), gist, link)
+    # One idea opens straight to its card; several open the automation's run.
+    refs = {"card": str(ctx.added[0]["id"])} if len(ctx.added) == 1 else None
+    return Outcome("success", "\n".join(lines), gist, refs)
 
 
 SPEC = AgentSpec(

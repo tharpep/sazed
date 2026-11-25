@@ -2,10 +2,10 @@
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from unittest.mock import ANY
 
 import pytest
 
-from app.config import settings
 from app.jobs import service as jobs_service
 from app.learning import service as learning
 from app.learning import store
@@ -127,8 +127,8 @@ def db(monkeypatch):
     async def unset_settled():
         return state["unset"]
 
-    async def notify(title, body, url=None, url_title=None):
-        state["notified"].append((title, url))
+    async def notify(kind, title, body, refs=None):
+        state["notified"].append((kind, title, refs))
 
     monkeypatch.setattr(store, "set_class", set_class)
     monkeypatch.setattr(store, "hits_since", hits_since)
@@ -186,7 +186,7 @@ async def test_the_second_hit_opens_one_guard_item_and_notifies(db):
     for heading in ("Goal:", "Today:", "Change:", "First:", "Done when:"):
         assert heading in item["summary"]
     assert "boom 2" in item["summary"]
-    assert db["notified"] == [("Guard proposed: Agent error", settings.console_url)]
+    assert db["notified"] == [("routine", "Guard proposed: Agent error", {"card": ANY})]
 
 
 @pytest.mark.parametrize("status", ["new", "shortlisted", "approved"])
