@@ -43,6 +43,7 @@ from app.routers import (
     kb,
     learning,
     memory,
+    notes,
     procedures,
     sessions,
     think,
@@ -160,6 +161,9 @@ app.include_router(
 )
 app.include_router(
     journal.router, prefix="/journal", tags=["journal"], dependencies=[Depends(verify_api_key)]
+)
+app.include_router(
+    notes.router, prefix="/notes", tags=["notes"], dependencies=[Depends(verify_api_key)]
 )
 app.include_router(
     think.router, prefix="/think", tags=["think"], dependencies=[Depends(verify_api_key)]
