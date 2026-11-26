@@ -5,12 +5,19 @@ from typing import Any
 
 from app.backlog import service as backlog
 from app.backlog import store as backlog_store
+from app.board import autolink, events
 from app.config import settings
+from app.db import get_pool
 from app.intake import policy, store
 from app.jobs import service as jobs
 from app.jobs import store as job_store
 
 _CONTINUABLE = ("succeeded", "needs_input", "cancelled", "timed_out", "paused")
+
+# A merged close links too (in route_github), so a PR opened before this shipped still closes.
+LINKING_ACTIONS = ("opened", "reopened", "edited", "ready_for_review", "synchronize")
+# A stranger's PR on a public repo must not move a card; dispatch PRs come from the own bot.
+LINKING_SENDERS = ("person", "own_bot")
 
 
 async def _facts(ev: policy.GithubEvent) -> policy.Facts:
@@ -71,7 +78,50 @@ async def _act(ev: policy.GithubEvent, action: str, facts: policy.Facts) -> dict
     return {"item_id": found["id"], "duplicate": duplicate is not None}
 
 
+def _links(ev: policy.GithubEvent) -> bool:
+    if ev.event != "pull_request" or not ev.is_pr:
+        return False
+    if policy.sender_kind("github", ev.sender) not in LINKING_SENDERS:
+        return False
+    return ev.action in LINKING_ACTIONS or (ev.action == "closed" and ev.merged)
+
+
+async def _auto_link(ev: policy.GithubEvent) -> autolink.Outcome:
+    """Link the PR to the cards it names, writing one history row per link or ambiguous card.
+    A PR that names nothing costs no query at all."""
+    refs = autolink.card_refs(ev.body)
+    short_id = autolink.branch_id(ev.branch)
+    branch = autolink.matchable_branch(ev.branch)
+    if not (refs or short_id or branch):
+        return autolink.Outcome()
+    by_ref = await backlog_store.cards_by_id_prefix(refs)
+    by_short = await backlog_store.cards_by_id_prefix([short_id]) if short_id else []
+    by_branch = await backlog_store.cards_by_branch(branch) if branch else []
+    out = autolink.choose(ev.repo, ev.number, refs, by_ref, short_id, by_short, by_branch)
+    if not (out.link or out.ambiguous):
+        return out
+    linked = []
+    async with get_pool().acquire() as conn, conn.transaction():
+        for item_id in out.link:
+            if await backlog_store.link_pr(conn, item_id, ev.repo, ev.number, branch):
+                linked.append(item_id)
+                detail = {
+                    "repo": ev.repo,
+                    "number": ev.number,
+                    "branch": ev.branch,
+                    "rule": out.rule,
+                    "sender": ev.sender,
+                }
+                await events.record(conn, item_id, "pr_linked", events.SERVER_ACTOR, detail)
+        for group in out.ambiguous:
+            for item_id in group:
+                await events.record_ambiguous(conn, item_id, ev.repo, ev.number, group)
+    out.link = linked
+    return out
+
+
 async def route_github(ev: policy.GithubEvent) -> dict[str, Any]:
+    link = await _auto_link(ev) if _links(ev) else autolink.Outcome()
     closed = []
     if ev.event == "pull_request" and ev.action == "closed" and ev.merged:
         closed = await backlog_store.close_for_merged_pr(ev.repo, ev.number)
@@ -87,8 +137,13 @@ async def route_github(ev: policy.GithubEvent) -> dict[str, Any]:
             verdict, reason = "ignore", f"{decision.action} refused: {e}"
         if refs.get("duplicate"):
             reason = "already in the backlog; linked the existing card"
-    if closed and verdict == "ignore" and decision.action is None:
-        verdict, reason = "accept", f"merged PR closed {len(closed)} linked card(s)"
+    notes = link.notes()
+    if closed:
+        notes.append(f"merged PR closed {len(closed)} linked card(s)")
+    if (link.link or closed) and verdict == "ignore" and decision.action is None:
+        verdict, reason = "accept", "; ".join(notes)
+    elif notes:
+        reason = "; ".join([reason, *notes])
     row = await store.record(
         source="github",
         event=ev.event,
@@ -99,7 +154,7 @@ async def route_github(ev: policy.GithubEvent) -> dict[str, Any]:
         reason=reason,
         action_taken=decision.action if verdict == "accept" else None,
         job_id=refs.get("job_id"),
-        item_id=refs.get("item_id") or (closed[0] if closed else None),
+        item_id=refs.get("item_id") or next(iter(closed or link.link), None),
     )
     return {
         "decision": verdict,

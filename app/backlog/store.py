@@ -224,6 +224,54 @@ async def set_plan_state(conn: asyncpg.Connection, item_id: uuid.UUID, **fields:
     )
 
 
+_LINK_FIELDS = "SELECT id, status, repos, session_branch, pr_repo, pr_number FROM backlog_items"
+# A prefix or a branch shared by more cards than this is ambiguous long before the cap.
+_LINK_LOOKUP_LIMIT = 20
+
+
+async def cards_by_id_prefix(prefixes: list[str]) -> list[dict[str, Any]]:
+    """Cards whose id starts with any of these lowercase hex prefixes (full uuids included)."""
+    if not prefixes:
+        return []
+    rows = await get_pool().fetch(
+        _LINK_FIELDS + " WHERE id::text LIKE ANY($1::text[]) LIMIT $2",
+        [f"{p}%" for p in prefixes],
+        _LINK_LOOKUP_LIMIT * len(prefixes),
+    )
+    return [dict(r) for r in rows]
+
+
+async def cards_by_branch(branch: str) -> list[dict[str, Any]]:
+    rows = await get_pool().fetch(
+        _LINK_FIELDS + " WHERE session_branch = $1 ORDER BY created_at LIMIT $2",
+        branch,
+        _LINK_LOOKUP_LIMIT,
+    )
+    return [dict(r) for r in rows]
+
+
+async def link_pr(
+    conn: asyncpg.Connection, item_id: uuid.UUID, repo: str, number: int, branch: str | None
+) -> bool:
+    """Put an open card on this PR unless it already holds one, keeping a branch it has. The
+    condition makes two racing events link it once: the loser updates nothing."""
+    row = await conn.fetchrow(
+        """
+        UPDATE backlog_items
+        SET pr_repo = $2, pr_number = $3, session_branch = COALESCE(session_branch, $4),
+            updated_at = NOW()
+        WHERE id = $1 AND pr_number IS NULL AND status = ANY($5::text[])
+        RETURNING id
+        """,
+        item_id,
+        repo,
+        number,
+        branch,
+        list(OPEN),
+    )
+    return row is not None
+
+
 async def close_for_merged_pr(repo: str, number: int) -> list[uuid.UUID]:
     """Close the open cards linked to a merged PR. Job-driven cards are approved, so not open."""
     rows = await get_pool().fetch(

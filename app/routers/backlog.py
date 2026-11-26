@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
 from app.backlog import service, store
-from app.board import events, plans, projects
+from app.board import autolink, events, plans, projects
 from app.board import service as board_service
 from app.jobs.service import JobError
 
@@ -169,10 +169,13 @@ async def create_item(body: ItemCreate):
         )
     if body.rank is not None:
         item = await store.move_item(item["id"], body.rank)
+    out = jsonable_encoder(item) | {
+        "suggested_branch": autolink.suggested_branch(item["id"], item["title"])
+    }
     parked = None if body.allow_similar else await store.find_duplicate(body.title, ("parked",))
     if parked:
-        return jsonable_encoder(item) | {"similar_parked": jsonable_encoder(parked)}
-    return item
+        return out | {"similar_parked": jsonable_encoder(parked)}
+    return out
 
 
 @router.patch("/{item_id}")
