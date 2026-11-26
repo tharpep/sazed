@@ -97,6 +97,11 @@ def test_parse_bad_topic(topic):
         parse_filing(answer(topic=topic), TOPICS)
 
 
+def test_parse_topic_with_slash_is_refused():
+    with pytest.raises(FilerError, match="topic"):
+        parse_filing(answer(topic="Home/lab"), TOPICS)
+
+
 @pytest.mark.parametrize("raw", ["[1]", "nope", '"x"'])
 def test_parse_non_object(raw):
     with pytest.raises(FilerError):
