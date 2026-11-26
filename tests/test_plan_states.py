@@ -244,6 +244,50 @@ def test_the_stale_rule_compares_the_approved_link_then_the_section_text():
     assert events.stale(approved | {"plan_approved_at": None, "plan_id": 2}) is False
 
 
+async def test_each_plan_body_is_fetched_once_per_read():
+    plan = uuid.UUID(int=7)
+    edited = BODY.replace("Do it.", "Do more.")
+
+    def row(n, section, approved_version):
+        return {
+            "id": uuid.UUID(int=100 + n),
+            "status": "new",
+            "rank": n,
+            "workstream_id": None,
+            "plan_id": plan,
+            "plan_section": section,
+            "plan_approved_at": "t",
+            "plan_approved_by": "pryce",
+            "plan_approved_plan_id": plan,
+            "plan_approved_section": section,
+            "plan_approved_version": approved_version,
+            "started_at": None,
+            "started_by": None,
+            "plan_slug": "pl",
+            "plan_state": "active",
+            "plan_current_version": 3,
+            "approved_plan_slug": "pl",
+        }
+
+    class Db:
+        def __init__(self):
+            self.body_queries = []
+
+        async def fetch(self, sql, *args):
+            if "FROM backlog_items" in sql:
+                return [row(n, "build" if n % 2 else "other", 1 + n % 2) for n in range(40)]
+            self.body_queries.append(list(zip(*args, strict=True)))
+            versions = {1: BODY, 2: BODY, 3: edited}
+            return [{"plan_id": p, "version": v, "body": versions[v]} for p, v in zip(*args)]
+
+    db = Db()
+    found = await events.states(db)
+    assert len(db.body_queries) == 1
+    assert sorted(db.body_queries[0]) == [(plan, 1), (plan, 2), (plan, 3)]
+    changed = {s["plan_section"]: s["plan_changed"] for s in found.values()}
+    assert changed == {"build": True, "other": False}
+
+
 async def test_an_agent_cannot_approve_an_inbox_card(card):
     card.rank = None
     with pytest.raises(service.BacklogError, match="inbox"):
@@ -348,6 +392,8 @@ def test_pryce_and_agents_are_actors(by):
         "agent:Orch",
         "agent:x:y",
         "agent:x​",
+        "agent:-",
+        "agent:.orch",
         "agent:" + "a" * 65,
     ],
 )

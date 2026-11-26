@@ -16,7 +16,7 @@ from app.db import get_pool
 
 OWNER = "pryce"
 # ASCII only after "agent:", so a lookalike name (Cyrillic, accented, fullwidth) cannot pass.
-ACTOR = r"^(pryce|agent:[a-z0-9._-]{1,64})$"
+ACTOR = r"^(pryce|agent:[a-z0-9][a-z0-9._-]{0,63})$"
 
 KINDS = ("plan_approved", "started", "approval_withdrawn", "start_withdrawn")
 
@@ -25,28 +25,61 @@ CLOSED_PLAN_STATES = ("done", "superseded")
 
 Db = asyncpg.Connection | asyncpg.Pool
 
-# The two plan bodies are joined only for an approval that could have gone stale by an edit: the
-# card still on the plan and section it approved, and that plan saved since. Every other row
-# carries nulls, so a board read moves no plan text it ignores.
 _STATES = """
     SELECT b.id, b.status, b.rank, b.workstream_id, b.plan_id, b.plan_section,
            b.plan_approved_at, b.plan_approved_by, b.plan_approved_plan_id,
            b.plan_approved_section, b.plan_approved_version, b.started_at, b.started_by,
            p.slug AS plan_slug, p.state AS plan_state, p.current_version AS plan_current_version,
-           ap.slug AS approved_plan_slug,
-           pa.body AS approved_body, pc.body AS current_body
+           ap.slug AS approved_plan_slug
     FROM backlog_items b
     LEFT JOIN plans p ON p.id = b.plan_id
     LEFT JOIN plans ap ON ap.id = b.plan_approved_plan_id
-    LEFT JOIN plan_versions pa
-        ON pa.plan_id = b.plan_id AND pa.version = b.plan_approved_version
-       AND b.plan_approved_at IS NOT NULL AND b.plan_section IS NOT NULL
-       AND b.plan_approved_plan_id = b.plan_id AND b.plan_approved_section = b.plan_section
-       AND b.plan_approved_version < p.current_version
-    LEFT JOIN plan_versions pc
-        ON pa.plan_id IS NOT NULL AND pc.plan_id = b.plan_id AND pc.version = p.current_version
     WHERE ($1::uuid IS NULL AND b.status <> ALL($2::text[])) OR b.id = $1
 """
+
+# /board/command polls every few seconds, so each plan version's body is fetched once per read,
+# however many cards approved it (pinned by test_each_plan_body_is_fetched_once_per_read).
+_BODIES = """
+    SELECT v.plan_id, v.version, v.body
+    FROM plan_versions v
+    JOIN unnest($1::uuid[], $2::int[]) AS w (plan_id, version)
+      ON v.plan_id = w.plan_id AND v.version = w.version
+"""
+
+Body = tuple[uuid.UUID, int]
+
+
+def _edit_check(row: dict[str, Any]) -> tuple[Body, Body] | None:
+    """The approved and current bodies to compare, for an approval still on the plan and section
+    it approved whose plan was saved since; None when no text can have changed it."""
+    if not (row["plan_approved_at"] and row["plan_section"] and row["plan_current_version"]):
+        return None
+    if (row["plan_approved_plan_id"], row["plan_approved_section"]) != (
+        row["plan_id"],
+        row["plan_section"],
+    ):
+        return None
+    if row["plan_approved_version"] is None:
+        return None
+    if row["plan_approved_version"] >= row["plan_current_version"]:
+        return None
+    return (row["plan_id"], row["plan_approved_version"]), (
+        row["plan_id"],
+        row["plan_current_version"],
+    )
+
+
+async def _with_bodies(db: Db, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    checks = [_edit_check(r) for r in rows]
+    wanted = sorted({key for pair in checks if pair for key in pair})
+    bodies: dict[Body, str] = {}
+    if wanted:
+        fetched = await db.fetch(_BODIES, [k[0] for k in wanted], [k[1] for k in wanted])
+        bodies = {(r["plan_id"], r["version"]): r["body"] for r in fetched}
+    return [
+        r | ({"approved_body": bodies.get(c[0]), "current_body": bodies.get(c[1])} if c else {})
+        for r, c in zip(rows, checks, strict=True)
+    ]
 
 
 def changed_since(approved_body: str | None, current_body: str | None, section: str | None) -> bool:
@@ -97,13 +130,18 @@ def _state(row: dict[str, Any]) -> dict[str, Any]:
 
 async def states(db: Db | None = None) -> dict[uuid.UUID, dict[str, Any]]:
     """Every card's plan state, keyed by item id."""
-    rows = await (db or get_pool()).fetch(_STATES, None, list(OFF_BOARD))
-    return {r["id"]: _state(dict(r)) for r in rows}
+    db = db or get_pool()
+    rows = [dict(r) for r in await db.fetch(_STATES, None, list(OFF_BOARD))]
+    return {r["id"]: _state(r) for r in await _with_bodies(db, rows)}
 
 
 async def state(item_id: uuid.UUID, db: Db | None = None) -> dict[str, Any] | None:
-    row = await (db or get_pool()).fetchrow(_STATES, item_id, list(OFF_BOARD))
-    return _state(dict(row)) if row else None
+    db = db or get_pool()
+    row = await db.fetchrow(_STATES, item_id, list(OFF_BOARD))
+    if row is None:
+        return None
+    [found] = await _with_bodies(db, [dict(row)])
+    return _state(found)
 
 
 def approval_block(item: dict[str, Any]) -> dict[str, Any] | None:
