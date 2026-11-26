@@ -57,6 +57,19 @@ def test_text_that_only_looks_like_a_card_line_names_nothing(body):
     assert autolink.card_refs(body) == []
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Summary\r\nCard: 3fa9c1b2\r\nmore\r\n",
+        "Summary\nother\r\nCard: 3fa9c1b2\n",
+        "Summary\r\nCard: 3fa9c1b2  \r\n",
+        "Card: 3fa9c1b2\r",
+    ],
+)
+def test_a_card_line_in_a_crlf_body_names_the_card(body):
+    assert autolink.card_refs(body) == ["3fa9c1b2"]
+
+
 def test_card_lines_are_deduped_and_capped():
     lines = [f"Card: {i:08x}" for i in range(15)] + ["Card: 00000000"]
     refs = autolink.card_refs("\n".join(lines))
@@ -125,6 +138,17 @@ def test_two_open_cards_on_the_branch_are_ambiguous():
 def test_a_card_already_on_this_pr_is_a_no_op():
     out = _choose(by_branch=[_card(A, pr_repo="tharpep/sazed", pr_number=12), _card(B)])
     assert (out.link, out.already, out.notes()) == ([], [A], [])
+
+
+def test_a_closed_card_on_this_pr_does_not_block_its_replacement():
+    dismissed = _card(A, status="dismissed", pr_repo="tharpep/sazed", pr_number=12)
+    out = _choose(by_branch=[dismissed, _card(B)])
+    assert (out.link, out.already) == ([B], [])
+
+
+def test_a_done_card_on_this_pr_named_again_is_silent():
+    out = _choose([str(A)], [_card(status="done", pr_repo="tharpep/sazed", pr_number=12)])
+    assert (out.link, out.notes()) == ([], [])
 
 
 def test_a_card_on_another_pr_is_skipped_and_named():

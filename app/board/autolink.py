@@ -27,7 +27,7 @@ UNMATCHED_BRANCHES = frozenset({"main", "master"})
 
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _CARD_LINE = re.compile(
-    rf"^[ \t]*card[ \t]*:[ \t]*(?:item:)?(?P<ref>{_UUID}|[0-9a-f]{{8}})[ \t]*$",
+    rf"^[ \t]*card[ \t]*:[ \t]*(?:item:)?(?P<ref>{_UUID}|[0-9a-f]{{8}})[ \t]*\r?$",
     re.IGNORECASE | re.MULTILINE,
 )
 _BRANCH_ID = re.compile(r"^(?P<id>[0-9a-f]{8})(?:-|$)", re.IGNORECASE)
@@ -116,10 +116,12 @@ def _resolve(
 ) -> None:
     """One name's matching cards into the outcome. A card already on this PR settles it; two or
     more open unlinked cards are ambiguous. Closed cards are reported only for explicit names."""
-    if any(_on_pr(c, repo, number) for c in found):
-        out.already += [c["id"] for c in found if _on_pr(c, repo, number)]
-        return
     open_cards = [c for c in found if c["status"] in OPEN]
+    # A closed card left on this PR must not block its replacement (pinned by
+    # test_a_closed_card_on_this_pr_does_not_block_its_replacement).
+    if any(_on_pr(c, repo, number) for c in open_cards):
+        out.already += [c["id"] for c in open_cards if _on_pr(c, repo, number)]
+        return
     free = [c for c in open_cards if c.get("pr_number") is None]
     if len(free) >= 2:
         out.ambiguous.append(sorted((c["id"] for c in free), key=str))
@@ -129,7 +131,7 @@ def _resolve(
         return
     for c in open_cards:
         out.skipped.append((c["id"], f"already on {c['pr_repo']}#{c['pr_number']}"))
-    if explicit and len(found) == 1 and not open_cards:
+    if explicit and len(found) == 1 and not open_cards and not _on_pr(found[0], repo, number):
         out.skipped.append((found[0]["id"], f"is {found[0]['status']}"))
 
 
