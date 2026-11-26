@@ -2,8 +2,10 @@ import anthropic
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.notes.client import NotesError
 from app.notes.filer import file_text
 from app.notes.filing import FilerError
+from app.notes.service import file_note, sweep_once
 
 router = APIRouter()
 
@@ -11,6 +13,10 @@ router = APIRouter()
 class TryBody(BaseModel):
     text: str = Field(min_length=1, max_length=100_000)
     topics: dict[str, int] = Field(default_factory=dict, max_length=200)
+
+
+class FileBody(BaseModel):
+    path: str = Field(min_length=1, max_length=300)
 
 
 class UsageOut(BaseModel):
@@ -57,3 +63,29 @@ async def try_filer(body: TryBody) -> TryOut:
             else None
         ),
     )
+
+
+@router.post("/file")
+async def file_one(body: FileBody) -> dict:
+    try:
+        return await file_note(body.path)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except NotesError as exc:
+        raise HTTPException(exc.status, exc.detail) from exc
+    except FilerError as exc:
+        raise HTTPException(502, f"The filer's answer could not be read: {exc}") from exc
+    except anthropic.APIError as exc:
+        raise HTTPException(502, "The model call failed") from exc
+
+
+@router.post("/sweep")
+async def sweep() -> dict:
+    try:
+        return await sweep_once()
+    except NotesError as exc:
+        raise HTTPException(exc.status, exc.detail) from exc
+    except FilerError as exc:
+        raise HTTPException(502, f"The filer's answer could not be read: {exc}") from exc
+    except anthropic.APIError as exc:
+        raise HTTPException(502, "The model call failed") from exc

@@ -21,6 +21,7 @@ from app import spend_alert
 from app.http_client import shutdown as http_client_shutdown
 from app.http_client import startup as http_client_startup
 from app.jobs import ci_watch, reaper
+from app.notes import sweep as notes_sweep
 from app.routers import (
     activity,
     agent_profiles,
@@ -95,6 +96,7 @@ async def lifespan(app: FastAPI):
     await ci_watch.start()
     await reaper.start()
     await idle_sessions.start()
+    await notes_sweep.start()
     await spend_alert.start()
     await activity_live.start()
     await activity_feed.start()
@@ -107,6 +109,7 @@ async def lifespan(app: FastAPI):
     await ci_watch.stop()
     await reaper.stop()
     await idle_sessions.stop()
+    await notes_sweep.stop()
     await spend_alert.stop()
     await http_client_shutdown()
     await close_pool()
