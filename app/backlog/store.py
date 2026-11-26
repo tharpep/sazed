@@ -150,9 +150,27 @@ async def create_item(
 
 
 async def update_item(item_id: uuid.UUID, **fields: Any) -> dict[str, Any] | None:
-    allowed = {"status", "note", "rank", "job_id", "type", "title", "summary", "why", "repos",
-               "effort", "impact", "workstream_id", "plan_id", "plan_section", "plan_version",
-               "session_label", "session_branch", "pr_repo", "pr_number"}
+    allowed = {
+        "status",
+        "note",
+        "rank",
+        "job_id",
+        "type",
+        "title",
+        "summary",
+        "why",
+        "repos",
+        "effort",
+        "impact",
+        "workstream_id",
+        "plan_id",
+        "plan_section",
+        "plan_version",
+        "session_label",
+        "session_branch",
+        "pr_repo",
+        "pr_number",
+    }
     sets, args = [], []
     for key, value in fields.items():
         if key not in allowed:
@@ -187,9 +205,7 @@ PLAN_STATE_COLUMNS = (
 async def lock_status(conn: asyncpg.Connection, item_id: uuid.UUID) -> str | None:
     """The item's status, with its row locked until the transaction ends, so two approvals or
     starts on one card cannot both record."""
-    return await conn.fetchval(
-        "SELECT status FROM backlog_items WHERE id = $1 FOR UPDATE", item_id
-    )
+    return await conn.fetchval("SELECT status FROM backlog_items WHERE id = $1 FOR UPDATE", item_id)
 
 
 async def set_plan_state(conn: asyncpg.Connection, item_id: uuid.UUID, **fields: Any) -> None:
