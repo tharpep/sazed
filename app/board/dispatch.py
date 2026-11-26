@@ -1,14 +1,18 @@
 """Dispatch plans and their board rows, posted by sazed-worker's dispatch."""
 
 import json
+import uuid
 from datetime import datetime
 from typing import Any
 
 from app.board import service
+from app.config import settings
 from app.db import get_pool
 
 NEEDS_STATES = ("waiting", "failed", "conflict", "blocked", "timed_out")
 NEEDS_WINDOW_S = 24 * 3600
+LAST_WORDS_S = 300
+LAST_WORDS = ("failed", "timed_out", "blocked")
 STEP_TEXT_MAX = 300
 PLAN_STEPS_MAX = 80
 _NEXT = {
@@ -49,6 +53,65 @@ async def upsert_plan(
         project,
         board_plan,
     )
+
+
+async def link_job(
+    conn: Any,
+    plan: str,
+    repo: str,
+    base: str,
+    tasks: list[dict],
+    project: str | None,
+    board_plan: str | None,
+    job_id: Any,
+) -> None:
+    """The only writer of job_id; upsert_plan, which every mirror calls, leaves it alone. host stays
+    empty until a run mirrors the plan."""
+    await conn.execute(
+        """
+        INSERT INTO dispatch_plans (plan, repo, base, host, tasks, project, board_plan, job_id)
+        VALUES ($1, $2, $3, '', $4::jsonb, $5, $6, $7)
+        ON CONFLICT (plan) DO UPDATE
+        SET repo = $2, base = $3, tasks = $4::jsonb, project = $5, board_plan = $6, job_id = $7,
+            updated_at = NOW()
+        """,
+        plan,
+        repo,
+        base,
+        json.dumps(tasks),
+        project,
+        board_plan,
+        job_id,
+    )
+
+
+async def approved_params(
+    plan: str, job_id: str | None, last_words: bool = False
+) -> dict[str, Any] | None:
+    """The approved params of the plan's dispatch job, when job_id names that job and it is running
+    inside its wall clock (or, for last_words, ended at most LAST_WORDS_S ago); else None."""
+    try:
+        wanted = uuid.UUID(job_id or "")
+    except ValueError:
+        return None
+    rec = await get_pool().fetchrow(
+        """
+        SELECT j.params
+        FROM dispatch_plans p
+        JOIN jobs j ON j.id = p.job_id
+        WHERE p.plan = $1 AND j.id = $2 AND j.kind = 'dispatch'
+          AND ((j.status = 'running' AND NOW() <= j.started_at + make_interval(
+                    secs => (j.params->>'timeout_s')::int + $3::int))
+               OR ($4::boolean AND j.status <> 'running' AND j.started_at IS NOT NULL
+                   AND j.finished_at > NOW() - make_interval(secs => $5::int)))
+        """,
+        plan,
+        wanted,
+        settings.job_heartbeat_grace_s,
+        last_words,
+        LAST_WORDS_S,
+    )
+    return _json(rec["params"]) if rec else None
 
 
 async def insert_row(
@@ -224,23 +287,24 @@ def _plan(rec) -> dict[str, Any]:
 
 
 _PLAN_COLUMNS = (
-    "plan, repo, base, host, tasks, project, board_plan, updated_at, "
-    "pr_url, pr_number, pr_head_sha, exported_at"
+    "p.plan, p.repo, p.base, p.host, p.tasks, p.project, p.board_plan, p.updated_at, "
+    "p.pr_url, p.pr_number, p.pr_head_sha, p.exported_at, "
+    "p.job_id, j.status AS job_status, j.created_at AS job_created_at"
 )
+_PLANS = "dispatch_plans p LEFT JOIN jobs j ON j.id = p.job_id"
 PR_FIELDS = ("pr_url", "pr_number", "pr_head_sha", "exported_at")
+JOB_FIELDS = ("job_id", "job_status", "job_created_at")
 
 
 async def plan_rows() -> list[dict[str, Any]]:
     rows = await get_pool().fetch(
-        f"SELECT {_PLAN_COLUMNS} FROM dispatch_plans ORDER BY updated_at DESC"
+        f"SELECT {_PLAN_COLUMNS} FROM {_PLANS} ORDER BY p.updated_at DESC"
     )
     return [_plan(r) for r in rows]
 
 
 async def plan_row(plan: str) -> dict[str, Any] | None:
-    rec = await get_pool().fetchrow(
-        f"SELECT {_PLAN_COLUMNS} FROM dispatch_plans WHERE plan = $1", plan
-    )
+    rec = await get_pool().fetchrow(f"SELECT {_PLAN_COLUMNS} FROM {_PLANS} WHERE p.plan = $1", plan)
     return _plan(rec) if rec else None
 
 
@@ -312,7 +376,7 @@ def _summary(
         shaped = {
             "states": _count([r["run_state"] if r else "planned" for r in rows]),
             "phases": phases,
-        } | {k: plan.get(k) for k in PR_FIELDS}
+        } | {k: plan.get(k) for k in PR_FIELDS + JOB_FIELDS}
     return {
         "plan": plan["plan"],
         "repo": plan["repo"],

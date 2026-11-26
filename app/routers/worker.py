@@ -6,13 +6,12 @@ can reach only these routes. Disabled (503) when WORKER_KEY is empty.
 
 import hmac
 import logging
-import re
 import uuid
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
@@ -21,8 +20,9 @@ from app.board import dispatch, mcp_servers
 from app.claude_usage import stats as usage_stats
 from app.claude_usage import store as usage_store
 from app.config import settings
-from app.jobs import change_result, ci_watch, service, store
+from app.jobs import change_result, ci_watch, dispatch_jobs, service, store
 from app.routers import agent_profiles
+from app.routers import dispatch as dispatch_routes
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,7 @@ router = APIRouter(dependencies=[Depends(verify_worker_key)])
 
 class ClaimRequest(BaseModel):
     agents: list[Literal["agy", "claude"]] = Field(..., min_length=1)
+    kinds: list[str] = Field(default_factory=list, max_length=20)
     worker: str = Field("", max_length=100)
 
 
@@ -66,7 +67,7 @@ async def _after_finish(jobs: list[dict[str, Any]]) -> None:
 async def claim(body: ClaimRequest):
     """The next queued job for one of the worker's agents, or 204 when there's nothing to do."""
     await _after_finish(await store.expire_stale())
-    job = await store.claim_next(list(body.agents))
+    job = await store.claim_next(list(body.agents), body.kinds)
     if job is None:
         return Response(status_code=204)
     logger.info("Job %s (%s/%s) claimed by %s", job["id"], job["kind"], job["agent"], body.worker)
@@ -148,6 +149,9 @@ async def finish(job_id: uuid.UUID, body: FinishRequest):
         if status == "succeeded"
         else None
     )
+    if question and (asker := await store.get_job(job_id)) and asker["kind"] == "dispatch":
+        # Nobody can answer a whole plan; its tasks ask through their own waiting rows.
+        question = None
     if question:
         # The agent stopped to ask Pryce something: pause the job (session kept) rather than
         # finish it, and open no PR for a change it didn't complete.
@@ -210,11 +214,58 @@ async def finish(job_id: uuid.UUID, body: FinishRequest):
     return {"recorded": True}
 
 
+JobHeader = Annotated[str | None, Header(alias="X-Dispatch-Job")]
+
+
+async def _approved(
+    plan: str, job_id: str | None, tasks: list[str], last_words: bool = False
+) -> dict[str, Any]:
+    """The worker key writes only to a plan whose approved job is running, and only its tasks."""
+    params = await dispatch.approved_params(plan, job_id, last_words)
+    if params is None:
+        raise HTTPException(403, f"plan '{plan}' has no running dispatch job with that id")
+    unknown = set(tasks) - {t["id"] for t in params["plan"]["tasks"]}
+    if unknown:
+        raise HTTPException(403, f"plan '{plan}' has no task {', '.join(sorted(unknown))}")
+    return params
+
+
+@router.post("/dispatch/rows", status_code=201)
+async def dispatch_row(
+    body: dispatch_routes.RowIn, background: BackgroundTasks, job_id: JobHeader = None
+):
+    # A cancelled or timed out job ends before its worker can say how the tasks ended.
+    last_words = body.state in dispatch.LAST_WORDS
+    await _approved(body.plan, job_id, [body.task], last_words)
+    return await dispatch_routes.post_row(body, background)
+
+
+@router.post("/dispatch/heartbeat")
+async def dispatch_heartbeat(body: dispatch_routes.HeartbeatIn, job_id: JobHeader = None):
+    await _approved(body.plan, job_id, [body.task])
+    return await dispatch_routes.post_heartbeat(body)
+
+
+@router.post("/dispatch/steps", status_code=201)
+async def dispatch_steps(body: dispatch_routes.StepsIn, job_id: JobHeader = None):
+    await _approved(body.plan, job_id, [body.task])
+    return await dispatch_routes.post_steps(body)
+
+
+@router.post("/dispatch/plans")
+async def dispatch_plan(body: dispatch_routes.PlanIn, job_id: JobHeader = None):
+    params = await _approved(body.plan, job_id, [t.id for t in body.tasks])
+    approved = {k: params[k] for k in ("repo", "base")}
+    approved |= {k: params["plan"].get(k) for k in ("project", "board_plan")}
+    return await dispatch_routes.post_plan(body.model_copy(update=approved))
+
+
 class ExportIn(BaseModel):
+    plan_hash: str
     repo: str
     base: str = Field(..., min_length=1)
     base_sha: str = Field(..., pattern=r"^[0-9a-f]{40}$")
-    title: str = Field(..., min_length=1, max_length=256)
+    title: str = Field("", max_length=256)
     body: str = Field("", max_length=60_000)
     files: dict[str, str | None]
     modes: dict[str, Literal["100644", "100755", "120000"]] = Field(default_factory=dict)
@@ -230,8 +281,6 @@ GATEWAY_MAX_FILES = 200
 GATEWAY_MAX_BASE64_CHARS = 5 * 1024 * 1024 * 4 // 3
 # pinned by test_plan_export.py::test_a_branch_whose_history_moved_is_refused_not_pr_closed
 _GATEWAY_PR_CLOSED = "not reopening it"
-# pinned by test_plan_export.py::test_a_plan_id_that_cant_form_a_branch_is_refused
-_PLAN_ID_RE = re.compile(r"^(?!.*\.\.)(?!.*\.$)(?!.*\.lock$)[A-Za-z0-9._-]{1,75}$")
 
 
 async def _refuse_a_ready_pr(repo: str, number: int | None) -> None:
@@ -247,8 +296,25 @@ async def _refuse_a_ready_pr(repo: str, number: int | None) -> None:
         )
 
 
-async def _export(plan: str, body: ExportIn) -> dict[str, Any]:
-    if not _PLAN_ID_RE.match(plan):
+async def _require_approved_run(
+    plan: str, job_id: str | None, plan_hash: str, repo: str, base: str
+) -> dict[str, Any]:
+    params = await dispatch.approved_params(plan, job_id)
+    if params is None:
+        raise ExportRefused(
+            403, "refused", f"plan '{plan}' has no running dispatch job with that id"
+        )
+    if params["plan_hash"] != plan_hash:
+        raise ExportRefused(403, "refused", f"plan '{plan}' isn't the plan that was approved")
+    if params["repo"].lower() != repo.lower() or params["base"] != base:
+        raise ExportRefused(
+            403, "refused", f"plan '{plan}' was approved for {params['repo']} at {params['base']}"
+        )
+    return params
+
+
+async def _export(plan: str, body: ExportIn, job_id: str | None) -> dict[str, Any]:
+    if not dispatch_jobs.PLAN_ID_RE.match(plan):
         raise ExportRefused(422, "refused", f"plan id '{plan}' can't form a branch name")
     found = await dispatch.plan_row(plan)
     if found is None:
@@ -264,6 +330,7 @@ async def _export(plan: str, body: ExportIn) -> dict[str, Any]:
             "refused",
             f"plan '{plan}' is for {repo} at {found['base']}, not {sent} at {body.base}",
         )
+    approved = await _require_approved_run(plan, job_id, body.plan_hash, repo, body.base)
     decision = policy.decide(policy.StartJob("claude", f"dispatch:{plan}", repo=repo))
     if decision.verdict != "allow":
         raise ExportRefused(422, "refused", decision.reason)
@@ -273,15 +340,21 @@ async def _export(plan: str, body: ExportIn) -> dict[str, Any]:
         )
     if sum(len(c or "") for c in body.files.values()) > GATEWAY_MAX_BASE64_CHARS:
         raise ExportRefused(413, "export_too_large", "the changes are larger than 5 MiB")
+    strays = dispatch_jobs.outside_plan(approved["plan"], list(body.files))
+    if strays:
+        shown = ", ".join(strays[:10])
+        raise ExportRefused(403, "left_owns", f"outside what the plan may change: {shown}")
     try:
         await service.repo_info(repo)
         await _refuse_a_ready_pr(repo, found.get("pr_number"))
+        # The reads above can take a minute; a job cancelled meanwhile opens nothing.
+        await _require_approved_run(plan, job_id, body.plan_hash, repo, body.base)
         pr = await service.open_plan_pull_request(
             plan,
             repo,
             body.base,
             body.base_sha,
-            body.title,
+            approved["title"],
             body.body,
             body.files,
             body.modes,
@@ -316,7 +389,7 @@ async def _export(plan: str, body: ExportIn) -> dict[str, Any]:
 
 
 @router.post("/dispatch/plans/{plan}/export")
-async def export_plan(plan: str, request: Request):
+async def export_plan(plan: str, request: Request, job_id: JobHeader = None):
     """Open or update a dispatch plan's draft PR from integ/<plan>'s changed files (seam 6)."""
     try:
         body = ExportIn.model_validate_json(await request.body())
@@ -327,7 +400,7 @@ async def export_plan(plan: str, request: Request):
             {"detail": f"{where}: {first['msg']}", "reason": "refused"}, status_code=422
         )
     try:
-        return await _export(plan, body)
+        return await _export(plan, body, job_id)
     except ExportRefused as e:
         logger.warning("Plan %s export refused (%s): %s", plan, e.reason, e.detail)
         return JSONResponse({"detail": e.detail, "reason": e.reason}, status_code=e.status)

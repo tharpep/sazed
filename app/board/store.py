@@ -77,7 +77,7 @@ async def active_jobs() -> list[dict[str, Any]]:
 async def working_jobs() -> list[dict[str, Any]]:
     rows = await get_pool().fetch(
         """
-        SELECT id, status, title, agent, model, profile, requested_by, params, meta,
+        SELECT id, status, title, kind, agent, model, profile, requested_by, params, meta,
                created_at, started_at
         FROM jobs
         WHERE status IN ('running', 'queued')

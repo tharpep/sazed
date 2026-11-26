@@ -458,6 +458,9 @@ async def create_follow_up(
     parent = await store.get_job(parent_id)
     if parent is None:
         raise JobError("no job with that id")
+    if parent["kind"] == "dispatch":
+        # A follow-up copies params and can skip approval; a plan runs only as approved.
+        raise JobError("a dispatch plan can't be continued; submit the plan again")
     # needs_input: answering its question. cancelled / timed_out / paused: stop and redirect,
     # resuming the session the worker reported (store.keep_session).
     if parent["status"] not in _CONTINUABLE or not parent.get("agent_session_id"):
@@ -552,7 +555,12 @@ def _plain(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
-_SHORT_LABEL = {"research": "Research", "second_opinion": "2nd opinion", "code_task": "Code review"}
+_SHORT_LABEL = {
+    "research": "Research",
+    "second_opinion": "2nd opinion",
+    "code_task": "Code review",
+    "dispatch": "Dispatch",
+}
 
 
 def _label(job: dict[str, Any]) -> str:
