@@ -1,4 +1,4 @@
-"""SQL for Claude Code sessions and their steps (migration 039)."""
+"""SQL for Claude Code sessions and their steps (migration 039; `role` from 041)."""
 
 from collections.abc import Callable
 from datetime import datetime
@@ -15,6 +15,7 @@ _SESSION_COLUMNS = (
     "repo",
     "branch",
     "card_id",
+    "role",
     "started_at",
     "meta_ts",
     "meta_seq",
@@ -34,7 +35,7 @@ _SESSION_COLUMNS = (
     "cleared_seq",
 )
 
-_META = ("host", "cwd", "repo", "branch", "card_id")
+_META = ("host", "cwd", "repo", "branch", "card_id", "role")
 _QUESTION_COLUMNS = ("question", "question_agent", "question_ts", "question_seq")
 
 

@@ -150,9 +150,27 @@ async def create_item(
 
 
 async def update_item(item_id: uuid.UUID, **fields: Any) -> dict[str, Any] | None:
-    allowed = {"status", "note", "rank", "job_id", "type", "title", "summary", "why", "repos",
-               "effort", "impact", "workstream_id", "plan_id", "plan_section", "plan_version",
-               "session_label", "session_branch", "pr_repo", "pr_number"}
+    allowed = {
+        "status",
+        "note",
+        "rank",
+        "job_id",
+        "type",
+        "title",
+        "summary",
+        "why",
+        "repos",
+        "effort",
+        "impact",
+        "workstream_id",
+        "plan_id",
+        "plan_section",
+        "plan_version",
+        "session_label",
+        "session_branch",
+        "pr_repo",
+        "pr_number",
+    }
     sets, args = [], []
     for key, value in fields.items():
         if key not in allowed:
@@ -175,6 +193,37 @@ async def update_item(item_id: uuid.UUID, **fields: Any) -> dict[str, Any] | Non
     return await get_item(item_id) if rec else None
 
 
+PLAN_STATE_COLUMNS = (
+    "plan_approved_at",
+    "plan_approved_by",
+    "plan_approved_plan_id",
+    "plan_approved_section",
+    "plan_approved_version",
+    "started_at",
+    "started_by",
+)
+
+
+async def lock_status(conn: asyncpg.Connection, item_id: uuid.UUID) -> str | None:
+    """The item's status, with its row locked until the transaction ends, so two approvals or
+    starts on one card cannot both record."""
+    return await conn.fetchval("SELECT status FROM backlog_items WHERE id = $1 FOR UPDATE", item_id)
+
+
+async def set_plan_state(conn: asyncpg.Connection, item_id: uuid.UUID, **fields: Any) -> None:
+    sets, args = [], []
+    for key, value in fields.items():
+        if key not in PLAN_STATE_COLUMNS:
+            raise ValueError(f"can't set {key}")
+        args.append(value)
+        sets.append(f"{key} = ${len(args)}")
+    args.append(item_id)
+    await conn.execute(
+        f"UPDATE backlog_items SET {', '.join(sets)}, updated_at = NOW() WHERE id = ${len(args)}",
+        *args,
+    )
+
+
 async def close_for_merged_pr(repo: str, number: int) -> list[uuid.UUID]:
     """Close the open cards linked to a merged PR. Job-driven cards are approved, so not open."""
     rows = await get_pool().fetch(
@@ -194,11 +243,13 @@ async def close_for_merged_pr(repo: str, number: int) -> list[uuid.UUID]:
 
 
 async def mark_stale(days: int = 30) -> int:
-    """Open ideas nobody acted on go stale (kept for dedupe, out of the open list)."""
+    """Open ideas nobody acted on go stale (kept for dedupe, out of the open list). An approved
+    or started card was acted on, though its status stays new."""
     result = await get_pool().execute(
         f"""
         UPDATE backlog_items SET status = 'stale', updated_at = NOW()
         WHERE type = 'idea' AND status = 'new' AND created_at < NOW() - INTERVAL '{int(days)} days'
+          AND plan_approved_at IS NULL AND started_at IS NULL
         """
     )
     return int(result.split()[-1])

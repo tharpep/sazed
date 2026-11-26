@@ -567,7 +567,15 @@ async def test_command_keeps_every_old_key_and_adds_the_session_ones(monkeypatch
     monkeypatch.setattr(command.dispatch, "command_parts", _no_dispatch)
     monkeypatch.setattr(command.sessions, "command_part", part)
     summary = await command.summary()
-    assert set(summary) == {"needs", "working", "done", "sessions", "session_health"}
+    assert set(summary) == {
+        "needs",
+        "working",
+        "done",
+        "sessions",
+        "session_health",
+        "plans_to_approve",
+        "ready_to_start",
+    }
 
 
 async def _no_dispatch(now):
@@ -657,6 +665,7 @@ def _stub_board(monkeypatch, items, recent_sessions, calls=None):
     monkeypatch.setattr(service.store, "chains", empty)
     monkeypatch.setattr(service.store, "pr_snapshots", empty)
     monkeypatch.setattr(service.store, "active_jobs", no_jobs)
+    monkeypatch.setattr(service.events, "states", empty)
     monkeypatch.setattr(service.sessions_store, "recent", recent)
 
 
@@ -675,8 +684,10 @@ async def test_a_card_whose_stage_is_done_is_not_open_on_either_side(monkeypatch
     open_card = _item(session_label="builder", session_branch="feature/x")
     original = service.stages.item_stage
 
-    def stage(item, job, now=None, pr=None):
-        return ("done", "Done") if item["id"] == OTHER else original(item, job, now, pr)
+    def stage(item, job, now=None, pr=None, reporting=False):
+        if item["id"] == OTHER:
+            return "done", "Done"
+        return original(item, job, now, pr, reporting)
 
     monkeypatch.setattr(service.stages, "item_stage", stage)
     _stub_board(monkeypatch, [done_by_stage, open_card], [_session(branch="feature/x")])
