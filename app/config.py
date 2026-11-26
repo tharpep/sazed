@@ -132,6 +132,8 @@ class Settings(BaseSettings):
     session_summarization: bool = True  # Generate agent_memory summary after each session
     session_kb_ingest_enabled: bool = True  # Ingest each session's structured summary into the KB
     idle_session_hours: int = 2  # Process a chat session (memory, KB) once idle this long
+    notes_sweep_seconds: int = 0  # File inbox notes this often; 0 leaves the sweep off
+    notes_sweep_batch: int = 20  # Notes per sweep, so a backlog or an outage stays bounded
 
     # Context window
     session_window_size: int = 15  # Recent messages to keep verbatim; older messages are compressed

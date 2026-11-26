@@ -11,7 +11,7 @@ from app.notes.prompt import SYSTEM
 from app.pricing import estimate_cost_usd
 
 _TAG = re.compile(r"(?<![\w/#&])#([A-Za-z][A-Za-z0-9_-]*)")
-_TOPIC = re.compile(r"[A-Za-z0-9][A-Za-z0-9 &'/-]{0,39}")
+_TOPIC = re.compile(r"[A-Za-z0-9][A-Za-z0-9 &'-]{0,39}")
 _NOTE_CHARS = 2000
 _REASON_CHARS = 200
 
