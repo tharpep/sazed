@@ -157,7 +157,7 @@ app/
     tools.py           — GET /tools (agent tool registry)
     claude_usage.py    — POST /claude-usage/batch (X-Claude-Usage-Key), GET /claude-usage/overview and /sessions
     sessions.py        — POST /sessions/events (hooks), GET /sessions, GET /sessions/{id}
-    notes.py           — POST /notes/filer/try (dry run of the notes filer)
+    notes.py           — POST /notes/filer/try (dry run of the notes filer), POST /notes/file, POST /notes/sweep
   notes/               — Notes filer: filer.py (file_text), filing.py (Filing, FilerUsage, FilerError), prompt.py, client.py (gateway vault routes, NotesError), service.py (file_note, sweep_once), sweep.py (background sweep)
   sessions/            — Claude Code sessions from hooks: service.py (ingest, card links, reads), store.py (SQL)
 chat.py                — CLI for testing (calls local /chat)
