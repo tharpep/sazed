@@ -148,6 +148,17 @@ async def test_untagged_note_calls_haiku_once(calls):
     assert usage.cost_usd is not None and usage.cost_usd > 0
 
 
+async def test_answer_with_no_text_block_is_a_filer_error(monkeypatch):
+    async def create(**kwargs):
+        return SimpleNamespace(content=[], usage=None)
+
+    client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    monkeypatch.setattr(settings, "llm_cost_tracking", False)
+    monkeypatch.setattr(filer, "get_client", lambda: client)
+    with pytest.raises(FilerError, match="no text"):
+        await file_text("check the proxmox box", TOPICS)
+
+
 async def test_empty_text(calls):
     with pytest.raises(ValueError, match="text is empty"):
         await file_text("  \n", TOPICS)

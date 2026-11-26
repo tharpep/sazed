@@ -98,7 +98,7 @@ async def file_text(text: str, topics: dict[str, int]) -> tuple[Filing, FilerUsa
     input_tokens = getattr(usage, "input_tokens", 0) or 0
     output_tokens = getattr(usage, "output_tokens", 0) or 0
     cost = estimate_cost_usd(settings.haiku_model, input_tokens, output_tokens)
-    return (
-        parse_filing(resp.content[0].text, topics),
-        FilerUsage(input_tokens, output_tokens, cost),
-    )
+    answer = next((block.text for block in resp.content if block.type == "text"), None)
+    if answer is None:
+        raise FilerError("the model returned no text")
+    return parse_filing(answer, topics), FilerUsage(input_tokens, output_tokens, cost)
