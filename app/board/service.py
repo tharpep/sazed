@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.backlog import store as backlog
-from app.board import actions, prs, stages, store
+from app.board import actions, events, prs, stages, store
 from app.config import settings
 from app.jobs import store as jobs
 from app.sessions import service as sessions
@@ -97,7 +97,7 @@ def _item_card(
     live = chain if item["status"] == "approved" else []
     tail = live[-1] if live else None
     pr = _pr(prs.item_ref(item, chain), snaps)
-    stage, next_step = stages.item_stage(item, tail, pr=pr)
+    stage, next_step = stages.item_stage(item, tail, pr=pr, reporting=session is not None)
     times = [item["updated_at"]]
     times += [t for job in live for t in (job["created_at"], job["finished_at"]) if t]
     updated = max(times)
@@ -124,6 +124,8 @@ def _item_card(
         "plan_section": item["plan_section"],
         "plan_version": item["plan_version"],
         "session_link": _session_link(item, session),
+        "plan_approval": events.approval_block(item),
+        "started": events.started_block(item),
         "actions": actions.describe(tail),
         **_job_fields(live),
         "pr": pr,
@@ -152,6 +154,8 @@ def _job_card(job: dict[str, Any], snaps: dict[prs.Key, dict[str, Any]]) -> dict
         "plan_section": None,
         "plan_version": None,
         "session_link": None,
+        "plan_approval": None,
+        "started": None,
         "actions": actions.describe(job),
         **_job_fields([job]),
         "pr": _pr(prs.job_ref(job), snaps),
@@ -179,7 +183,8 @@ def _order(card: dict[str, Any]) -> tuple:
 async def read(*, all_done: bool = False) -> sessions.BoardRead:
     """The cards with their reporting sessions. Links are worked out against every item card's
     stage, so the card side and the session side agree on which cards are open."""
-    items = await store.items()
+    plan_states = await events.states()
+    items = [item | plan_states.get(item["id"], {}) for item in await store.items()]
     chains = await store.chains()
     active = await store.active_jobs()
     snaps = await store.pr_snapshots()
@@ -192,11 +197,14 @@ async def read(*, all_done: bool = False) -> sessions.BoardRead:
     for item, item_card in zip(items, item_cards, strict=True):
         if session := reporting.get(item_card["id"]):
             item_card["session_link"] = _session_link(item, session)
+            if item.get("started_at"):
+                item_card.update(_item_card(item, chains.get(item["id"], []), snaps, session))
     result = item_cards + [_job_card(job, snaps) for job in active if _shows_alone(job, linked)]
     if not all_done:
         cutoff = datetime.now(UTC) - DONE_WINDOW
         result = [c for c in result if c["stage"] != "done" or c["done_at"] >= cutoff]
-    return sessions.BoardRead(sorted(result, key=_order), reporting_sessions, links)
+    active_plans = {str(i["plan_id"]) for i in items if i.get("plan_active")}
+    return sessions.BoardRead(sorted(result, key=_order), reporting_sessions, links, active_plans)
 
 
 async def cards(*, all_done: bool = False) -> list[dict[str, Any]]:
@@ -212,6 +220,7 @@ async def card(card_id: str) -> dict[str, Any] | None:
     if kind == "item":
         item = await backlog.get_item(uuid.UUID(raw_id))
         found |= {"summary": item["summary"], "why": item["why"], "note": item["note"]}
+    found["history"] = await events.history(uuid.UUID(raw_id)) if kind == "item" else []
     if found["job_id"]:
         job = await jobs.get_job(uuid.UUID(found["job_id"]))
         meta = job.get("meta") or {}

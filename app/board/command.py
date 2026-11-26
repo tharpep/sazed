@@ -51,6 +51,23 @@ def done_view(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def plan_parts(board: sessions.BoardRead) -> dict[str, Any]:
+    """Cards on an active plan whose plan waits for approval, in board order (ranked first), and
+    how many cards are approved and ready to start. A plan-less card still reads "Plan to approve"
+    on the board but is left out here, so the many cards with no plan cannot bury every other
+    need."""
+    return {
+        "plans_to_approve": [
+            c
+            for c in board.cards
+            if c["kind"] == "item"
+            and c["next"] == "Plan to approve"
+            and c["plan_id"] in board.active_plans
+        ],
+        "ready_to_start": sum(c["next"] == "Ready to start" for c in board.cards),
+    }
+
+
 async def summary() -> dict[str, Any]:
     board = await service.read()
     needs = [c for c in board.cards if c["stage"] == "needs_me"]
@@ -71,4 +88,5 @@ async def summary() -> dict[str, Any]:
         "working": working,
         "done": done_view(await store.finished_since(DONE_WINDOW_HOURS)),
         **await sessions.command_part(board, now),
+        **plan_parts(board),
     }

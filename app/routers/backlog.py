@@ -1,4 +1,5 @@
-"""Backlog API for the console (plans/07 section 9b): read, add, approve, dismiss, restore.
+"""Backlog API for the console (plans/07 section 9b): read, add, approve, dismiss, restore, and
+the plan states (slice 4): approve plan, start, withdraw.
 
 Nothing here deletes: a dismissed item stays as a record so the scout never proposes it again.
 """
@@ -13,7 +14,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
 from app.backlog import service, store
-from app.board import plans, projects
+from app.board import events, plans, projects
+from app.board import service as board_service
 from app.jobs.service import JobError
 
 router = APIRouter()
@@ -212,6 +214,46 @@ async def move(item_id: uuid.UUID, body: MoveRequest):
     if item is None:
         raise HTTPException(404, "Item not found")
     return item
+
+
+class ActorRequest(BaseModel):
+    # The console sends "pryce" and the gateway always stamps "agent:<name>"; as everywhere the
+    # owner rule applies, anyone with the Sazed key can claim to be pryce.
+    by: str = Field(..., pattern=events.ACTOR)
+
+
+class WithdrawRequest(ActorRequest):
+    step: Literal["approval", "start"]
+
+
+async def _plan_state_reply(item_id: uuid.UUID, change) -> dict:
+    try:
+        changed = await change
+    except service.NotFound as e:
+        raise HTTPException(404, "Item not found") from e
+    except service.Forbidden as e:
+        raise HTTPException(403, str(e)) from e
+    except service.BacklogError as e:
+        raise HTTPException(409, str(e)) from e
+    return {"changed": changed, "card": await board_service.card(f"item:{item_id}")}
+
+
+@router.post("/{item_id}/approve-plan")
+async def approve_plan(item_id: uuid.UUID, body: ActorRequest):
+    """Approve the card's plan at its current version. Starts nothing and creates no job."""
+    return await _plan_state_reply(item_id, service.approve_plan(item_id, body.by))
+
+
+@router.post("/{item_id}/start")
+async def start(item_id: uuid.UUID, body: ActorRequest):
+    """Hand the card to an orchestrator. 409 without a current plan approval; creates no job."""
+    return await _plan_state_reply(item_id, service.start(item_id, body.by))
+
+
+@router.post("/{item_id}/withdraw")
+async def withdraw(item_id: uuid.UUID, body: WithdrawRequest):
+    """Withdraw the start, or the approval and any start on it. Only pryce; an agent gets 403."""
+    return await _plan_state_reply(item_id, service.withdraw(item_id, body.by, body.step))
 
 
 @router.post("/{item_id}/approve")

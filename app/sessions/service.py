@@ -7,7 +7,7 @@ card renamed or a branch relinked never leaves a stale link behind.
 
 import math
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
@@ -64,6 +64,17 @@ def _cut(limit: int | None):
 Short = Annotated[str | None, _cut(200)]
 Line = Annotated[str | None, _cut(TEXT_MAX)]
 
+ROLES = ("orchestrator",)
+
+
+def _known_role(value: Any) -> str | None:
+    # An unknown role is dropped, not rejected: a newer hook must never lose a batch of steps
+    # over a role this Sazed does not know yet.
+    return value if value in ROLES else None
+
+
+Role = Annotated[str | None, BeforeValidator(_known_role)]
+
 
 class EventIn(BaseModel):
     session_id: Annotated[str, _cut(None)] = Field(..., min_length=1, max_length=200)
@@ -82,6 +93,7 @@ class EventIn(BaseModel):
     repo: Short = None
     branch: Short = None
     card_id: str | None = None
+    role: Role = None
 
     @model_validator(mode="after")
     def _check(self) -> "EventIn":
@@ -176,6 +188,7 @@ def reduce(
                 "repo": _last(batch, "repo"),
                 "branch": _last(batch, "branch"),
                 "card_id": uuid.UUID(c) if (c := _last(batch, "card_id")) else None,
+                "role": _last(batch, "role"),
                 "started_at": datetime.fromtimestamp(min(e.ts for e in batch), UTC),
                 "meta_ts": last.ts,
                 "meta_seq": last.seq,
@@ -333,6 +346,7 @@ def view(
     project = projects.get(card["workstream_id"]) if card and card["workstream_id"] else None
     return {
         "session_id": session["session_id"],
+        "role": session.get("role"),
         "host": session["host"],
         "cwd": session["cwd"],
         "repo": session["repo"],
@@ -408,6 +422,7 @@ class BoardRead:
     cards: list[dict[str, Any]]
     sessions: list[dict[str, Any]]
     links: dict[str, dict[str, Any]]
+    active_plans: set[str] = field(default_factory=set)
 
 
 def _thresholds() -> dict[str, int]:

@@ -88,9 +88,11 @@ def item_stage(
     job: dict[str, Any] | None,
     now: datetime | None = None,
     pr: dict[str, Any] | None = None,
+    reporting: bool = False,
 ) -> Stage:
     """Stage of a backlog item. `job` is the last job in its chain, the one with the live state;
-    `pr` is the card's `pr` block (prs.block)."""
+    `pr` is the card's `pr` block (prs.block); `reporting` says a reporting session links to it.
+    The plan states (migration 041) come after every link, so a job, PR or session wins."""
     status = item["status"]
     if status == "done":
         return "done", "Done"
@@ -102,7 +104,17 @@ def item_stage(
         return _linked_pr(pr)
     if item.get("session_label") or item.get("session_branch"):
         return "doing", "Being built in a terminal session"
+    # An orchestrator picks started cards up with board_list(stage="doing"); until a session
+    # links, nothing is building it, and the text says so.
+    if item.get("started_at"):
+        if reporting:
+            return "doing", "Being built in a terminal session"
+        return "doing", "Started; waiting for an orchestrator"
+    if item.get("plan_approved_at"):
+        if item.get("plan_changed"):
+            return "next", "Plan changed since approval"
+        return "next", "Ready to start"
     # A card filed under a workstream is committed work on a project's ladder, not one to triage.
     if status == "shortlisted" or item.get("rank") is not None or item.get("workstream_id"):
-        return "next", "Approve it to start"
+        return "next", "Plan to approve"
     return "inbox", "Rank it or dismiss it"
