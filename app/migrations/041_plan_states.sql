@@ -1,10 +1,13 @@
 -- Plan states (slice 4): a card's plan approved, then started, each with who and when. Approval
--- records the plan's current_version, so a later save that changes the card's section makes it
--- stale. Every column is nullable and every statement idempotent, and nothing here depends on 040,
--- so this applies on a database with or without it.
+-- records the plan, section and current_version it approved, so moving the card to another plan
+-- or section, or a later save that changes its section, makes it stale. Every column is nullable
+-- and every statement idempotent, and nothing here depends on 040, so this applies on a database
+-- with or without it.
 ALTER TABLE backlog_items
     ADD COLUMN IF NOT EXISTS plan_approved_at      TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS plan_approved_by      TEXT,
+    ADD COLUMN IF NOT EXISTS plan_approved_plan_id UUID,
+    ADD COLUMN IF NOT EXISTS plan_approved_section TEXT,
     ADD COLUMN IF NOT EXISTS plan_approved_version INT,
     ADD COLUMN IF NOT EXISTS started_at            TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS started_by            TEXT;

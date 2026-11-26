@@ -15,24 +15,33 @@ from app.board.store import OFF_BOARD
 from app.db import get_pool
 
 OWNER = "pryce"
-ACTOR = r"^(pryce|agent:[\w.:-]{1,60})$"
+# ASCII only after "agent:", so a lookalike name (Cyrillic, accented, fullwidth) cannot pass.
+ACTOR = r"^(pryce|agent:[a-z0-9._-]{1,64})$"
 
 KINDS = ("plan_approved", "started", "approval_withdrawn", "start_withdrawn")
 
+# Start refuses a card whose plan is archived; a draft plan may still be built.
+CLOSED_PLAN_STATES = ("done", "superseded")
+
 Db = asyncpg.Connection | asyncpg.Pool
 
-# The two plan bodies are joined only for an approval that could be stale: a linked section and a
-# plan saved since. Every other row carries nulls, so a board read moves no plan text it ignores.
+# The two plan bodies are joined only for an approval that could have gone stale by an edit: the
+# card still on the plan and section it approved, and that plan saved since. Every other row
+# carries nulls, so a board read moves no plan text it ignores.
 _STATES = """
-    SELECT b.id, b.plan_id, b.plan_section, b.plan_approved_at, b.plan_approved_by,
-           b.plan_approved_version, b.started_at, b.started_by,
+    SELECT b.id, b.status, b.rank, b.workstream_id, b.plan_id, b.plan_section,
+           b.plan_approved_at, b.plan_approved_by, b.plan_approved_plan_id,
+           b.plan_approved_section, b.plan_approved_version, b.started_at, b.started_by,
            p.slug AS plan_slug, p.state AS plan_state, p.current_version AS plan_current_version,
+           ap.slug AS approved_plan_slug,
            pa.body AS approved_body, pc.body AS current_body
     FROM backlog_items b
     LEFT JOIN plans p ON p.id = b.plan_id
+    LEFT JOIN plans ap ON ap.id = b.plan_approved_plan_id
     LEFT JOIN plan_versions pa
         ON pa.plan_id = b.plan_id AND pa.version = b.plan_approved_version
        AND b.plan_approved_at IS NOT NULL AND b.plan_section IS NOT NULL
+       AND b.plan_approved_plan_id = b.plan_id AND b.plan_approved_section = b.plan_section
        AND b.plan_approved_version < p.current_version
     LEFT JOIN plan_versions pc
         ON pa.plan_id IS NOT NULL AND pc.plan_id = b.plan_id AND pc.version = p.current_version
@@ -50,20 +59,39 @@ def changed_since(approved_body: str | None, current_body: str | None, section: 
     return then is not None and now is not None and plan_text._norm(then) != plan_text._norm(now)
 
 
+def stale(row: dict[str, Any]) -> bool:
+    """An approval no longer covers the card: it now links another plan or section than the one
+    approved (null included, so linking, unlinking and moving all count), or the approved
+    section's text changed since."""
+    if not row.get("plan_approved_at"):
+        return False
+    if row.get("plan_approved_plan_id") != row.get("plan_id"):
+        return True
+    if row.get("plan_approved_section") != row.get("plan_section"):
+        return True
+    return changed_since(row.get("approved_body"), row.get("current_body"), row.get("plan_section"))
+
+
 def _state(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "plan_approved_at": row["plan_approved_at"],
         "plan_approved_by": row["plan_approved_by"],
+        "plan_approved_plan_id": row["plan_approved_plan_id"],
+        "plan_approved_section": row["plan_approved_section"],
         "plan_approved_version": row["plan_approved_version"],
+        "approved_plan_slug": row["approved_plan_slug"],
         "started_at": row["started_at"],
         "started_by": row["started_by"],
+        "status": row["status"],
+        "rank": row["rank"],
+        "workstream_id": row["workstream_id"],
+        "plan_id": row["plan_id"],
         "plan_section": row["plan_section"],
         "plan_slug": row["plan_slug"],
+        "plan_state": row["plan_state"],
         "plan_active": row["plan_state"] == "active",
         "plan_current_version": row["plan_current_version"],
-        "plan_changed": changed_since(
-            row["approved_body"], row["current_body"], row["plan_section"]
-        ),
+        "plan_changed": stale(row),
     }
 
 
@@ -84,8 +112,9 @@ def approval_block(item: dict[str, Any]) -> dict[str, Any] | None:
     return {
         "at": item["plan_approved_at"],
         "by": item["plan_approved_by"],
+        "plan": item.get("approved_plan_slug"),
         "version": item["plan_approved_version"],
-        "section": item.get("plan_section"),
+        "section": item.get("plan_approved_section"),
         "changed_since": bool(item.get("plan_changed")),
     }
 

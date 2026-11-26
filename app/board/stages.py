@@ -114,7 +114,16 @@ def item_stage(
         if item.get("plan_changed"):
             return "next", "Plan changed since approval"
         return "next", "Ready to start"
-    # A card filed under a workstream is committed work on a project's ladder, not one to triage.
-    if status == "shortlisted" or item.get("rank") is not None or item.get("workstream_id"):
+    if triaged(item):
         return "next", "Plan to approve"
     return "inbox", "Rank it or dismiss it"
+
+
+def triaged(item: dict[str, Any]) -> bool:
+    """Out of the inbox: shortlisted, ranked, or filed under a workstream, which makes it
+    committed work on a project's ladder rather than one to triage."""
+    return (
+        item["status"] == "shortlisted"
+        or item.get("rank") is not None
+        or bool(item.get("workstream_id"))
+    )

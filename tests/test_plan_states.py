@@ -27,22 +27,38 @@ MIGRATION = Path(__file__).parent.parent / "app" / "migrations" / "041_plan_stat
 class Card:
     """One backlog row's plan state, changed only through the store and events seams."""
 
-    def __init__(self, status="new", plan="pl", changed=False, **cols):
+    PLANS = {"pl": uuid.UUID(int=1), "other": uuid.UUID(int=2)}
+
+    def __init__(self, status="new", plan="pl", section="build", rank=1, changed=False):
         self.status = status
+        self.rank = rank
         self.plan = plan
+        self.section = section if plan else None
+        self.plan_state = "active"
         self.changed = changed
-        self.cols = dict.fromkeys(store.PLAN_STATE_COLUMNS) | cols
+        self.cols = dict.fromkeys(store.PLAN_STATE_COLUMNS)
         self.events: list[tuple] = []
         self.writes = 0
 
+    def link(self, plan, section=None):
+        self.plan, self.section = plan, section
+
     def state(self):
-        return self.cols | {
-            "plan_section": "build" if self.plan else None,
+        slugs = {v: k for k, v in self.PLANS.items()}
+        row = self.cols | {
+            "status": self.status,
+            "rank": self.rank,
+            "workstream_id": None,
+            "plan_id": self.PLANS.get(self.plan),
+            "plan_section": self.section,
             "plan_slug": self.plan,
-            "plan_active": True,
+            "plan_state": self.plan_state if self.plan else None,
+            "plan_active": self.plan_state == "active",
             "plan_current_version": 4 if self.plan else None,
-            "plan_changed": self.changed and bool(self.cols["plan_approved_at"]),
+            "approved_plan_slug": slugs.get(self.cols["plan_approved_plan_id"]),
         }
+        edited = self.changed and bool(self.cols["plan_approved_at"])
+        return row | {"plan_changed": edited or events.stale(row)}
 
 
 class FakeConn:
@@ -156,7 +172,7 @@ async def test_a_stale_approval_is_replaced(card):
 
 
 async def test_a_card_with_no_plan_link_can_be_approved(card):
-    card.plan = None
+    card.link(None)
     assert await service.approve_plan(ITEM, "pryce") is True
     assert card.cols["plan_approved_version"] is None
     assert card.events[0][2] == {
@@ -179,6 +195,82 @@ async def test_an_unknown_card_is_not_found(card):
         await service.approve_plan(uuid.uuid4(), "pryce")
 
 
+async def test_an_approval_records_the_plan_and_section_it_approved(card):
+    await service.approve_plan(ITEM, "pryce")
+    assert card.cols["plan_approved_plan_id"] == Card.PLANS["pl"]
+    assert card.cols["plan_approved_section"] == "build"
+    assert card.state()["approved_plan_slug"] == "pl"
+
+
+@pytest.mark.parametrize(
+    "plan, section",
+    [("other", "build"), ("other", "alpha"), ("pl", "gamma"), ("pl", None), (None, None)],
+)
+async def test_moving_or_unlinking_the_card_makes_its_approval_stale(card, plan, section):
+    await service.approve_plan(ITEM, "pryce")
+    card.link(plan, section)
+    assert card.state()["plan_changed"] is True
+    with pytest.raises(service.BacklogError, match="changed since approval"):
+        await service.start(ITEM, "pryce")
+    assert await service.approve_plan(ITEM, "pryce") is True
+    assert card.state()["plan_changed"] is False
+    assert card.cols["plan_approved_section"] == section
+
+
+async def test_linking_a_plan_after_a_plan_less_approval_makes_it_stale(card):
+    card.link(None)
+    await service.approve_plan(ITEM, "pryce")
+    assert card.state()["plan_changed"] is False
+    card.link("pl", "build")
+    assert card.state()["plan_changed"] is True
+    with pytest.raises(service.BacklogError):
+        await service.start(ITEM, "pryce")
+
+
+def test_the_stale_rule_compares_the_approved_link_then_the_section_text():
+    approved = {
+        "plan_approved_at": "t",
+        "plan_approved_plan_id": 1,
+        "plan_approved_section": "build",
+        "plan_id": 1,
+        "plan_section": "build",
+    }
+    assert events.stale(approved) is False
+    assert events.stale(approved | {"plan_id": 2}) is True
+    assert events.stale(approved | {"plan_section": "other"}) is True
+    assert events.stale(approved | {"plan_id": None, "plan_section": None}) is True
+    edited = BODY.replace("Do it.", "Do more.")
+    assert events.stale(approved | {"approved_body": BODY, "current_body": edited}) is True
+    assert events.stale(approved | {"plan_approved_at": None, "plan_id": 2}) is False
+
+
+async def test_an_agent_cannot_approve_an_inbox_card(card):
+    card.rank = None
+    with pytest.raises(service.BacklogError, match="inbox"):
+        await service.approve_plan(ITEM, "agent:orch")
+    assert card.writes == 0
+
+
+async def test_pryce_approving_an_inbox_card_moves_it_to_next(card):
+    card.rank = None
+    assert stages.item_stage(card.state(), None)[0] == "inbox"
+    assert await service.approve_plan(ITEM, "pryce") is True
+    assert stages.item_stage(card.state(), None) == ("next", "Ready to start")
+
+
+async def test_mark_stale_skips_approved_and_started_cards(monkeypatch):
+    seen = []
+
+    class Pool:
+        async def execute(self, sql):
+            seen.append(sql)
+            return "UPDATE 0"
+
+    monkeypatch.setattr(store, "get_pool", Pool)
+    await store.mark_stale(30)
+    assert "plan_approved_at IS NULL AND started_at IS NULL" in seen[0]
+
+
 # S3: start
 
 
@@ -194,6 +286,21 @@ async def test_start_on_a_stale_approval_is_refused(card):
     with pytest.raises(service.BacklogError, match="changed since approval"):
         await service.start(ITEM, "pryce")
     assert card.cols["started_at"] is None
+
+
+@pytest.mark.parametrize("plan_state", ["done", "superseded"])
+async def test_start_on_an_archived_plan_is_refused(card, plan_state):
+    await service.approve_plan(ITEM, "pryce")
+    card.plan_state = plan_state
+    with pytest.raises(service.BacklogError, match=f"plan pl is {plan_state}"):
+        await service.start(ITEM, "pryce")
+    assert card.cols["started_at"] is None
+
+
+async def test_start_on_a_draft_plan_is_allowed(card):
+    await service.approve_plan(ITEM, "pryce")
+    card.plan_state = "draft"
+    assert await service.start(ITEM, "pryce") is True
 
 
 async def test_start_records_who_and_when_once_and_creates_no_job(card):
@@ -219,12 +326,31 @@ async def test_start_and_approve_touch_no_job_or_dispatch_code():
 # S4: the actor
 
 
-@pytest.mark.parametrize("by", ["pryce", "agent:orch", "agent:ct113.orchestrator"])
+@pytest.mark.parametrize("by", ["pryce", "agent:orch", "agent:ct113.orchestrator", "agent:a_b-9"])
 def test_pryce_and_agents_are_actors(by):
     assert router.ActorRequest(by=by).by == by
 
 
-@pytest.mark.parametrize("by", ["", "Pryce", "agent:", "bob", "dispatch:run1", "pryce "])
+@pytest.mark.parametrize(
+    "by",
+    [
+        "",
+        "Pryce",
+        "agent:",
+        "bob",
+        "dispatch:run1",
+        "pryce ",
+        "pryce\n",
+        "рryce",
+        "agent:рр",
+        "agent:é",
+        "agent:１",
+        "agent:Orch",
+        "agent:x:y",
+        "agent:x​",
+        "agent:" + "a" * 65,
+    ],
+)
 def test_anyone_else_is_refused(by):
     with pytest.raises(ValidationError):
         router.ActorRequest(by=by)
@@ -461,9 +587,11 @@ def test_a_card_keeps_every_old_key_and_gains_plan_approval_and_started():
     assert (plain["plan_approval"], plain["started"]) == (None, None)
     at = datetime.now(UTC)
     approved = _item(
-        plan_section="build",
+        plan_section="moved-here",
         plan_approved_at=at,
         plan_approved_by="pryce",
+        plan_approved_section="build",
+        approved_plan_slug="pl",
         plan_approved_version=3,
         plan_changed=True,
         started_at=at,
@@ -473,6 +601,7 @@ def test_a_card_keeps_every_old_key_and_gains_plan_approval_and_started():
     assert full["plan_approval"] == {
         "at": at,
         "by": "pryce",
+        "plan": "pl",
         "version": 3,
         "section": "build",
         "changed_since": True,

@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 
 from app.backlog import store
-from app.board import events
+from app.board import events, stages
 from app.config import settings
 from app.db import get_pool
 from app.http_client import get_client
@@ -108,6 +108,8 @@ async def _approve(conn, item_id: uuid.UUID, st: dict[str, Any], by: str, **deta
         item_id,
         plan_approved_at=datetime.now(UTC),
         plan_approved_by=by,
+        plan_approved_plan_id=st["plan_id"],
+        plan_approved_section=st["plan_section"],
         plan_approved_version=version,
     )
     await events.record(
@@ -131,6 +133,9 @@ async def approve_plan(item_id: uuid.UUID, by: str) -> bool:
         st = await _locked_state(conn, item_id)
         if st["plan_approved_at"] and not st["plan_changed"]:
             return False
+        # An agent approving an inbox card would pull an untriaged idea onto the board.
+        if by != events.OWNER and not stages.triaged(st):
+            raise BacklogError("the card is still in the inbox; Pryce must triage it first")
         await _approve(conn, item_id, st, by, replaces_stale=bool(st["plan_approved_at"]))
     return True
 
@@ -144,7 +149,11 @@ async def start(item_id: uuid.UUID, by: str) -> bool:
         if not st["plan_approved_at"]:
             raise BacklogError("the plan is not approved; approve it first")
         if st["plan_changed"]:
-            raise BacklogError("the plan section changed since approval; approve it again")
+            raise BacklogError(
+                "the card's plan or section changed since approval; approve it again"
+            )
+        if st["plan_slug"] and st["plan_state"] in events.CLOSED_PLAN_STATES:
+            raise BacklogError(f"plan {st['plan_slug']} is {st['plan_state']}; nothing to build")
         await _start(conn, item_id, by)
     return True
 
@@ -162,9 +171,7 @@ async def withdraw(item_id: uuid.UUID, by: str, step: str) -> bool:
         if st["started_at"]:
             clear |= {"started_at": None, "started_by": None}
         if step == "approval":
-            clear |= dict.fromkeys(
-                ("plan_approved_at", "plan_approved_by", "plan_approved_version")
-            )
+            clear |= dict.fromkeys(c for c in store.PLAN_STATE_COLUMNS if c.startswith("plan_"))
         await store.set_plan_state(conn, item_id, **clear)
         if "started_at" in clear:
             await events.record(conn, item_id, "start_withdrawn", by, {})
