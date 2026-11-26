@@ -19,7 +19,7 @@ _client: anthropic.AsyncAnthropic | None = None
 # not an enum, but every call site should use one of these so `GET /audit/metrics`'s
 # by_purpose rollup doesn't fragment on a typo. Update this list when adding a call site.
 # chat | synthesis | confirm | title | context_compress | facts | summary
-# | kb_summary | procedure | think
+# | kb_summary | procedure | think | note_file
 
 
 # Tools and the system prompt are identical across a session's messages, which can be minutes
