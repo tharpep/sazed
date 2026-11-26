@@ -32,6 +32,8 @@ class GithubEvent:
     url: str = ""
     path: str | None = None
     line: int | None = None
+    author: str | None = None
+    head_repo: str | None = None
 
     @property
     def thread_key(self) -> str:

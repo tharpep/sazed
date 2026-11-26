@@ -18,7 +18,18 @@ OWNER = "pryce"
 # ASCII only after "agent:", so a lookalike name (Cyrillic, accented, fullwidth) cannot pass.
 ACTOR = r"^(pryce|agent:[a-z0-9][a-z0-9._-]{0,63})$"
 
-KINDS = ("plan_approved", "started", "approval_withdrawn", "start_withdrawn")
+KINDS = (
+    "plan_approved",
+    "started",
+    "approval_withdrawn",
+    "start_withdrawn",
+    "pr_linked",
+    "pr_link_ambiguous",
+)
+
+# Sazed's own writes from a GitHub event. ACTOR cannot match it, so no API caller can claim it
+# (pinned by test_the_server_actor_is_barred_from_the_api).
+SERVER_ACTOR = "sazed:github"
 
 # Start refuses a card whose plan is archived; a draft plan may still be built.
 CLOSED_PLAN_STATES = ("done", "superseded")
@@ -175,8 +186,39 @@ async def record(
     )
 
 
+async def record_ambiguous(
+    db: Db, item_id: uuid.UUID, repo: str, number: int, candidates: list[uuid.UUID]
+) -> bool:
+    """One pr_link_ambiguous row per card and PR, however often the event comes back. The caller
+    holds a transaction; the advisory lock keeps two racing events from both inserting."""
+    await db.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        f"pr_link_ambiguous:{item_id}:{repo.lower()}#{number}",
+    )
+    row = await db.fetchrow(
+        """
+        INSERT INTO card_events (item_id, kind, actor, detail)
+        SELECT $1, 'pr_link_ambiguous', $2, $3::jsonb
+        WHERE NOT EXISTS (
+            SELECT 1 FROM card_events
+            WHERE item_id = $1 AND kind = 'pr_link_ambiguous'
+              AND lower(detail->>'repo') = lower($4) AND detail->>'number' = $5
+        )
+        RETURNING id
+        """,
+        item_id,
+        SERVER_ACTOR,
+        json.dumps(
+            {"repo": repo, "number": number, "candidates": [f"item:{c}" for c in candidates]}
+        ),
+        repo,
+        str(number),
+    )
+    return row is not None
+
+
 async def history(item_id: uuid.UUID) -> list[dict[str, Any]]:
-    """The card's approvals, starts and withdrawals, oldest first."""
+    """The card's approvals, starts, withdrawals and PR links, oldest first."""
     rows = await get_pool().fetch(
         "SELECT at, kind, actor, detail FROM card_events WHERE item_id = $1 ORDER BY at, id",
         item_id,
