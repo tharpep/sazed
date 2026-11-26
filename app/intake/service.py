@@ -81,14 +81,19 @@ async def _act(ev: policy.GithubEvent, action: str, facts: policy.Facts) -> dict
 def _links(ev: policy.GithubEvent) -> bool:
     if ev.event != "pull_request" or not ev.is_pr:
         return False
-    if policy.sender_kind("github", ev.sender) not in LINKING_SENDERS:
+    # Pryce merging or editing a stranger's fork PR must not link the cards it names, so the
+    # author and the head repo are checked too, and a missing field links nothing.
+    if not (ev.author and ev.head_repo) or ev.head_repo.lower() != ev.repo.lower():
+        return False
+    kinds = {policy.sender_kind("github", ev.sender), policy.sender_kind("github", ev.author)}
+    if not kinds <= set(LINKING_SENDERS):
         return False
     return ev.action in LINKING_ACTIONS or (ev.action == "closed" and ev.merged)
 
 
 async def _auto_link(ev: policy.GithubEvent) -> autolink.Outcome:
     """Link the PR to the cards it names, writing one history row per link or ambiguous card.
-    A PR that names nothing costs no query at all."""
+    A PR with no `Card:` line and an unmatchable branch makes no query."""
     refs = autolink.card_refs(ev.body)
     short_id = autolink.branch_id(ev.branch)
     branch = autolink.matchable_branch(ev.branch)

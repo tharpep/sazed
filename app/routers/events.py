@@ -23,6 +23,8 @@ class GithubEventIn(BaseModel):
     url: str = Field("", max_length=500)
     path: str | None = Field(None, max_length=500)
     line: int | None = None
+    author: str | None = Field(None, max_length=100)
+    head_repo: str | None = Field(None, max_length=200)
 
 
 @router.post("/github")

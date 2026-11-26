@@ -178,10 +178,17 @@ def _card(id_=A, status="new", branch=None, repos=("tharpep/sazed",), pr_repo=No
     }  # fmt: skip
 
 
-def _pr(action="opened", sender="tharpep", branch="feature/other", body="", merged=False):
+_SAME = object()
+
+
+def _pr(
+    action="opened", sender="tharpep", branch="feature/other", body="", merged=False,
+    author=_SAME, head_repo="tharpep/sazed",
+):  # fmt: skip
     return GithubEvent(
         event="pull_request", action=action, repo="tharpep/sazed", number=12, is_pr=True,
         sender=sender, title="Ünïcode title", body=body, branch=branch, merged=merged,
+        author=sender if author is _SAME else author, head_repo=head_repo,
     )  # fmt: skip
 
 
@@ -339,3 +346,37 @@ async def test_s10_only_pryce_and_the_own_bot_link(board_env, sender, links):
         await service.route_github(_pr(sender=sender, branch="feature/x"))
     assert (board.cards[A]["pr_number"] == 12) is links
     assert len(_linked(board)) == int(links)
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"author": "stranger", "head_repo": "stranger/sazed"},
+        {"author": "stranger"},
+        {"head_repo": "stranger/sazed"},
+        {"author": None},
+        {"head_repo": None},
+    ],
+)
+async def test_a_fork_or_strangers_pr_merged_by_pryce_links_and_closes_nothing(board_env, kw):
+    body = f"Card: item:{A}"
+    with board_env(FakeBoard(_card(branch="feature/x"))) as board:
+        await service.route_github(_pr(action="edited", branch="feature/x", body=body, **kw))
+        await service.route_github(
+            _pr(action="closed", branch="feature/x", body=body, merged=True, **kw)
+        )
+    assert board.events == []
+    assert (board.cards[A]["status"], board.cards[A]["pr_number"]) == ("new", None)
+
+
+async def test_an_own_repo_pr_by_pryce_links(board_env):
+    with board_env(FakeBoard(_card())) as board:
+        await service.route_github(_pr(body=f"Card: item:{A}", head_repo="THARPEP/sazed"))
+    assert board.cards[A]["pr_number"] == 12
+
+
+async def test_a_hand_linked_card_still_closes_without_author_fields(board_env):
+    linked = _card(pr_repo="tharpep/sazed", pr_number=12)
+    with board_env(FakeBoard(linked)) as board:
+        await service.route_github(_pr(action="closed", merged=True, author=None, head_repo=None))
+    assert board.cards[A]["status"] == "done" and board.events == []
