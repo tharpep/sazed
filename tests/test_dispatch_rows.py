@@ -22,11 +22,11 @@ PLAN = {
 }
 
 
-def _row(task, state, age_s, line=""):
+def _row(task, state, age_s, line="", now=NOW):
     return {
         "plan": "ui-pass",
         "task": task,
-        "ts": (NOW - timedelta(seconds=age_s)).timestamp(),
+        "ts": (now - timedelta(seconds=age_s)).timestamp(),
         "state": state,
         "line": line,
         "ref": None,
@@ -116,7 +116,8 @@ async def _summary_with(monkeypatch, rows, steps=(), beats=None):
 
 
 async def test_home_summary_lists_running_and_waiting_dispatch_tasks(monkeypatch):
-    rows = [_row("api", "running", 90, "editing"), _row("ui", "waiting", 600, "Which colour?")]
+    started = _row("api", "running", 90, "editing", now=datetime.now(UTC))
+    rows = [started, _row("ui", "waiting", 600, "Which colour?")]
     result = await _summary_with(monkeypatch, rows)
     [running] = result["working"]
     assert (running["kind"], running["plan"], running["task"]) == ("dispatch", "ui-pass", "api")
